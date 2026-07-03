@@ -75,8 +75,14 @@ impl StateAggregator {
         }
     }
 
-    /// Override the durable consumer name (tests must not share the live
-    /// gateway's consumer, or messages get load-balanced away).
+    /// Override the durable consumer name.
+    ///
+    /// JetStream load-balances a shared durable across its subscribers
+    /// (queue-group semantics): two aggregators on the same name each see
+    /// only a SUBSET of the state batches — a silently fragmented world.
+    /// Tests must therefore never share the live gateway's consumer, and
+    /// Phase D multi-gateway MUST derive a unique durable per instance
+    /// (every gateway needs the full stream, HA is not work-sharing here).
     pub fn with_consumer_name(mut self, name: impl Into<String>) -> Self {
         self.consumer_name = name.into();
         self
