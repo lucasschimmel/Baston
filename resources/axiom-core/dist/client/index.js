@@ -28,6 +28,10 @@ onNet('axiom:core:spawnCharacter', async (opts) => {
     return;
   }
   SetPlayerModel(PlayerId(), model);
+  // A freemode ped spawns with NO clothing components → invisible body.
+  // Apply the default variation so the character is actually rendered.
+  SetPedDefaultComponentVariation(PlayerPedId());
+  SetModelAsNoLongerNeeded(model);
   SetEntityCoords(PlayerPedId(), opts.x, opts.y, opts.z, false, false, false, false);
   SetEntityHeading(PlayerPedId(), opts.heading);
   FreezeEntityPosition(PlayerPedId(), false);
