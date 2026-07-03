@@ -7,6 +7,7 @@
 //! name) followed by the payload (`GameServer::ProcessPacket`).
 
 pub mod handshake;
+pub mod state;
 pub mod time_sync;
 
 /// Jenkins one-at-a-time — FiveM's `HashRageString` (case-sensitive).

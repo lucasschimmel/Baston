@@ -16,12 +16,14 @@ use std::time::Instant;
 
 use baston_protocol::events;
 use baston_protocol::native::NATIVE_RESULT_EVENT;
+use baston_protocol::udp::state::{self as state_msg, MSG_BASTON_STATE, STATE_UPDATE_EVENT};
 use baston_protocol::udp::{
     handshake, host, read_message_type, time_sync, MSG_CONNECT, MSG_I_HOST, MSG_I_QUIT,
     MSG_SERVER_EVENT, MSG_TIME_SYNC_REQ,
 };
 use baston_protocol::PlayerDirectory;
 use baston_scripting::{NetOutbound, ScriptHost};
+use baston_zone::StateIngest;
 use rusty_enet as enet;
 use tokio::sync::mpsc;
 
@@ -88,6 +90,8 @@ struct UdpServer {
     /// Non-OneSync session host: (netId, baseNum). The first client to send
     /// `msgIHost` becomes host (`IHostPacketHandler.h`).
     session_host: Option<(u32, u32)>,
+    /// Phase C: validated client-state ingestion (None before wiring).
+    state_ingest: Option<Arc<StateIngest>>,
 }
 
 /// Spawn the UDP/ENet server task. Returns a handle for outbound sends.
@@ -104,6 +108,7 @@ pub fn spawn(
         max_players,
         players,
         script_host,
+        None,
         None,
     )
 }
@@ -123,6 +128,7 @@ pub fn spawn_with_net(
     players: Arc<PlayerDirectory>,
     script_host: ScriptHost,
     net_rx: Option<mpsc::UnboundedReceiver<NetOutbound>>,
+    state_ingest: Option<Arc<StateIngest>>,
 ) -> Result<UdpHandle, UdpError> {
     let socket =
         UdpSocket::bind(("0.0.0.0", port)).map_err(|source| UdpError::Bind { port, source })?;
@@ -155,6 +161,7 @@ pub fn spawn_with_net(
         peer_sources: HashMap::new(),
         source_peers: HashMap::new(),
         session_host: None,
+        state_ingest,
     };
     tokio::spawn(run(server, cmd_rx, net_rx, poll_interval_ms));
     Ok(UdpHandle { cmd_tx })
@@ -277,6 +284,7 @@ impl UdpServer {
             MSG_CONNECT => self.on_handshake(peer_id, payload),
             MSG_TIME_SYNC_REQ => self.on_time_sync(peer_id, payload),
             MSG_SERVER_EVENT => self.on_server_event(peer_id, payload).await,
+            MSG_BASTON_STATE => self.on_state_update(peer_id, payload),
             MSG_I_HOST => self.on_i_host(peer_id, payload),
             MSG_I_QUIT => {
                 self.host.peer_mut(peer_id).disconnect(0);
@@ -381,6 +389,23 @@ impl UdpServer {
                 tracing::error!(target: "udp", error = %e, "playerJoining dispatch failed");
             }
         });
+    }
+
+    /// `msgBastonState` (loadtest / binary path): validated state ingestion.
+    fn on_state_update(&mut self, peer_id: enet::PeerID, payload: &[u8]) {
+        let Some(&source) = self.peer_sources.get(&peer_id) else {
+            return;
+        };
+        let Some(ingest) = &self.state_ingest else {
+            tracing::debug!(target: "udp", source, "state update ignored: no ingest wired");
+            return;
+        };
+        let Some(update) = state_msg::parse_state_update(payload) else {
+            tracing::debug!(target: "udp", source, "malformed msgBastonState ignored");
+            return;
+        };
+        // Rejections are logged/counted inside StateIngest.
+        let _ = ingest.apply(source, update);
     }
 
     fn on_time_sync(&mut self, peer_id: enet::PeerID, payload: &[u8]) {
@@ -488,6 +513,18 @@ impl UdpServer {
             return;
         }
 
+        // Client shim reporting its ped state: same validated path as the
+        // binary packet, no script-runtime dispatch.
+        if event.name == STATE_UPDATE_EVENT {
+            if let (Some(ingest), Some(update)) = (
+                &self.state_ingest,
+                state_msg::client_state_update_from_json(&args),
+            ) {
+                let _ = ingest.apply(source, update);
+            }
+            return;
+        }
+
         // Dispatch detached: a handler may itself await a native-call round
         // trip that only THIS task can resolve — blocking here would deadlock.
         let script_host = self.script_host.clone();
@@ -508,6 +545,9 @@ impl UdpServer {
         if self.session_host.is_some_and(|(id, _)| id == source) {
             self.session_host = None;
             self.broadcast_host(0xFFFF, 0);
+        }
+        if let Some(ingest) = &self.state_ingest {
+            ingest.on_player_dropped(source);
         }
         let name = self
             .players

@@ -24,6 +24,7 @@ base64 = { workspace = true }
 hex = { workspace = true }
 rusty_enet = { workspace = true }
 rmp-serde = { workspace = true }
+async-nats = { workspace = true }
 baston-config = { workspace = true }
 baston-protocol = { workspace = true }
 baston-scripting = { workspace = true }

@@ -42,16 +42,45 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    // Phase C: entity state pipeline (Zone side, in-process until Phase D).
+    let entity_manager = Arc::new(baston_zone::EntityManager::new());
+    let state_ingest = Arc::new(baston_zone::StateIngest::new(
+        Arc::clone(&entity_manager),
+        config.state_sync.max_speed_mps,
+    ));
+    let nats = match async_nats::connect(&config.nats.url).await {
+        Ok(client) => {
+            baston_zone::state_sync::setup_nats_stream(&client).await?;
+            let emitter = baston_zone::StateSyncEmitter::new(
+                config.nats.zone_id.clone(),
+                client.clone(),
+                Arc::clone(&entity_manager),
+                config.state_sync.sync_interval_ms,
+            );
+            tokio::spawn(emitter.run());
+            Some(client)
+        }
+        // The zone must boot without NATS (dev without docker) — but state
+        // sync between players is then disabled.
+        Err(e) => {
+            tracing::error!(target: "nats", url = %config.nats.url, error = %e,
+                "NATS unreachable — Phase C state sync DISABLED");
+            None
+        }
+    };
+
     let port = config.server.port;
     let udp_port = config.udp.port.unwrap_or(port);
-    let _udp = baston_gateway::udp::spawn_with_net(
+    let udp = baston_gateway::udp::spawn_with_net(
         udp_port,
         config.udp.poll_interval_ms,
         config.server.max_players,
         Arc::clone(&players),
         script_host.clone(),
         Some(net_rx),
+        Some(Arc::clone(&state_ingest)),
     )?;
+    let _ = (&nats, &udp); // aggregator wiring lands in jalon C3
 
     let auth = AuthService::new(&config.auth)?;
     let state = Arc::new(AppState {

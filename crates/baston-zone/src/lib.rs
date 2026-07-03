@@ -4,8 +4,12 @@
 pub mod entity_manager;
 pub mod packfile;
 pub mod resource_loader;
+pub mod state_ingest;
+pub mod state_sync;
 
 pub use entity_manager::EntityManager;
+pub use state_ingest::StateIngest;
+pub use state_sync::StateSyncEmitter;
 
 use std::path::PathBuf;
 
@@ -42,4 +46,6 @@ pub enum ZoneError {
     Scripting(#[from] baston_scripting::ScriptError),
     #[error("file watcher error: {0}")]
     Watcher(String),
+    #[error("NATS error: {0}")]
+    Nats(String),
 }

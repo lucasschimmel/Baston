@@ -177,6 +177,7 @@ name = "baston-gateway"
 version = "0.1.0-alpha"
 dependencies = [
  "anyhow",
+ "async-nats",
  "axum",
  "base64",
  "baston-config",
