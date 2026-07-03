@@ -31,6 +31,15 @@ onNet('axiom:core:spawnCharacter', async (opts) => {
   SetEntityCoords(PlayerPedId(), opts.x, opts.y, opts.z, false, false, false, false);
   SetEntityHeading(PlayerPedId(), opts.heading);
   FreezeEntityPosition(PlayerPedId(), false);
+
+  // Dismiss the loading screen. Without spawnmanager/sessionmanager, nothing
+  // else calls this, so the client hangs on "Awaiting scripts…" even though
+  // the ped spawned. Fade in so the player actually sees the world.
+  ShutdownLoadingScreen();
+  ShutdownLoadingScreenNui();
+  DoScreenFadeIn(500);
+  SetPlayerControl(PlayerId(), true, 0);
+
   TriggerEvent('axiom:core:onCharacterSpawned');
   // Let the server log the exit-criterion line.
   emitNet('axiom:core:onCharacterSpawned');
