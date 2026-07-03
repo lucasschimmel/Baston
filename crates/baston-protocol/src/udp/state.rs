@@ -55,7 +55,7 @@ pub fn client_state_update_from_json(args: &serde_json::Value) -> Option<ClientS
         model_hash: obj.get("model")?.as_u64()? as u32,
         coords: vec3(obj.get("coords")?)?,
         heading: obj.get("heading")?.as_f64()? as f32,
-        velocity: obj.get("velocity").and_then(|v| vec3(v)).unwrap_or([0.0; 3]),
+        velocity: obj.get("velocity").and_then(&vec3).unwrap_or([0.0; 3]),
         health: obj.get("health").and_then(|v| v.as_f64()).unwrap_or(100.0) as f32,
         armour: obj.get("armour").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
         extra: None,
