@@ -1,4 +1,8 @@
-//! HTTP gateway: axum server + player registry (Phase A stub — filled in at milestones A4/A5).
+//! HTTP gateway: axum server, player registry, and the Phase A
+//! `playerConnecting` connection pipeline.
 
-/// Placeholder so the workspace compiles at milestone A1.
-pub fn placeholder() {}
+pub mod http;
+pub mod players;
+
+pub use http::{router, AppState};
+pub use players::PlayerRegistry;

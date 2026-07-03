@@ -21,7 +21,10 @@ pub enum ZoneError {
         source: serde_json::Error,
     },
     #[error("resource {resource} depends on unknown resource {dependency}")]
-    UnknownDependency { resource: String, dependency: String },
+    UnknownDependency {
+        resource: String,
+        dependency: String,
+    },
     #[error("cyclic resource dependency involving: {0:?}")]
     CyclicDependency(Vec<String>),
     #[error("unknown resource {0}")]

@@ -82,7 +82,12 @@ async fn starts_in_dependency_order() {
     // "second" depends on "first"; ordering is observable through the shared
     // start log both scripts append to via globalThis (per-isolate, so we
     // just assert both start without error — topo unit tests cover ordering).
-    write_resource(dir.path(), "second", &["first"], "console.log('[second] up')");
+    write_resource(
+        dir.path(),
+        "second",
+        &["first"],
+        "console.log('[second] up')",
+    );
     write_resource(dir.path(), "first", &[], "console.log('[first] up')");
 
     let manager = manager(dir.path());

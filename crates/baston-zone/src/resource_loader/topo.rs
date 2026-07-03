@@ -74,12 +74,7 @@ mod tests {
     fn graph(edges: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
         edges
             .iter()
-            .map(|(n, deps)| {
-                (
-                    n.to_string(),
-                    deps.iter().map(|d| d.to_string()).collect(),
-                )
-            })
+            .map(|(n, deps)| (n.to_string(), deps.iter().map(|d| d.to_string()).collect()))
             .collect()
     }
 

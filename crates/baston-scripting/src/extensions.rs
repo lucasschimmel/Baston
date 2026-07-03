@@ -63,7 +63,10 @@ fn op_trigger_event(state: &mut OpState, #[string] event: String, #[string] args
         .push_back((event, args_json));
 }
 
-deno_core::extension!(baston_events, ops = [op_add_event_handler, op_trigger_event]);
+deno_core::extension!(
+    baston_events,
+    ops = [op_add_event_handler, op_trigger_event]
+);
 
 // --- 3. exports ---
 
@@ -137,7 +140,11 @@ fn op_deferral_update(state: &mut OpState, source: u32, #[string] message: Strin
 
 #[op2(fast)]
 fn op_deferral_done(state: &mut OpState, source: u32, #[string] reason: String) {
-    let reason = if reason.is_empty() { None } else { Some(reason) };
+    let reason = if reason.is_empty() {
+        None
+    } else {
+        Some(reason)
+    };
     state.borrow::<SharedDeferrals>().0.done(source, reason);
 }
 

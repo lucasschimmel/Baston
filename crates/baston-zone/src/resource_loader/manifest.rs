@@ -43,13 +43,14 @@ pub async fn discover(resources_dir: &Path) -> Result<Vec<DiscoveredResource>, Z
             })?;
 
     let mut found = Vec::new();
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|source| ZoneError::ManifestRead {
-            path: resources_dir.to_owned(),
-            source,
-        })?
+    while let Some(entry) =
+        entries
+            .next_entry()
+            .await
+            .map_err(|source| ZoneError::ManifestRead {
+                path: resources_dir.to_owned(),
+                source,
+            })?
     {
         let root = entry.path();
         if !root.is_dir() || !root.join("manifest.json").is_file() {

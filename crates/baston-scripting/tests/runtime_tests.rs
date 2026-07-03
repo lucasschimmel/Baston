@@ -48,7 +48,9 @@ async fn exit_criterion_script_runs() {
     .expect("load");
 
     let rx = deferrals.register(1);
-    host.fire_player_connecting(1, "TestPlayer").await.expect("fire");
+    host.fire_player_connecting(1, "TestPlayer")
+        .await
+        .expect("fire");
     let outcome = tokio::time::timeout(Duration::from_secs(5), rx)
         .await
         .expect("deferral timed out")
@@ -76,7 +78,9 @@ async fn deferral_rejection_propagates_reason() {
     .expect("load");
 
     let rx = deferrals.register(7);
-    host.fire_player_connecting(7, "Intruder").await.expect("fire");
+    host.fire_player_connecting(7, "Intruder")
+        .await
+        .expect("fire");
     let outcome = tokio::time::timeout(Duration::from_secs(5), rx)
         .await
         .expect("deferral timed out")
@@ -91,14 +95,18 @@ async fn no_defer_auto_accepts() {
         "passive",
         vec![ScriptSource {
             path: "server.js".into(),
-            code: "AddEventHandler('playerConnecting', (name) => { console.log('seen ' + name); });".into(),
+            code:
+                "AddEventHandler('playerConnecting', (name) => { console.log('seen ' + name); });"
+                    .into(),
         }],
     )
     .await
     .expect("load");
 
     let rx = deferrals.register(9);
-    host.fire_player_connecting(9, "Walkthrough").await.expect("fire");
+    host.fire_player_connecting(9, "Walkthrough")
+        .await
+        .expect("fire");
     let outcome = tokio::time::timeout(Duration::from_secs(5), rx)
         .await
         .expect("deferral timed out")

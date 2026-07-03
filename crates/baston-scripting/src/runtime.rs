@@ -82,7 +82,11 @@ impl ScriptRuntime {
     }
 
     /// Dispatch an event into this isolate's JS handler registry.
-    pub async fn dispatch_event(&mut self, event: &str, args_json: &str) -> Result<(), ScriptError> {
+    pub async fn dispatch_event(
+        &mut self,
+        event: &str,
+        args_json: &str,
+    ) -> Result<(), ScriptError> {
         let code = format!(
             "globalThis.__baston.dispatch({}, {});",
             serde_json::to_string(event).unwrap_or_else(|_| "\"\"".into()),

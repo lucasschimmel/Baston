@@ -208,10 +208,16 @@ impl ResourceManager {
     /// Map an absolute file path back to the resource that owns it (used by
     /// the hot-reload watcher).
     pub async fn resource_for_path(&self, path: &Path) -> Option<String> {
+        // Watcher events carry absolute paths while roots may be relative
+        // (and Windows canonicalize adds a \\?\ prefix) — canonicalize both
+        // sides so the prefix comparison is meaningful.
+        let path = std::fs::canonicalize(path).ok()?;
         let resources = self.resources.lock().await;
         resources
             .iter()
-            .find(|(_, e)| path.starts_with(&e.discovered.root))
+            .find(|(_, e)| {
+                std::fs::canonicalize(&e.discovered.root).is_ok_and(|root| path.starts_with(root))
+            })
             .map(|(n, _)| n.clone())
     }
 }

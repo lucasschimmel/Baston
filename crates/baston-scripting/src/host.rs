@@ -140,8 +140,8 @@ impl ScriptHost {
         event: &str,
         args: &[serde_json::Value],
     ) -> Result<(), ScriptError> {
-        let args_json = serde_json::to_string(args)
-            .map_err(|e| ScriptError::HostStart(e.to_string()))?;
+        let args_json =
+            serde_json::to_string(args).map_err(|e| ScriptError::HostStart(e.to_string()))?;
         self.broadcast_chain(event.to_owned(), args_json).await;
         Ok(())
     }
@@ -259,15 +259,15 @@ fn spawn_runtime_thread(
                         RuntimeCommand::ExecuteScripts { scripts, reply } => {
                             let mut result = Ok(());
                             for script in scripts {
-                                if let Err(e) =
-                                    runtime.execute_resource_script(&script.path, script.code).await
+                                if let Err(e) = runtime
+                                    .execute_resource_script(&script.path, script.code)
+                                    .await
                                 {
                                     result = Err(e);
                                     break;
                                 }
                             }
-                            let _ = reply
-                                .send(result.map(|()| runtime.drain_queued_events()));
+                            let _ = reply.send(result.map(|()| runtime.drain_queued_events()));
                         }
                         RuntimeCommand::DispatchEvent {
                             event,
@@ -275,18 +275,17 @@ fn spawn_runtime_thread(
                             reply,
                         } => {
                             let result = runtime.dispatch_event(&event, &args_json).await;
-                            let _ = reply
-                                .send(result.map(|()| runtime.drain_queued_events()));
+                            let _ = reply.send(result.map(|()| runtime.drain_queued_events()));
                         }
                         RuntimeCommand::DispatchPlayerConnecting {
                             source,
                             player_name,
                             reply,
                         } => {
-                            let result =
-                                runtime.dispatch_player_connecting(source, &player_name).await;
-                            let _ = reply
-                                .send(result.map(|()| runtime.drain_queued_events()));
+                            let result = runtime
+                                .dispatch_player_connecting(source, &player_name)
+                                .await;
+                            let _ = reply.send(result.map(|()| runtime.drain_queued_events()));
                         }
                     }
                 }
@@ -294,9 +293,7 @@ fn spawn_runtime_thread(
         })
         .map_err(|e| ScriptError::HostStart(e.to_string()))?;
 
-    init_rx
-        .recv()
-        .map_err(|_| ScriptError::HostGone)??;
+    init_rx.recv().map_err(|_| ScriptError::HostGone)??;
 
     Ok(ResourceRuntimeHandle { tx })
 }
