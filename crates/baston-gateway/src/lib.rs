@@ -6,6 +6,7 @@ pub mod auth;
 pub mod connection_router;
 pub mod http;
 pub mod mesh;
+pub mod mesh_forward;
 pub mod players;
 pub mod quadtree;
 pub mod state_aggregator;

@@ -117,13 +117,17 @@ async fn main() -> anyhow::Result<()> {
     let nats = match async_nats::connect(&config.nats.url).await {
         Ok(client) => {
             baston_zone::state_sync::setup_nats_stream(&client).await?;
-            let emitter = baston_zone::StateSyncEmitter::new(
-                config.nats.zone_id.clone(),
-                client.clone(),
-                Arc::clone(&entity_manager),
-                config.state_sync.sync_interval_ms,
-            );
-            tokio::spawn(emitter.run());
+            // Mesh mode: the zone processes emit state; the gateway would
+            // duplicate every entity on NATS if it also ran an emitter.
+            if !config.meshing.enabled {
+                let emitter = baston_zone::StateSyncEmitter::new(
+                    config.nats.zone_id.clone(),
+                    client.clone(),
+                    Arc::clone(&entity_manager),
+                    config.state_sync.sync_interval_ms,
+                );
+                tokio::spawn(emitter.run());
+            }
             Some(client)
         }
         // The zone must boot without NATS (dev without docker) — but state
@@ -136,49 +140,27 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Jalon C5: dynamic network ownership with scripted notification.
-    let owner_event_host = script_host.clone();
-    let ownership = baston_zone::OwnershipMonitor::new(
-        Arc::clone(&entity_manager),
-        Arc::clone(&state_ingest),
-        config.state_sync.ownership_interval_secs,
-        Some(Arc::new(move |entity_id, new_owner| {
-            let host = owner_event_host.clone();
-            tokio::spawn(async move {
-                let args = [
-                    serde_json::json!(entity_id.to_string()),
-                    serde_json::json!(new_owner),
-                ];
-                if let Err(e) = host.trigger_event("onEntityOwnerChanged", &args).await {
-                    tracing::warn!(target: "zone", error = %e, "onEntityOwnerChanged dispatch failed");
-                }
-            });
-        })),
-    );
-    tokio::spawn(ownership.run());
-
-    let port = config.server.port;
-    let udp_port = config.udp.port.unwrap_or(port);
-    let udp = baston_gateway::udp::spawn_with_net(
-        udp_port,
-        config.udp.poll_interval_ms,
-        config.server.max_players,
-        Arc::clone(&players),
-        script_host.clone(),
-        Some(net_rx),
-        Some(Arc::clone(&state_ingest)),
-    )?;
-
-    // Jalon C3: NATS → per-client AoI-filtered snapshots.
-    if let Some(nats) = nats {
-        baston_gateway::StateAggregator::new(
-            nats,
-            Arc::clone(&players),
+    // Mesh mode: ownership is a zone-process concern.
+    if !config.meshing.enabled {
+        let owner_event_host = script_host.clone();
+        let ownership = baston_zone::OwnershipMonitor::new(
+            Arc::clone(&entity_manager),
             Arc::clone(&state_ingest),
-            udp.clone(),
-            config.state_sync.aoi_radius,
-            config.state_sync.push_interval_ms,
-        )
-        .spawn();
+            config.state_sync.ownership_interval_secs,
+            Some(Arc::new(move |entity_id, new_owner| {
+                let host = owner_event_host.clone();
+                tokio::spawn(async move {
+                    let args = [
+                        serde_json::json!(entity_id.to_string()),
+                        serde_json::json!(new_owner),
+                    ];
+                    if let Err(e) = host.trigger_event("onEntityOwnerChanged", &args).await {
+                        tracing::warn!(target: "zone", error = %e, "onEntityOwnerChanged dispatch failed");
+                    }
+                });
+            })),
+        );
+        tokio::spawn(ownership.run());
     }
 
     // Phase D: zone federation (gRPC registry + routing). Disabled by default;
@@ -188,7 +170,7 @@ async fn main() -> anyhow::Result<()> {
             std::time::Duration::from_secs(config.meshing.zone_timeout_secs),
         ));
         let router = Arc::new(baston_gateway::ConnectionRouter::new());
-        let mesh = baston_gateway::GatewayMesh::new(Arc::clone(&registry), router);
+        let mesh = baston_gateway::GatewayMesh::new(Arc::clone(&registry), Arc::clone(&router));
         let grpc_addr: std::net::SocketAddr = config.meshing.gateway_grpc_addr.parse()?;
         mesh.spawn_grpc_server(grpc_addr);
         // Zone failure recovery is completed in jalon D6; eviction + logging
@@ -206,10 +188,130 @@ async fn main() -> anyhow::Result<()> {
             },
             config.meshing.admin_port,
         );
+        // Zone-resolution request/reply for entity handoffs (D4).
+        if let Some(nats) = nats.clone() {
+            let registry = Arc::clone(&registry);
+            tokio::spawn(async move {
+                use futures::StreamExt;
+                let mut sub = match nats
+                    .subscribe(baston_zone::boundary_loop::RESOLVE_ZONE_SUBJECT)
+                    .await
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!(target: "gateway", error = %e,
+                            "resolve_zone subscription failed");
+                        return;
+                    }
+                };
+                while let Some(msg) = sub.next().await {
+                    let Some(reply) = msg.reply else { continue };
+                    let text = String::from_utf8_lossy(&msg.payload);
+                    let zone = match text.split_once(',') {
+                        Some((x, y)) => match (x.trim().parse::<f32>(), y.trim().parse::<f32>()) {
+                            (Ok(x), Ok(y)) => {
+                                registry.find_zone_for_coords(x, y).await.unwrap_or_default()
+                            }
+                            _ => String::new(),
+                        },
+                        None => String::new(),
+                    };
+                    let _ = nats.publish(reply, zone.into()).await;
+                }
+            });
+        }
         Some(mesh)
     } else {
         None
     };
+
+    // D4: forward client state updates to the player's current zone, with a
+    // 50ms hold around handoff commits (no packet lost mid-switch).
+    let mesh_forward = match (&mesh, nats.clone()) {
+        (Some(mesh), Some(nats_client)) => {
+            let fwd = baston_gateway::mesh_forward::MeshForwarder::spawn(
+                nats_client,
+                Arc::clone(&mesh.router),
+            );
+            let hook_fwd = fwd.clone();
+            mesh.set_handoff_committed_hook(Arc::new(move |source, from, to| {
+                tracing::info!(target: "gateway",
+                    "handoff committed: player={source} {from}→{to} — buffering UDP 50ms");
+                hook_fwd.begin_handoff_hold(source);
+            }));
+            Some(fwd)
+        }
+        _ => None,
+    };
+
+    let port = config.server.port;
+    let udp_port = config.udp.port.unwrap_or(port);
+    let udp = baston_gateway::udp::spawn_with_mesh(
+        udp_port,
+        config.udp.poll_interval_ms,
+        config.server.max_players,
+        Arc::clone(&players),
+        script_host.clone(),
+        Some(net_rx),
+        Some(Arc::clone(&state_ingest)),
+        mesh_forward,
+    )?;
+
+    // D4/D5: relay zone-emitted client events (TriggerClientEvent from a zone
+    // process) to the right UDP peer.
+    if config.meshing.enabled {
+        if let Some(nats) = nats.clone() {
+            let udp = udp.clone();
+            tokio::spawn(async move {
+                use futures::StreamExt;
+                let mut sub = match nats
+                    .subscribe(baston_gateway::mesh_forward::outbound_subject_wildcard())
+                    .await
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!(target: "gateway", error = %e,
+                            "zone outbound subscription failed");
+                        return;
+                    }
+                };
+                while let Some(msg) = sub.next().await {
+                    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&msg.payload) else {
+                        continue;
+                    };
+                    let (Some(source), Some(event), Some(args_json)) = (
+                        v["source"].as_u64(),
+                        v["event"].as_str(),
+                        v["args"].as_str(),
+                    ) else {
+                        continue;
+                    };
+                    match baston_protocol::events::json_args_to_msgpack(args_json) {
+                        Ok(args) => {
+                            let packet =
+                                baston_protocol::events::build_net_event(event, &args);
+                            udp.send_to_source(source as u32, 0, packet, true);
+                        }
+                        Err(e) => tracing::error!(target: "gateway", error = %e,
+                            "zone outbound event encode failed"),
+                    }
+                }
+            });
+        }
+    }
+
+    // Jalon C3: NATS → per-client AoI-filtered snapshots.
+    if let Some(nats) = nats {
+        baston_gateway::StateAggregator::new(
+            nats,
+            Arc::clone(&players),
+            Arc::clone(&state_ingest),
+            udp.clone(),
+            config.state_sync.aoi_radius,
+            config.state_sync.push_interval_ms,
+        )
+        .spawn();
+    }
 
     let auth = AuthService::new(&config.auth)?;
     let state = Arc::new(AppState {

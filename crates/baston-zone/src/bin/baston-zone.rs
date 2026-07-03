@@ -117,6 +117,47 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Ingest forwarded client state updates from the Gateway
+    // (baston.zone.{zone_id}.ingest — the D4 UDP rerouting path).
+    {
+        let nats = nats.clone();
+        let ingest = Arc::clone(&state_ingest);
+        let subject = format!("baston.zone.{zone_id}.ingest");
+        tokio::spawn(async move {
+            use futures::StreamExt;
+            let mut sub = match nats.subscribe(subject.clone()).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(target: "zone", error = %e, "ingest subscription failed");
+                    return;
+                }
+            };
+            tracing::info!(target: "zone", %subject, "gateway ingest consumer running");
+            while let Some(msg) = sub.next().await {
+                match bincode::serde::decode_from_slice::<
+                    (u32, baston_protocol::udp::state::ClientStateUpdate),
+                    _,
+                >(&msg.payload, bincode::config::standard())
+                {
+                    Ok(((source, update), _)) => {
+                        // Rejections logged/counted inside StateIngest.
+                        let _ = ingest.apply(source, update);
+                    }
+                    Err(e) => {
+                        tracing::error!(target: "zone", error = %e, "malformed ingest payload");
+                    }
+                }
+            }
+        });
+    }
+
+    // Inbound ownerless-entity handoffs from sibling zones.
+    baston_zone::boundary_loop::BoundaryLoop::spawn_entity_handoff_consumer(
+        nats.clone(),
+        zone_id.clone(),
+        Arc::clone(&entity_manager),
+    );
+
     // ── Ownership monitor (C5) ──
     let owner_event_host = script_host.clone();
     let ownership = baston_zone::OwnershipMonitor::new(
@@ -247,6 +288,7 @@ async fn main() -> anyhow::Result<()> {
             cleanup_ingest.on_player_dropped(source);
             cleanup_players.remove(source);
         }),
+        nats: Some(nats.clone()),
     }
     .spawn();
 

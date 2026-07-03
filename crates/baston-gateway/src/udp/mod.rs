@@ -99,6 +99,8 @@ struct UdpServer {
     session_host: Option<(u32, u32)>,
     /// Phase C: validated client-state ingestion (None before wiring).
     state_ingest: Option<Arc<StateIngest>>,
+    /// Phase D: forward client state to the player's current zone process.
+    mesh_forward: Option<crate::mesh_forward::MeshForwarder>,
 }
 
 /// Spawn the UDP/ENet server task. Returns a handle for outbound sends.
@@ -137,6 +139,21 @@ pub fn spawn_with_net(
     net_rx: Option<mpsc::UnboundedReceiver<NetOutbound>>,
     state_ingest: Option<Arc<StateIngest>>,
 ) -> Result<UdpHandle, UdpError> {
+    spawn_with_mesh(port, poll_interval_ms, max_players, players, script_host, net_rx, state_ingest, None)
+}
+
+/// Full-fat spawn: net bridge + local ingest + Phase D mesh forwarder.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_with_mesh(
+    port: u16,
+    poll_interval_ms: u64,
+    max_players: u32,
+    players: Arc<PlayerDirectory>,
+    script_host: ScriptHost,
+    net_rx: Option<mpsc::UnboundedReceiver<NetOutbound>>,
+    state_ingest: Option<Arc<StateIngest>>,
+    mesh_forward: Option<crate::mesh_forward::MeshForwarder>,
+) -> Result<UdpHandle, UdpError> {
     let socket =
         UdpSocket::bind(("0.0.0.0", port)).map_err(|source| UdpError::Bind { port, source })?;
     let socket = OobSocket::new(
@@ -169,6 +186,7 @@ pub fn spawn_with_net(
         source_peers: HashMap::new(),
         session_host: None,
         state_ingest,
+        mesh_forward,
     };
     tokio::spawn(run(server, cmd_rx, net_rx, poll_interval_ms));
     Ok(UdpHandle { cmd_tx })
@@ -446,6 +464,12 @@ impl UdpServer {
         // The binary path identifies a BASTON-native client: it consumes
         // entity snapshots instead of msgRoute P2P sync.
         ingest.mark_snapshot_subscriber(source);
+        // Phase D: the authoritative copy lives in the zone process — forward
+        // over NATS (routing-table lookup + 50ms handoff hold). The local
+        // apply below only feeds the gateway's AoI bookkeeping.
+        if let Some(fwd) = &self.mesh_forward {
+            fwd.forward(source, update.clone());
+        }
         // Rejections are logged/counted inside StateIngest.
         let _ = ingest.apply(source, update);
     }
@@ -577,6 +601,9 @@ impl UdpServer {
                 &self.state_ingest,
                 state_msg::client_state_update_from_json(&args),
             ) {
+                if let Some(fwd) = &self.mesh_forward {
+                    fwd.forward(source, update.clone());
+                }
                 let _ = ingest.apply(source, update);
             }
             return;

@@ -121,6 +121,7 @@ fn boundary_loop(
         post_handoff_cleanup: Arc::new(move |_source| {
             released_local.fetch_add(1, Ordering::SeqCst);
         }),
+        nats: None,
     }
 }
 
@@ -164,6 +165,7 @@ async fn full_handoff_across_boundary() {
     assert_eq!(zone_b.activated.load(Ordering::SeqCst), 1, "ghost must be activated in zone-b");
     assert_eq!(released_local.load(Ordering::SeqCst), 1, "zone-a must clean up locally");
     assert_eq!(zone_b.mesh.ghost_state(1), Some("active"));
+    assert_eq!(zone_b.released.load(Ordering::SeqCst), 0, "zone-b must not release the player");
     // script_state made it across.
     let state = zone_b.last_script_state.lock().unwrap().clone();
     assert_eq!(state.get("axiom-core").map(String::as_str), Some(r#"{"characterId":42}"#));

@@ -7,13 +7,30 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use baston_protocol::mesh::{ActivatePlayerRequest, ReleasePlayerRequest};
+use baston_protocol::mesh::ActivatePlayerRequest;
 use baston_protocol::{PlayerDirectory, PlayerStateSnapshot};
+
+use baston_protocol::entity::{EntityState, EntityType};
+use serde::{Deserialize, Serialize};
 
 use crate::boundary_detector::BoundaryDetector;
 use crate::handoff_manager::{HandoffManager, HandoffState};
 use crate::mesh::ZoneMesh;
 use crate::state_ingest::StateIngest;
+
+/// NATS payload for ownerless entities crossing a boundary (vehicles, NPCs).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EntityHandoffPayload {
+    pub entity: EntityState,
+    pub from_zone: String,
+}
+
+pub fn entity_handoff_subject(zone_id: &str) -> String {
+    format!("baston.handoff.entity.{zone_id}")
+}
+
+/// Request/reply subject the Gateway answers with the zone covering "x,y".
+pub const RESOLVE_ZONE_SUBJECT: &str = "baston.mesh.resolve_zone";
 
 /// Callback collecting zone-transferable script state for a player
 /// (`RegisterZoneTransferState`, jalon D4). Returns resource → JSON text.
@@ -37,6 +54,8 @@ pub struct BoundaryLoop {
     pub scan_interval: Duration,
     pub collect_script_state: ScriptStateCollector,
     pub post_handoff_cleanup: PostHandoffCleanup,
+    /// NATS client for entity handoffs (None disables entity migration).
+    pub nats: Option<async_nats::Client>,
 }
 
 impl BoundaryLoop {
@@ -83,6 +102,108 @@ impl BoundaryLoop {
                 | Some(HandoffState::Transferring) => {} // in flight
             }
         }
+        self.scan_entities().await;
+    }
+
+    /// Ownerless-entity handoff (D4): a vehicle/NPC whose coords left our
+    /// bounds while its network owner is NOT a player being handed off is
+    /// migrated over NATS: `baston.handoff.entity.{target_zone}`.
+    async fn scan_entities(&self) {
+        let Some(nats) = &self.nats else { return };
+        let local_players: std::collections::HashSet<u32> =
+            self.ingest.player_kinematics().iter().map(|(s, _, _)| *s).collect();
+        for entity in self.ingest.entity_manager().snapshot() {
+            if entity.entity_type == EntityType::Player {
+                continue; // players ride the gRPC handoff path
+            }
+            let (x, y) = (entity.coords[0], entity.coords[1]);
+            if self.mesh.bounds.contains(x, y) {
+                continue;
+            }
+            // Entities owned by a connected local player travel inside that
+            // player's snapshot instead.
+            if entity.network_owner.is_some_and(|o| local_players.contains(&o)) {
+                continue;
+            }
+            // Ask the Gateway which zone covers the entity's position.
+            let target = match nats
+                .request(RESOLVE_ZONE_SUBJECT, format!("{x},{y}").into())
+                .await
+            {
+                Ok(reply) if !reply.payload.is_empty() => {
+                    String::from_utf8_lossy(&reply.payload).to_string()
+                }
+                Ok(_) => continue,  // no zone covers it — keep it here
+                Err(e) => {
+                    tracing::warn!(target: "zone", error = %e, "zone resolution failed");
+                    continue;
+                }
+            };
+            if target == self.mesh.zone_id {
+                continue;
+            }
+            let mut entity_for_b = entity.clone();
+            entity_for_b.network_owner = None; // target zone reassigns
+            let payload = EntityHandoffPayload {
+                entity: entity_for_b,
+                from_zone: self.mesh.zone_id.clone(),
+            };
+            match bincode::serde::encode_to_vec(&payload, bincode::config::standard()) {
+                Ok(bytes) => {
+                    if let Err(e) =
+                        nats.publish(entity_handoff_subject(&target), bytes.into()).await
+                    {
+                        tracing::error!(target: "zone", error = %e,
+                            "entity handoff publish failed — entity kept locally");
+                        continue;
+                    }
+                    self.ingest.entity_manager().remove_entity(entity.entity_id);
+                    metrics::counter!("entity_handoffs_total").increment(1);
+                    tracing::info!(target: "zone", zone = %self.mesh.zone_id,
+                        "entity {} handed off → {target}", entity.entity_id);
+                }
+                Err(e) => {
+                    tracing::error!(target: "zone", error = %e, "entity handoff encode failed");
+                }
+            }
+        }
+    }
+
+    /// Consume inbound entity handoffs: spawn the entity locally.
+    pub fn spawn_entity_handoff_consumer(
+        nats: async_nats::Client,
+        zone_id: String,
+        entity_manager: Arc<crate::EntityManager>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            use futures::StreamExt;
+            let subject = entity_handoff_subject(&zone_id);
+            let mut sub = match nats.subscribe(subject.clone()).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(target: "zone", error = %e,
+                        "entity handoff subscription failed");
+                    return;
+                }
+            };
+            tracing::info!(target: "zone", %subject, "entity handoff consumer running");
+            while let Some(msg) = sub.next().await {
+                match bincode::serde::decode_from_slice::<EntityHandoffPayload, _>(
+                    &msg.payload,
+                    bincode::config::standard(),
+                ) {
+                    Ok((payload, _)) => {
+                        tracing::info!(target: "zone", zone = %zone_id,
+                            "entity {} received from {}", payload.entity.entity_id, payload.from_zone);
+                        entity_manager.spawn_entity(payload.entity);
+                    }
+                    Err(e) => {
+                        tracing::error!(target: "zone", error = %e,
+                            "malformed entity handoff payload");
+                    }
+                }
+            }
+        })
     }
 
     /// D4 sequence, zone-A side: ConfirmHandoff (Gateway, atomic) →
