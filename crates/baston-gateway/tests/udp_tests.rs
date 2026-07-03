@@ -410,6 +410,37 @@ async fn spawn_sequence_end_to_end() {
     );
 }
 
+/// The pre-connect probe: raw `0xFFFFFFFF getinfo <challenge>` datagram must
+/// get an `infoResponse` from the same port (NetLibrary CS_FETCHING).
+#[tokio::test(flavor = "multi_thread")]
+async fn oob_getinfo_gets_info_response() {
+    let (port, _players, _token) = start_server().await;
+
+    let reply = tokio::task::spawn_blocking(move || {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut probe = vec![0xFF, 0xFF, 0xFF, 0xFF];
+        probe.extend_from_slice(b"getinfo xyz");
+        socket
+            .send_to(&probe, ("127.0.0.1", port))
+            .expect("send probe");
+        let mut buf = [0u8; 2048];
+        let (len, _) = socket.recv_from(&mut buf).expect("no OOB reply");
+        buf[..len].to_vec()
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(&reply[..4], &[0xFF, 0xFF, 0xFF, 0xFF]);
+    let text = std::str::from_utf8(&reply[4..]).unwrap();
+    assert!(text.starts_with("infoResponse\n"), "got: {text}");
+    assert!(text.contains("\\challenge\\xyz"));
+    assert!(text.contains("\\sv_maxclients\\8"));
+    assert!(text.contains("\\clients\\1"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn invalid_token_gets_dropped() {
     let (port, players, _token) = start_server().await;

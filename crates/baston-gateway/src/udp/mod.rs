@@ -25,6 +25,10 @@ use baston_scripting::{NetOutbound, ScriptHost};
 use rusty_enet as enet;
 use tokio::sync::mpsc;
 
+mod oob;
+
+pub use oob::{OobInfo, OobSocket};
+
 /// Channel count used by the FiveM client (`enet_host_create(..., 2, 0, 0)`).
 const CHANNEL_COUNT: usize = 2;
 
@@ -73,7 +77,7 @@ impl UdpHandle {
 }
 
 struct UdpServer {
-    host: enet::Host<UdpSocket>,
+    host: enet::Host<OobSocket>,
     players: Arc<PlayerDirectory>,
     script_host: ScriptHost,
     started_at: Instant,
@@ -101,6 +105,12 @@ pub fn spawn(
     )
 }
 
+/// Server hostname advertised in OOB `infoResponse` (overridable later via
+/// config if needed).
+fn oob_hostname() -> String {
+    "BASTON".to_owned()
+}
+
 /// Spawn with the script-runtime net bridge receiver (client events +
 /// native dispatch traffic).
 pub fn spawn_with_net(
@@ -113,6 +123,14 @@ pub fn spawn_with_net(
 ) -> Result<UdpHandle, UdpError> {
     let socket =
         UdpSocket::bind(("0.0.0.0", port)).map_err(|source| UdpError::Bind { port, source })?;
+    let socket = OobSocket::new(
+        socket,
+        OobInfo {
+            hostname: oob_hostname(),
+            max_clients: max_players,
+            players: Arc::clone(&players),
+        },
+    );
     let host = enet::Host::new(
         socket,
         enet::HostSettings {
