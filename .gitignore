@@ -1,2 +1,4 @@
 /target
 **/*.rs.bk
+# Local dev TLS certs (mkcert) — never commit private keys.
+*.pem
