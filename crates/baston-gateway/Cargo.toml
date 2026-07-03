@@ -29,6 +29,8 @@ bincode = { workspace = true }
 futures = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+axum-server = { workspace = true }
+rustls = { workspace = true }
 baston-config = { workspace = true }
 baston-protocol = { workspace = true }
 baston-scripting = { workspace = true }

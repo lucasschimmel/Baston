@@ -22,6 +22,9 @@ dashmap = "6"
 notify = "8"
 tower-http = { version = "0.7", features = ["trace", "cors"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+# Explicit provider so rustls doesn't panic when both ring (reqwest) and aws-lc-rs (axum-server) are compiled in.
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
 async-nats = "0.38"
 bincode = { version = "2", features = ["serde"] }
 bitflags = { version = "2", features = ["serde"] }

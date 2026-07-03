@@ -26,6 +26,10 @@ fn raise_timer_resolution() {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Both ring (reqwest) and aws-lc-rs (axum-server) are compiled in.
+    // Install aws-lc-rs explicitly so rustls doesn't panic at first TLS use.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -159,8 +163,23 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "HTTP gateway listening");
-    axum::serve(listener, router(state)).await?;
+    if let Some(tls) = state.config.tls.clone() {
+        let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
+            &tls.cert_pem,
+            &tls.key_pem,
+        )
+        .await?;
+        tracing::info!(%addr, "HTTPS gateway listening");
+        axum_server::bind_rustls(addr, tls_config)
+            .serve(router(state).into_make_service())
+            .await?;
+    } else {
+        // Plain HTTP is the Phase B-validated mode: the FiveM client sends
+        // some game-port requests in plaintext, and getConfiguration hands
+        // out a literal http://<host>/files URL so downloads stay plain.
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        tracing::info!(%addr, "HTTP gateway listening");
+        axum::serve(listener, router(state)).await?;
+    }
     Ok(())
 }

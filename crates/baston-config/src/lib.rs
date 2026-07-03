@@ -26,6 +26,13 @@ pub enum ConfigError {
     },
 }
 
+/// `[tls]` section — HTTPS for packfile downloads (required by FiveM canary 31725+).
+#[derive(Debug, Clone, Deserialize)]
+pub struct TlsConfig {
+    pub cert_pem: std::path::PathBuf,
+    pub key_pem: std::path::PathBuf,
+}
+
 /// Top-level BASTON configuration (`baston.toml`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct BastonConfig {
@@ -46,6 +53,7 @@ pub struct BastonConfig {
     pub metrics: MetricsConfig,
     #[serde(default)]
     pub dev: DevConfig,
+    pub tls: Option<TlsConfig>,
 }
 
 /// `[nats]` section — state-sync IPC (Phase C).

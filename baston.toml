@@ -27,3 +27,11 @@ deferral_timeout_secs = 10
 hot_reload = true
 # Phase B: real CFX auth. Flip to true only for offline dev without a launcher.
 auth_bypass = false
+
+# NOTE: no [tls] section on purpose. The FiveM client sends some requests to
+# the game port in plaintext HTTP; a TLS-only listener breaks them with
+# "Received HTTP/0.9 when not allowed". Phase B validated the plain-HTTP path
+# on canary 31725 — getConfiguration hands out a literal http://<host>/files
+# fileServer URL so packfile downloads stay on plain HTTP (no %s → no https
+# rewrite). Re-enabling [tls] here reintroduces the HTTP/0.9 failure.
+# Proper HTTPS needs first-byte TLS/plain multiplexing on 30120 (future work).
