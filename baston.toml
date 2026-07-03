@@ -1,4 +1,4 @@
-# BASTON runtime configuration (Phase A)
+# BASTON runtime configuration (Phase B)
 
 [server]
 name = "BASTON Dev"
@@ -6,8 +6,10 @@ port = 30120
 max_players = 32
 
 [auth]
-# Phase A: accept every connection without CFX token validation.
-bypass = true
+# RSA public key endpoint for offline CFX ticket verification
+# (same endpoint FXServer uses: CNL_ENDPOINT api/ticket/pubkey).
+pubkey_url = "https://lambda.fivem.net/api/ticket/pubkey"
+http_timeout_secs = 5
 
 [resources]
 path = "resources"
@@ -18,3 +20,5 @@ deferral_timeout_secs = 10
 
 [dev]
 hot_reload = true
+# Phase B: real CFX auth. Flip to true only for offline dev without a launcher.
+auth_bypass = false

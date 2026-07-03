@@ -21,6 +21,14 @@ deno_core = "0.406"
 dashmap = "6"
 notify = "8"
 tower-http = { version = "0.7", features = ["trace", "cors"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+async-nats = "0.38"
+bincode = "2"
+uuid = { version = "1", features = ["v4"] }
+rsa = "0.9"
+sha1 = { version = "0.10", features = ["oid"] }
+base64 = "0.22"
+hex = "0.4"
 
 baston-config = { path = "crates/baston-config" }
 baston-protocol = { path = "crates/baston-protocol" }

@@ -153,6 +153,15 @@
   globalThis.GetGameTimer = () => ops.op_get_game_timer();
   globalThis.GetNumPlayerIndices = () => ops.op_get_num_player_indices();
   globalThis.GetPlayerFromIndex = (i) => ops.op_get_player_from_index(i >>> 0);
+  globalThis.GetPlayerName = (source) => ops.op_get_player_name(source >>> 0);
+  globalThis.GetPlayerIdentifierByType = (source, type) =>
+    ops.op_get_player_identifier_by_type(source >>> 0, String(type));
+  globalThis.GetPlayers = () => {
+    const n = ops.op_get_num_player_indices();
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(ops.op_get_player_from_index(i));
+    return out;
+  };
 
   // Phase A timer stubs: fire on the microtask queue, ignoring the delay.
   globalThis.setTimeout = (fn) => {

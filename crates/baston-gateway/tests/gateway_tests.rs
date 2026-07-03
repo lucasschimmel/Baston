@@ -42,21 +42,26 @@ fn write_axiom_core(dir: &Path, script: &str) {
 
 async fn app(dir: &Path, script: &str) -> axum::Router {
     write_axiom_core(dir, script);
-    let mut config: BastonConfig = toml::from_str("[server]\nport = 30120\n").unwrap();
+    // Tests run with dev.auth_bypass (no launcher ticket available in CI).
+    let mut config: BastonConfig =
+        toml::from_str("[server]\nport = 30120\n[dev]\nauth_bypass = true\n").unwrap();
     config.resources.path = dir.to_owned();
     config.connection.deferral_timeout_secs = 2;
 
     let deferrals = Arc::new(DeferralRegistry::new());
-    let script_host = ScriptHost::spawn(deferrals).unwrap();
+    let players = Arc::new(PlayerRegistry::new());
+    let script_host = ScriptHost::spawn(deferrals, Arc::clone(&players)).unwrap();
     let resource_manager = ResourceManager::new(script_host.clone(), dir.to_owned());
     resource_manager.discover().await.unwrap();
     resource_manager.start_all().await.unwrap();
 
+    let auth = baston_gateway::AuthService::new(&config.auth).unwrap();
     router(Arc::new(AppState {
         config,
         resource_manager,
-        players: PlayerRegistry::new(),
+        players,
         script_host,
+        auth,
     }))
 }
 
@@ -135,7 +140,8 @@ async fn client_connect_runs_player_connecting_and_accepts() {
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response).await;
     assert_eq!(json["status"], "ok");
-    assert_eq!(json["token"], "dev-bypass-token");
+    // Connection token is now a per-connection UUID.
+    assert!(json["token"].as_str().is_some_and(|t| t.len() == 36));
 }
 
 #[tokio::test]

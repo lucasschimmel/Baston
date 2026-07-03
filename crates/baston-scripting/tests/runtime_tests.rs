@@ -8,7 +8,8 @@ use baston_scripting::{DeferralRegistry, ScriptHost, ScriptSource};
 
 fn host() -> (ScriptHost, Arc<DeferralRegistry>) {
     let deferrals = Arc::new(DeferralRegistry::new());
-    let host = ScriptHost::spawn(Arc::clone(&deferrals)).expect("host spawn");
+    let players = Arc::new(baston_protocol::PlayerDirectory::new());
+    let host = ScriptHost::spawn(Arc::clone(&deferrals), players).expect("host spawn");
     (host, deferrals)
 }
 

@@ -1,5 +1,9 @@
 //! Shared types exchanged between BASTON components (gateway, zone, scripting).
 
+pub mod players;
+
+pub use players::PlayerDirectory;
+
 use serde::{Deserialize, Serialize};
 
 /// Strongly-typed resource name (avoids passing raw `String`s around).

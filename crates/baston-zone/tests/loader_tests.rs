@@ -20,7 +20,11 @@ fn write_resource(dir: &std::path::Path, name: &str, deps: &[&str], script: &str
 }
 
 fn manager(dir: &std::path::Path) -> Arc<ResourceManager> {
-    let host = ScriptHost::spawn(Arc::new(DeferralRegistry::new())).expect("host");
+    let host = ScriptHost::spawn(
+        Arc::new(DeferralRegistry::new()),
+        Arc::new(baston_protocol::PlayerDirectory::new()),
+    )
+    .expect("host");
     ResourceManager::new(host, dir.to_owned())
 }
 

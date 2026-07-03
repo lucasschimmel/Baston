@@ -9,6 +9,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
+use baston_protocol::PlayerDirectory;
 use tokio::sync::{mpsc, oneshot, RwLock};
 
 use crate::deferrals::DeferralRegistry;
@@ -68,6 +69,7 @@ impl ResourceRuntimeHandle {
 pub struct ScriptHost {
     runtimes: Arc<RwLock<HashMap<String, ResourceRuntimeHandle>>>,
     deferrals: Arc<DeferralRegistry>,
+    players: Arc<PlayerDirectory>,
     started_at: Instant,
 }
 
@@ -76,11 +78,15 @@ pub struct ScriptHost {
 const MAX_EVENT_CHAIN: usize = 64;
 
 impl ScriptHost {
-    /// Create the host. `deferrals` is shared with the gateway.
-    pub fn spawn(deferrals: Arc<DeferralRegistry>) -> Result<Self, ScriptError> {
+    /// Create the host. `deferrals` and `players` are shared with the gateway.
+    pub fn spawn(
+        deferrals: Arc<DeferralRegistry>,
+        players: Arc<PlayerDirectory>,
+    ) -> Result<Self, ScriptError> {
         Ok(Self {
             runtimes: Arc::new(RwLock::new(HashMap::new())),
             deferrals,
+            players,
             started_at: Instant::now(),
         })
     }
@@ -101,7 +107,12 @@ impl ScriptHost {
         // normal path; this keeps load idempotent regardless).
         self.runtimes.write().await.remove(name);
 
-        let handle = spawn_runtime_thread(name, self.started_at, Arc::clone(&self.deferrals))?;
+        let handle = spawn_runtime_thread(
+            name,
+            self.started_at,
+            Arc::clone(&self.deferrals),
+            Arc::clone(&self.players),
+        )?;
         let queued = handle
             .send(|reply| RuntimeCommand::ExecuteScripts { scripts, reply })
             .await?;
@@ -223,6 +234,7 @@ fn spawn_runtime_thread(
     resource_name: &str,
     started_at: Instant,
     deferrals: Arc<DeferralRegistry>,
+    players: Arc<PlayerDirectory>,
 ) -> Result<ResourceRuntimeHandle, ScriptError> {
     let (tx, mut rx) = mpsc::channel::<RuntimeCommand>(64);
     let name = resource_name.to_owned();
@@ -243,7 +255,7 @@ fn spawn_runtime_thread(
                     return;
                 }
             };
-            let mut runtime = match ScriptRuntime::new(&name, started_at, deferrals) {
+            let mut runtime = match ScriptRuntime::new(&name, started_at, deferrals, players) {
                 Ok(r) => r,
                 Err(e) => {
                     let _ = init_tx.send(Err(e));

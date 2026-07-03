@@ -6,9 +6,11 @@ use std::time::Instant;
 
 use deno_core::{JsRuntime, PollEventLoopOptions, RuntimeOptions};
 
+use baston_protocol::PlayerDirectory;
+
 use crate::deferrals::DeferralRegistry;
 use crate::error::ScriptError;
-use crate::extensions::{all_extensions, RuntimeContext, SharedDeferrals};
+use crate::extensions::{all_extensions, RuntimeContext, SharedDeferrals, SharedPlayers};
 
 const BOOTSTRAP_JS: &str = include_str!("../assets/bootstrap.js");
 
@@ -26,6 +28,7 @@ impl ScriptRuntime {
         resource_name: &str,
         host_started_at: Instant,
         deferrals: Arc<DeferralRegistry>,
+        players: Arc<PlayerDirectory>,
     ) -> Result<Self, ScriptError> {
         let mut js = JsRuntime::new(RuntimeOptions {
             extensions: all_extensions(),
@@ -43,6 +46,7 @@ impl ScriptRuntime {
                 exports: Default::default(),
             });
             op_state.put(SharedDeferrals(deferrals));
+            op_state.put(SharedPlayers(players));
         }
 
         js.execute_script("baston:bootstrap.js", BOOTSTRAP_JS)

@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use baston_config::BastonConfig;
-use baston_gateway::{router, AppState, PlayerRegistry};
+use baston_gateway::{router, AppState, AuthService, PlayerRegistry};
 use baston_scripting::{DeferralRegistry, ScriptHost};
 use baston_zone::resource_loader::{spawn_hot_reload, ResourceManager};
 
@@ -21,8 +21,13 @@ async fn main() -> anyhow::Result<()> {
     let config = BastonConfig::load(Path::new(&config_path))?;
     tracing::info!(name = %config.server.name, port = config.server.port, "starting BASTON");
 
+    if config.dev.auth_bypass {
+        tracing::warn!(target: "baston", "dev.auth_bypass is enabled — CFX tickets are NOT validated");
+    }
+
     let deferrals = Arc::new(DeferralRegistry::new());
-    let script_host = ScriptHost::spawn(Arc::clone(&deferrals))?;
+    let players = Arc::new(PlayerRegistry::new());
+    let script_host = ScriptHost::spawn(Arc::clone(&deferrals), Arc::clone(&players))?;
     let resource_manager = ResourceManager::new(script_host.clone(), config.resources.path.clone());
 
     resource_manager.discover().await?;
@@ -36,11 +41,13 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let port = config.server.port;
+    let auth = AuthService::new(&config.auth)?;
     let state = Arc::new(AppState {
         config,
         resource_manager,
-        players: PlayerRegistry::new(),
+        players,
         script_host,
+        auth,
     });
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));

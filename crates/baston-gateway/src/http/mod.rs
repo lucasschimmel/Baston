@@ -15,14 +15,17 @@ use baston_zone::resource_loader::ResourceManager;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
+use crate::auth::AuthService;
 use crate::players::PlayerRegistry;
 
 /// Shared state for all HTTP handlers.
 pub struct AppState {
     pub config: BastonConfig,
     pub resource_manager: Arc<ResourceManager>,
-    pub players: PlayerRegistry,
+    /// Shared with the script host so player natives see real data.
+    pub players: Arc<PlayerRegistry>,
     pub script_host: ScriptHost,
+    pub auth: AuthService,
 }
 
 /// Build the gateway router.

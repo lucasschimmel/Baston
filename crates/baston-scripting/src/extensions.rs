@@ -35,6 +35,10 @@ pub struct RuntimeContext {
 /// cloned into every runtime).
 pub struct SharedDeferrals(pub Arc<DeferralRegistry>);
 
+/// Shared player directory handle stored in `OpState` (owned by the gateway,
+/// read by player natives).
+pub struct SharedPlayers(pub Arc<baston_protocol::PlayerDirectory>);
+
 // --- 1. console ---
 
 #[op2(fast)]
@@ -109,21 +113,54 @@ deno_core::extension!(
     ops = [op_get_game_timer, op_get_current_resource_name]
 );
 
-// --- 5. players (Phase A stubs — no game state yet) ---
+// --- 5. players (backed by the shared PlayerDirectory since B1) ---
 
 #[op2(fast)]
-fn op_get_num_player_indices() -> u32 {
-    0
+fn op_get_num_player_indices(state: &mut OpState) -> u32 {
+    state.borrow::<SharedPlayers>().0.count() as u32
 }
 
 #[op2(fast)]
-fn op_get_player_from_index(_index: u32) -> u32 {
-    0
+fn op_get_player_from_index(state: &mut OpState, index: u32) -> u32 {
+    let sources = state.borrow::<SharedPlayers>().0.sources();
+    sources.get(index as usize).copied().unwrap_or(0)
+}
+
+#[op2]
+#[string]
+fn op_get_player_name(state: &mut OpState, source: u32) -> String {
+    state
+        .borrow::<SharedPlayers>()
+        .0
+        .get(source)
+        .map(|p| p.name)
+        .unwrap_or_default()
+}
+
+/// FXServer `GetPlayerIdentifierByType`: returns the full `type:value`
+/// identifier, or an empty string when absent.
+#[op2]
+#[string]
+fn op_get_player_identifier_by_type(
+    state: &mut OpState,
+    source: u32,
+    #[string] id_type: String,
+) -> String {
+    state
+        .borrow::<SharedPlayers>()
+        .0
+        .identifier_by_type(source, &id_type)
+        .unwrap_or_default()
 }
 
 deno_core::extension!(
     baston_players,
-    ops = [op_get_num_player_indices, op_get_player_from_index]
+    ops = [
+        op_get_num_player_indices,
+        op_get_player_from_index,
+        op_get_player_name,
+        op_get_player_identifier_by_type,
+    ]
 );
 
 // --- 6. deferrals ---

@@ -51,12 +51,16 @@ pub struct ServerConfig {
     pub max_players: u32,
 }
 
-/// `[auth]` section.
+/// `[auth]` section — CFX ticket validation (Phase B).
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuthConfig {
-    /// Phase A: when true, every connection is accepted without CFX token validation.
-    #[serde(default = "default_true")]
-    pub bypass: bool,
+    /// Endpoint serving the CFX ticket RSA public key
+    /// (FXServer uses `CNL_ENDPOINT "api/ticket/pubkey"`).
+    #[serde(default = "default_pubkey_url")]
+    pub pubkey_url: String,
+    /// Timeout for the public-key HTTP request, in seconds.
+    #[serde(default = "default_auth_timeout")]
+    pub http_timeout_secs: u64,
 }
 
 /// `[resources]` section.
@@ -79,6 +83,10 @@ pub struct ConnectionConfig {
 pub struct DevConfig {
     #[serde(default = "default_true")]
     pub hot_reload: bool,
+    /// When true, skip CFX ticket validation and assign `license:dev-{source}`
+    /// identifiers. Phase B default is false (real auth).
+    #[serde(default)]
+    pub auth_bypass: bool,
 }
 
 fn default_server_name() -> String {
@@ -96,13 +104,23 @@ fn default_resources_path() -> PathBuf {
 fn default_deferral_timeout() -> u64 {
     10
 }
+fn default_pubkey_url() -> String {
+    // FXServer: CNL_ENDPOINT "api/ticket/pubkey" (code/client/shared/CnlEndpoint.h)
+    "https://lambda.fivem.net/api/ticket/pubkey".to_owned()
+}
+fn default_auth_timeout() -> u64 {
+    5
+}
 fn default_true() -> bool {
     true
 }
 
 impl Default for AuthConfig {
     fn default() -> Self {
-        Self { bypass: true }
+        Self {
+            pubkey_url: default_pubkey_url(),
+            http_timeout_secs: default_auth_timeout(),
+        }
     }
 }
 impl Default for ResourcesConfig {
@@ -121,7 +139,10 @@ impl Default for ConnectionConfig {
 }
 impl Default for DevConfig {
     fn default() -> Self {
-        Self { hot_reload: true }
+        Self {
+            hot_reload: true,
+            auth_bypass: false,
+        }
     }
 }
 
@@ -165,7 +186,8 @@ mod tests {
     fn parses_minimal_config() {
         let config: BastonConfig = toml::from_str("[server]\nport = 30120\n").unwrap();
         assert_eq!(config.server.port, 30120);
-        assert!(config.auth.bypass);
+        assert!(!config.dev.auth_bypass);
+        assert!(config.auth.pubkey_url.contains("lambda.fivem.net"));
         assert_eq!(config.connection.deferral_timeout_secs, 10);
         assert_eq!(config.resources.path, PathBuf::from("resources"));
     }
