@@ -17,7 +17,7 @@ pub async fn info_json(State(state): State<Arc<AppState>>) -> Json<serde_json::V
         "gameType": "Roleplay",
         "mapName": "Los Santos",
         "enhancedHostSupport": true,
-        "onesync": { "enabled": true },
+        "onesync": { "enabled": false },
         "vars": {},
         "version": 1,
         "resources": resources,

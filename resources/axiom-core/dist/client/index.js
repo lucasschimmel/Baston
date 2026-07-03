@@ -19,8 +19,13 @@ const Delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 onNet('axiom:core:spawnCharacter', async (opts) => {
   const model = GetHashKey(opts.model);
   RequestModel(model);
-  while (!HasModelLoaded(model)) {
+  let attempts = 0;
+  while (!HasModelLoaded(model) && attempts++ < 100) {
     await Delay(100);
+  }
+  if (!HasModelLoaded(model)) {
+    console.log('[axiom-core] model load timed out: ' + opts.model);
+    return;
   }
   SetPlayerModel(PlayerId(), model);
   SetEntityCoords(PlayerPedId(), opts.x, opts.y, opts.z, false, false, false, false);

@@ -52,9 +52,19 @@ pub async fn get_configuration(state: &AppState, headers: &HeaderMap, body: &str
         "resource configuration served"
     );
 
+    // Scheme note (client: citizen-legacy-net-resources/ResourceNetBindings.cpp):
+    // any `%s` template — "http://%s/" OR "https://%s/" — is rewritten by the
+    // client to `https://<peer>/`, and BASTON has no TLS listener. A LITERAL
+    // URL without `%s` (the `fileserver_add` CDN path) is used verbatim, so we
+    // build one from the request's Host header to keep downloads on plain HTTP.
+    let file_server = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .map(|host| format!("http://{host}/files"))
+        .unwrap_or_else(|| "https://%s/files".to_owned());
+
     Json(GetConfigurationResponse {
-        // The FiveM client substitutes the server address for %s.
-        file_server: "https://%s/files".to_owned(),
+        file_server,
         resources,
     })
     .into_response()

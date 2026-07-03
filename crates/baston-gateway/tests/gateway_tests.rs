@@ -90,7 +90,7 @@ async fn info_json_returns_server_metadata() {
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response).await;
     assert_eq!(json["name"], "BASTON Dev");
-    assert_eq!(json["onesync"]["enabled"], true);
+    assert_eq!(json["onesync"]["enabled"], false);
     assert_eq!(json["resources"][0], "axiom-core");
 }
 
@@ -232,6 +232,7 @@ async fn get_configuration_lists_resource_packfile_hash() {
         .oneshot(
             Request::post("/client")
                 .header("content-type", "application/x-www-form-urlencoded")
+                .header("host", "localhost:30120")
                 .body(Body::from("method=getConfiguration"))
                 .unwrap(),
         )
@@ -239,7 +240,9 @@ async fn get_configuration_lists_resource_packfile_hash() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let json = body_json(response).await;
-    assert_eq!(json["fileServer"], "https://%s/files");
+    // Literal URL (no %s): keeps the FiveM client on plain HTTP — any %s
+    // template is force-rewritten to https by the client.
+    assert_eq!(json["fileServer"], "http://localhost:30120/files");
     assert_eq!(json["resources"][0]["name"], "axiom-core");
     let hash = json["resources"][0]["files"]["resource.rpf"]
         .as_str()
