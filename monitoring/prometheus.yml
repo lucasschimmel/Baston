@@ -1,0 +1,8 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: baston
+    static_configs:
+      # BASTON gateway/zone metrics endpoint on the host ([metrics] port).
+      - targets: ["host.docker.internal:9090"]

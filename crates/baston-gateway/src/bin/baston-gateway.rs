@@ -21,6 +21,20 @@ async fn main() -> anyhow::Result<()> {
     let config = BastonConfig::load(Path::new(&config_path))?;
     tracing::info!(name = %config.server.name, port = config.server.port, "starting BASTON");
 
+    // Prometheus /metrics endpoint (jalon C6).
+    if config.metrics.enabled {
+        let addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.metrics.port));
+        match metrics_exporter_prometheus::PrometheusBuilder::new()
+            .with_http_listener(addr)
+            .install()
+        {
+            Ok(()) => tracing::info!(target: "baston", %addr, "Prometheus exporter listening"),
+            Err(e) => {
+                tracing::error!(target: "baston", error = %e, "metrics exporter failed to start")
+            }
+        }
+    }
+
     if config.dev.auth_bypass {
         tracing::warn!(target: "baston", "dev.auth_bypass is enabled — CFX tickets are NOT validated");
     }
