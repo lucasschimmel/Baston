@@ -105,8 +105,7 @@ impl ScriptRuntime {
         let code = format!(
             "globalThis.__baston.dispatchPlayerConnecting({}, {});",
             source,
-            serde_json::to_string(&serde_json::to_string(player_name).unwrap_or_default())
-                .unwrap_or_else(|_| "\"\\\"\\\"\"".into()),
+            serde_json::to_string(player_name).unwrap_or_else(|_| "\"\"".into()),
         );
         self.run_dispatch("playerConnecting", code).await
     }

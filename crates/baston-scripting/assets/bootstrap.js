@@ -109,10 +109,9 @@
     }
   }
 
-  function dispatchPlayerConnecting(source, nameJson) {
+  function dispatchPlayerConnecting(source, playerName) {
     const handlers = eventHandlers.get("playerConnecting");
     if (!handlers || handlers.size === 0) return;
-    const playerName = JSON.parse(nameJson);
     const setKickReason = (reason) =>
       ops.op_set_kick_reason(source, String(reason));
     const deferrals = {
