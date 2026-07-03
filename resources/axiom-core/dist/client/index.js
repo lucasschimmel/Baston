@@ -34,4 +34,28 @@ onNet('axiom:core:spawnCharacter', async (opts) => {
   TriggerEvent('axiom:core:onCharacterSpawned');
   // Let the server log the exit-criterion line.
   emitNet('axiom:core:onCharacterSpawned');
+  startStateReporting(model);
 });
+
+// --- Phase C: authoritative state reporting ---------------------------------
+// Feed the server pipeline (anti-cheat, AoI, zone state) with this client's
+// ped state at 10Hz. Entity rendering between real clients still rides the
+// GTA P2P sync (msgRoute relay) — this stream is the server-side authority.
+let stateReportStarted = false;
+function startStateReporting(model) {
+  if (stateReportStarted) return;
+  stateReportStarted = true;
+  setInterval(() => {
+    const ped = PlayerPedId();
+    const [x, y, z] = GetEntityCoords(ped, false);
+    const [vx, vy, vz] = GetEntityVelocity(ped);
+    emitNet('__baston:stateUpdate', {
+      model: model >>> 0,
+      coords: [x, y, z],
+      heading: GetEntityHeading(ped),
+      velocity: [vx, vy, vz],
+      health: GetEntityHealth(ped),
+      armour: GetPedArmour(ped),
+    });
+  }, 100);
+}

@@ -42,6 +42,9 @@ async fn zone_to_client_snapshot_end_to_end() {
     // Zone side: two players report state; player 2 is 100m from player 1.
     let entity_manager = Arc::new(EntityManager::new());
     let ingest = Arc::new(StateIngest::new(Arc::clone(&entity_manager), 200.0));
+    // Binary-protocol clients: they receive snapshots.
+    ingest.mark_snapshot_subscriber(1);
+    ingest.mark_snapshot_subscriber(2);
     ingest.apply(1, player_update([0.0, 0.0, 0.0])).unwrap();
     ingest.apply(2, player_update([100.0, 0.0, 0.0])).unwrap();
 

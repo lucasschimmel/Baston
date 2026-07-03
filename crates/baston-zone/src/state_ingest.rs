@@ -35,6 +35,10 @@ pub struct StateIngest {
     player_entities: DashMap<u32, EntityId>,
     /// Last accepted (time, coords) per entity, for the speed check.
     last_accepted: DashMap<EntityId, (Instant, [f32; 3])>,
+    /// Sources that talk the binary BASTON state protocol (loadtest /
+    /// headless clients). Only they receive `msgBastonSnapshot` pushes —
+    /// real FiveM clients get their entity sync via the msgRoute P2P relay.
+    snapshot_subscribers: DashMap<u32, ()>,
     max_speed_mps: f32,
 }
 
@@ -44,6 +48,7 @@ impl StateIngest {
             entity_manager,
             player_entities: DashMap::new(),
             last_accepted: DashMap::new(),
+            snapshot_subscribers: DashMap::new(),
             max_speed_mps,
         }
     }
@@ -138,12 +143,22 @@ impl StateIngest {
         id
     }
 
+    /// Opt a source into `msgBastonSnapshot` pushes (binary-protocol client).
+    pub fn mark_snapshot_subscriber(&self, source: u32) {
+        self.snapshot_subscribers.insert(source, ());
+    }
+
+    pub fn is_snapshot_subscriber(&self, source: u32) -> bool {
+        self.snapshot_subscribers.contains_key(&source)
+    }
+
     /// Player left: despawn its ped entity and forget its history.
     pub fn on_player_dropped(&self, source: u32) {
         if let Some((_, id)) = self.player_entities.remove(&source) {
             self.entity_manager.remove_entity(id);
             self.last_accepted.remove(&id);
         }
+        self.snapshot_subscribers.remove(&source);
     }
 }
 

@@ -163,6 +163,11 @@ impl StateAggregator {
 
     /// Build and send one client's snapshot for this tick.
     fn push_to_client(&self, source: u32, tick: u64) {
+        // Real FiveM clients sync through the msgRoute relay; only
+        // binary-protocol clients (loadtest) consume snapshots.
+        if !self.state_ingest.is_snapshot_subscriber(source) {
+            return;
+        }
         // The client's viewpoint is its own player entity; before its first
         // state report there is nothing to cull against, so skip.
         let Some(player_entity) = self.state_ingest.player_entity(source) else {

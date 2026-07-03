@@ -19,7 +19,7 @@ use baston_protocol::native::NATIVE_RESULT_EVENT;
 use baston_protocol::udp::state::{self as state_msg, MSG_BASTON_STATE, STATE_UPDATE_EVENT};
 use baston_protocol::udp::{
     handshake, host, read_message_type, time_sync, MSG_CONNECT, MSG_I_HOST, MSG_I_QUIT,
-    MSG_SERVER_EVENT, MSG_TIME_SYNC_REQ,
+    MSG_ROUTE, MSG_SERVER_EVENT, MSG_TIME_SYNC_REQ,
 };
 use baston_protocol::PlayerDirectory;
 use baston_scripting::{NetOutbound, ScriptHost};
@@ -292,6 +292,7 @@ impl UdpServer {
             MSG_TIME_SYNC_REQ => self.on_time_sync(peer_id, payload),
             MSG_SERVER_EVENT => self.on_server_event(peer_id, payload).await,
             MSG_BASTON_STATE => self.on_state_update(peer_id, payload),
+            MSG_ROUTE => self.on_route(peer_id, payload),
             MSG_I_HOST => self.on_i_host(peer_id, payload),
             MSG_I_QUIT => {
                 self.host.peer_mut(peer_id).disconnect(0);
@@ -364,21 +365,26 @@ impl UdpServer {
             });
         }
 
-        // onPlayerJoining towards the joining client (netId, name, slot).
-        let name = self.players.get(source).map(|p| p.name).unwrap_or_default();
+        // onPlayerJoining (netId, name, slot) — FXServer non-bigmode
+        // broadcasts the joiner to EVERY client and sends the joiner one
+        // event per existing client (`ClientRegistry::HandleConnectedClient`).
+        // That mutual knowledge is what triggers GTA-side player creation.
+        //
         // slotId MUST be msgpack-unsigned: the client converts it with
         // `as<uint32_t>()` (HookPlayerNameHandling.cpp) and a negative int
-        // throws msgpack::type_error → client crash. FXServer's "no slot" is
-        // the unsigned representation of -1.
-        let args = serde_json::json!([source, name, u32::MAX]);
-        if let Ok(msgpack) = events::json_args_to_msgpack(&args.to_string()) {
-            let packet = events::build_net_event("onPlayerJoining", &msgpack);
-            self.handle_command(UdpCommand::SendToSource {
-                source,
-                channel: 0,
-                data: packet,
-                reliable: true,
-            });
+        // throws msgpack::type_error → client crash. Non-OneSync never
+        // assigns slots (`ClientRegistry.cpp` gates on IsOneSync), so every
+        // slot is the unsigned representation of -1.
+        let name = self.players.get(source).map(|p| p.name).unwrap_or_default();
+        let all_sources: Vec<u32> = self.peer_sources.values().copied().collect();
+        for &other in &all_sources {
+            // The joiner about everyone (itself included, as FXServer does)…
+            let other_name = self.players.get(other).map(|p| p.name).unwrap_or_default();
+            self.send_player_event("onPlayerJoining", source, other, &other_name);
+            // …and everyone else about the joiner.
+            if other != source {
+                self.send_player_event("onPlayerJoining", other, source, &name);
+            }
         }
 
         // playerJoining(oldID) in the server runtimes, source bound. Detached:
@@ -398,6 +404,32 @@ impl UdpServer {
         });
     }
 
+    /// `msgRoute` (non-OneSync): relay opaque GTA sync data to the target
+    /// client, rewriting the leading netId to the sender's
+    /// (`RoutingPacketHandler.h`). This is what makes clients see each
+    /// other's peds — the GTA netcode does the entity sync itself.
+    fn on_route(&mut self, peer_id: enet::PeerID, payload: &[u8]) {
+        let Some(&source) = self.peer_sources.get(&peer_id) else {
+            return;
+        };
+        let Some(route) = baston_protocol::udp::route::parse_client_route(payload) else {
+            return;
+        };
+        // Source can't be target.
+        if u32::from(route.target_net_id) == source {
+            return;
+        }
+        let Some(&target_peer) = self.source_peers.get(&(u32::from(route.target_net_id))) else {
+            return;
+        };
+        let packet = baston_protocol::udp::route::build_server_route(source as u16, route.data);
+        // Channel 1, unreliable — superseded ~33ms later by newer sync data.
+        let peer = self.host.peer_mut(target_peer);
+        if let Err(e) = peer.send(1, &enet::Packet::unreliable(packet.as_slice())) {
+            tracing::debug!(target: "udp", error = ?e, "route relay failed");
+        }
+    }
+
     /// `msgBastonState` (loadtest / binary path): validated state ingestion.
     fn on_state_update(&mut self, peer_id: enet::PeerID, payload: &[u8]) {
         let Some(&source) = self.peer_sources.get(&peer_id) else {
@@ -411,8 +443,26 @@ impl UdpServer {
             tracing::debug!(target: "udp", source, "malformed msgBastonState ignored");
             return;
         };
+        // The binary path identifies a BASTON-native client: it consumes
+        // entity snapshots instead of msgRoute P2P sync.
+        ingest.mark_snapshot_subscriber(source);
         // Rejections are logged/counted inside StateIngest.
         let _ = ingest.apply(source, update);
+    }
+
+    /// Send `onPlayerJoining`/`onPlayerDropped` (aboutNetId, name, slotId)
+    /// to one client.
+    fn send_player_event(&mut self, event: &str, to: u32, about: u32, name: &str) {
+        let args = serde_json::json!([about, name, u32::MAX]);
+        if let Ok(msgpack) = events::json_args_to_msgpack(&args.to_string()) {
+            let packet = events::build_net_event(event, &msgpack);
+            self.handle_command(UdpCommand::SendToSource {
+                source: to,
+                channel: 0,
+                data: packet,
+                reliable: true,
+            });
+        }
     }
 
     fn on_time_sync(&mut self, peer_id: enet::PeerID, payload: &[u8]) {
@@ -561,6 +611,13 @@ impl UdpServer {
             .remove(source)
             .map(|p| p.name)
             .unwrap_or_default();
+        // Tell remaining clients so GTA despawns the leaver's ped
+        // (`GameServer.cpp` drop path).
+        let remaining: Vec<u32> = self.peer_sources.values().copied().collect();
+        for other in remaining {
+            let leaver_name = name.clone();
+            self.send_player_event("onPlayerDropped", other, source, &leaver_name);
+        }
         tracing::info!(target: "baston", source, %name, "player dropped (game connection closed)");
         if let Err(e) = self
             .script_host
