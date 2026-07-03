@@ -1,9 +1,11 @@
 //! `baston-escrow-plugin` — optional CFX Asset Escrow support for BASTON.
 //!
 //! The BASTON core stays free of any `svadhesive.dll` dependency. This crate
-//! implements [`baston_core::script_decryptor::ScriptDecryptor`] and installs
-//! itself into a running [`baston_zone::resource_loader::ResourceManager`] via
-//! [`install`].
+//! implements [`baston_core::script_decryptor::ScriptDecryptor`]; the caller
+//! obtains one via [`build_decryptor`] and installs it into its
+//! `ResourceManager` with `set_script_decryptor`. The plugin depends only on
+//! `baston-core` (never on `baston-zone`), so the composition-root binary can
+//! depend on the plugin without a dependency cycle.
 //!
 //! ## Backend
 //!
@@ -25,7 +27,6 @@ pub use error::EscrowPluginError;
 pub use sidecar::SidecarDecryptor;
 
 use baston_core::script_decryptor::ScriptDecryptor;
-use baston_zone::resource_loader::ResourceManager;
 
 /// Which decryption backend to use.
 #[derive(Debug, Clone)]
@@ -46,11 +47,16 @@ pub struct EscrowConfig {
     pub server_license: String,
 }
 
-/// Build the escrow decryptor for `config` without installing it. Useful when
-/// the caller wants to own the `Arc` (e.g. to also register metrics).
+/// Build the escrow decryptor for `config`.
+///
+/// The caller installs the returned `Arc` into its `ResourceManager` via
+/// `set_script_decryptor`. `server_license` is accepted for API completeness;
+/// the sidecar backend does not need it (the FXServer subprocess holds the
+/// server licence itself).
 pub fn build_decryptor(
     config: &EscrowConfig,
 ) -> Result<Arc<dyn ScriptDecryptor>, EscrowPluginError> {
+    let _ = &config.server_license;
     match &config.backend {
         EscrowBackend::Direct { .. } => Err(EscrowPluginError::DirectBackendUnsupported),
         EscrowBackend::Sidecar {
@@ -58,23 +64,8 @@ pub fn build_decryptor(
             resources_dir,
         } => {
             let decryptor = SidecarDecryptor::start(fxserver_path, resources_dir)?;
+            tracing::info!(backend = ?config.backend, "baston-escrow decryptor built");
             Ok(Arc::new(decryptor))
         }
     }
-}
-
-/// Install the escrow plugin into a running [`ResourceManager`].
-///
-/// Call after `ResourceManager::new()` and before the first resource start.
-/// `server_license` is accepted for API completeness; the sidecar backend does
-/// not need it (the FXServer subprocess holds the server licence itself).
-pub fn install(
-    manager: &Arc<ResourceManager>,
-    config: EscrowConfig,
-) -> Result<(), EscrowPluginError> {
-    let _ = &config.server_license;
-    let decryptor = build_decryptor(&config)?;
-    manager.set_script_decryptor(decryptor);
-    tracing::info!(backend = ?config.backend, "baston-escrow-plugin installed");
-    Ok(())
 }

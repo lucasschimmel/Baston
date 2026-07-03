@@ -14,6 +14,69 @@ use baston_scripting::{DeferralRegistry, ScriptHost};
 use baston_zone::mesh::{ZoneMesh, ZoneMeshHooks};
 use baston_zone::resource_loader::{spawn_hot_reload, ResourceManager};
 
+/// Wire the optional CFX Asset Escrow plugin into the resource manager.
+///
+/// Validates `[escrow]` (fatal on misconfiguration), then installs the plugin
+/// only when enabled, built with the `escrow` feature, and running on Windows.
+/// Every other combination logs a clear warning and continues with plain
+/// resources — escrow never activates implicitly.
+fn install_escrow_plugin(
+    manager: &Arc<ResourceManager>,
+    config: &BastonConfig,
+) -> anyhow::Result<()> {
+    // Fatal, actionable error on misconfiguration; no-op when disabled.
+    config.escrow.validate()?;
+
+    if !config.escrow.enabled {
+        tracing::info!(target: "zone", "escrow disabled (not configured)");
+        return Ok(());
+    }
+
+    #[cfg(all(feature = "escrow", windows))]
+    {
+        let e = &config.escrow;
+        let backend = match e.backend.as_str() {
+            "sidecar" => baston_escrow_plugin::EscrowBackend::Sidecar {
+                fxserver_path: e
+                    .fxserver_path
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("[escrow] fxserver_path required"))?,
+                resources_dir: config.resources.path.clone(),
+            },
+            "direct" => baston_escrow_plugin::EscrowBackend::Direct {
+                dll_path: e
+                    .dll_path
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("[escrow] dll_path required"))?,
+            },
+            other => anyhow::bail!("[escrow] unknown backend {other:?}"),
+        };
+        let plugin_cfg = baston_escrow_plugin::EscrowConfig {
+            backend,
+            server_license: e.server_license.clone(),
+        };
+        let decryptor = baston_escrow_plugin::build_decryptor(&plugin_cfg)
+            .map_err(|err| anyhow::anyhow!("escrow plugin initialization failed: {err}"))?;
+        manager.set_script_decryptor(decryptor);
+        tracing::info!(target: "zone", "escrow plugin active");
+    }
+    #[cfg(all(feature = "escrow", not(windows)))]
+    {
+        let _ = manager;
+        tracing::warn!(target: "zone",
+            "escrow.enabled = true but this is not a Windows build — svadhesive.dll is \
+             Windows-only; continuing with plain resources");
+    }
+    #[cfg(not(feature = "escrow"))]
+    {
+        let _ = manager;
+        tracing::warn!(target: "zone",
+            "escrow.enabled = true but this binary was built without the `escrow` feature \
+             — rebuild with `--features escrow`; continuing with plain resources");
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 fn raise_timer_resolution() {
     #[link(name = "winmm")]
@@ -89,6 +152,7 @@ async fn main() -> anyhow::Result<()> {
     let script_host =
         ScriptHost::spawn_with_net(Arc::clone(&deferrals), Arc::clone(&players), net_bridge)?;
     let resource_manager = ResourceManager::new(script_host.clone(), config.resources.path.clone());
+    install_escrow_plugin(&resource_manager, &config)?;
     resource_manager.discover().await?;
     resource_manager.start_all().await?;
     let _watcher = if config.dev.hot_reload {

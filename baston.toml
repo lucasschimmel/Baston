@@ -28,6 +28,20 @@ hot_reload = true
 # Phase B: real CFX auth. Flip to true only for offline dev without a launcher.
 auth_bypass = false
 
+# CFX Asset Escrow support (Phase D-bis). Off by default. See
+# docs/escrow-support.md. Requires a Windows build with `--features escrow`.
+[escrow]
+enabled = false
+# "sidecar" (supported) — a minimal FXServer subprocess decrypts via svadhesive.
+# "direct" (FFI) is unsupported: svadhesive.dll exposes no callable decrypt symbol.
+backend = "sidecar"
+# CFX server licence ("license:..."), required when enabled.
+server_license = ""
+# backend = "sidecar": path to FXServer.exe
+fxserver_path = "Artifacts/windows/31623/FXServer.exe"
+# backend = "direct": path to svadhesive.dll (unsupported backend)
+# dll_path = "Artifacts/windows/31623/svadhesive.dll"
+
 # NOTE: no [tls] section on purpose. The FiveM client sends some requests to
 # the game port in plaintext HTTP; a TLS-only listener breaks them with
 # "Received HTTP/0.9 when not allowed". Phase B validated the plain-HTTP path

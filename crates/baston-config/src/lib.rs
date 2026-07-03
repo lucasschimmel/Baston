@@ -24,6 +24,36 @@ pub enum ConfigError {
         value: String,
         reason: String,
     },
+    #[error(
+        "[escrow] enabled = true but server_license is empty\n  \
+         → set [escrow] server_license = \"license:...\" in baston.toml\n  \
+         → to disable escrow support: set [escrow] enabled = false"
+    )]
+    EscrowMissingLicense,
+    #[error(
+        "[escrow] backend = \"direct\" but dll_path is not set\n  \
+         → set [escrow] dll_path = \"C:/FXServer/svadhesive.dll\" in baston.toml"
+    )]
+    EscrowMissingDllPath,
+    #[error(
+        "[escrow] dll_path \"{0}\" not found\n  \
+         → install FXServer and point dll_path at its svadhesive.dll\n  \
+         → to disable escrow support: set [escrow] enabled = false"
+    )]
+    EscrowDllNotFound(String),
+    #[error(
+        "[escrow] backend = \"sidecar\" but fxserver_path is not set\n  \
+         → set [escrow] fxserver_path = \"C:/FXServer/FXServer.exe\" in baston.toml"
+    )]
+    EscrowMissingFxserverPath,
+    #[error(
+        "[escrow] fxserver_path \"{0}\" not found\n  \
+         → install FXServer and point fxserver_path at its FXServer.exe\n  \
+         → to disable escrow support: set [escrow] enabled = false"
+    )]
+    EscrowFxserverNotFound(String),
+    #[error("[escrow] unknown backend \"{0}\" (expected \"sidecar\" or \"direct\")")]
+    EscrowUnknownBackend(String),
 }
 
 /// `[tls]` section — HTTPS for packfile downloads (required by FiveM canary 31725+).
@@ -55,7 +85,88 @@ pub struct BastonConfig {
     pub dev: DevConfig,
     #[serde(default)]
     pub meshing: MeshingConfig,
+    #[serde(default)]
+    pub escrow: EscrowConfig,
     pub tls: Option<TlsConfig>,
+}
+
+/// `[escrow]` section — CFX Asset Escrow support (Phase D-bis).
+///
+/// Off by default. When enabled, the composition-root binary (built with the
+/// `escrow` feature, on Windows) installs `baston-escrow-plugin`. The default
+/// backend is `sidecar`: preliminary research showed `svadhesive.dll` exposes
+/// no FFI-callable decrypt symbol, so the `direct` backend is unsupported.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EscrowConfig {
+    /// Enable escrow support. Never activates without this being explicitly true.
+    #[serde(default)]
+    pub enabled: bool,
+    /// `"sidecar"` (supported) or `"direct"` (unsupported — see crate docs).
+    #[serde(default = "default_escrow_backend")]
+    pub backend: String,
+    /// CFX server licence (`"license:..."`). Required when `enabled`.
+    #[serde(default)]
+    pub server_license: String,
+    /// Path to `svadhesive.dll` (backend = `"direct"`).
+    #[serde(default)]
+    pub dll_path: Option<PathBuf>,
+    /// Path to `FXServer.exe` (backend = `"sidecar"`).
+    #[serde(default)]
+    pub fxserver_path: Option<PathBuf>,
+}
+
+impl Default for EscrowConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: default_escrow_backend(),
+            server_license: String::new(),
+            dll_path: None,
+            fxserver_path: None,
+        }
+    }
+}
+
+fn default_escrow_backend() -> String {
+    "sidecar".to_owned()
+}
+
+impl EscrowConfig {
+    /// Validate the escrow section. No-op when disabled; otherwise checks the
+    /// licence and the backend-specific binary path exist, with actionable
+    /// error messages for a fatal startup failure.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.server_license.is_empty() {
+            return Err(ConfigError::EscrowMissingLicense);
+        }
+        match self.backend.as_str() {
+            "sidecar" => {
+                let path = self
+                    .fxserver_path
+                    .as_ref()
+                    .ok_or(ConfigError::EscrowMissingFxserverPath)?;
+                if !path.exists() {
+                    return Err(ConfigError::EscrowFxserverNotFound(
+                        path.display().to_string(),
+                    ));
+                }
+            }
+            "direct" => {
+                let path = self
+                    .dll_path
+                    .as_ref()
+                    .ok_or(ConfigError::EscrowMissingDllPath)?;
+                if !path.exists() {
+                    return Err(ConfigError::EscrowDllNotFound(path.display().to_string()));
+                }
+            }
+            other => return Err(ConfigError::EscrowUnknownBackend(other.to_owned())),
+        }
+        Ok(())
+    }
 }
 
 /// `[meshing]` section — Phase D zone federation.
@@ -470,5 +581,53 @@ mod tests {
         assert!(config.auth.pubkey_url.contains("lambda.fivem.net"));
         assert_eq!(config.connection.deferral_timeout_secs, 10);
         assert_eq!(config.resources.path, PathBuf::from("resources"));
+    }
+
+    #[test]
+    fn escrow_defaults_off_and_validates_trivially() {
+        let config: BastonConfig = toml::from_str("[server]\nport = 30120\n").unwrap();
+        assert!(!config.escrow.enabled);
+        assert_eq!(config.escrow.backend, "sidecar");
+        config.escrow.validate().expect("disabled escrow is always valid");
+    }
+
+    #[test]
+    fn escrow_enabled_without_license_is_rejected() {
+        let escrow = EscrowConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        assert!(matches!(
+            escrow.validate(),
+            Err(ConfigError::EscrowMissingLicense)
+        ));
+    }
+
+    #[test]
+    fn escrow_sidecar_missing_fxserver_path_is_rejected() {
+        let escrow = EscrowConfig {
+            enabled: true,
+            backend: "sidecar".into(),
+            server_license: "license:abc".into(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            escrow.validate(),
+            Err(ConfigError::EscrowMissingFxserverPath)
+        ));
+    }
+
+    #[test]
+    fn escrow_unknown_backend_is_rejected() {
+        let escrow = EscrowConfig {
+            enabled: true,
+            backend: "carrier-pigeon".into(),
+            server_license: "license:abc".into(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            escrow.validate(),
+            Err(ConfigError::EscrowUnknownBackend(_))
+        ));
     }
 }
