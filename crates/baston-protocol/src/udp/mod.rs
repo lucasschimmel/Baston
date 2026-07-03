@@ -33,6 +33,26 @@ pub const MSG_ROUTE: u32 = hash_rage_string("msgRoute");
 pub const MSG_NET_EVENT: u32 = hash_rage_string("msgNetEvent");
 pub const MSG_SERVER_EVENT: u32 = hash_rage_string("msgServerEvent");
 pub const MSG_I_QUIT: u32 = hash_rage_string("msgIQuit");
+pub const MSG_I_HOST: u32 = hash_rage_string("msgIHost");
+
+/// Session-host handshake (non-OneSync, `IHostPacketHandler.h` + `IHost.h`).
+pub mod host {
+    use super::MSG_I_HOST;
+
+    /// Parse the client's `msgIHost` payload: `u32 baseNum`.
+    pub fn parse_i_host(payload: &[u8]) -> Option<u32> {
+        Some(u32::from_le_bytes(payload.get(..4)?.try_into().ok()?))
+    }
+
+    /// Server broadcast announcing the session host:
+    /// `u32 hash | u16 netId | u32 baseNum` (`ServerIHostPacket`).
+    pub fn build_server_i_host(net_id: u16, base_num: u32) -> Vec<u8> {
+        let mut out = MSG_I_HOST.to_le_bytes().to_vec();
+        out.extend_from_slice(&net_id.to_le_bytes());
+        out.extend_from_slice(&base_num.to_le_bytes());
+        out
+    }
+}
 
 /// Read the leading `u32 LE` message type.
 pub fn read_message_type(data: &[u8]) -> Option<(u32, &[u8])> {

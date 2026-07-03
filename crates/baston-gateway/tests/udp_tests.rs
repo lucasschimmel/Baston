@@ -124,7 +124,7 @@ async fn enet_handshake_returns_connect_ok() {
     let text = std::str::from_utf8(payload).unwrap();
     assert_eq!(text, " 1 -1 -1 -1 -1");
     // Server-side format matches the builder used by the server.
-    assert_eq!(data, handshake::build_connect_ok(1));
+    assert_eq!(data, handshake::build_connect_ok(1, None));
 }
 
 #[tokio::test(flavor = "multi_thread")]

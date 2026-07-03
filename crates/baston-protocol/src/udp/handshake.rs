@@ -33,11 +33,14 @@ pub fn parse_connect(payload: &[u8]) -> Option<ConnectPayload> {
     })
 }
 
-/// Build the `connectOK` reply. BASTON Phase B is not OneSync: host net id,
-/// host base, slot id and time are all -1.
-pub fn build_connect_ok(net_id: u32) -> Vec<u8> {
+/// Build the `connectOK` reply. `host` is the current non-OneSync session
+/// host as (netId, baseNum), if any; slot id and time stay -1 (no OneSync).
+pub fn build_connect_ok(net_id: u32, session_host: Option<(u32, u32)>) -> Vec<u8> {
+    let (host_id, host_base) = session_host
+        .map(|(id, base)| (id as i64, base as i64))
+        .unwrap_or((-1, -1));
     let mut out = MSG_CONNECT.to_le_bytes().to_vec();
-    out.extend_from_slice(format!(" {net_id} -1 -1 -1 -1").as_bytes());
+    out.extend_from_slice(format!(" {net_id} {host_id} {host_base} -1 -1").as_bytes());
     out
 }
 
@@ -55,8 +58,11 @@ mod tests {
 
     #[test]
     fn connect_ok_format() {
-        let ok = build_connect_ok(1);
+        let ok = build_connect_ok(1, None);
         assert_eq!(&ok[..4], &1u32.to_le_bytes());
         assert_eq!(&ok[4..], b" 1 -1 -1 -1 -1");
+
+        let with_host = build_connect_ok(2, Some((1, 12345)));
+        assert_eq!(&with_host[4..], b" 2 1 12345 -1 -1");
     }
 }

@@ -17,8 +17,8 @@ use std::time::Instant;
 use baston_protocol::events;
 use baston_protocol::native::NATIVE_RESULT_EVENT;
 use baston_protocol::udp::{
-    handshake, read_message_type, time_sync, MSG_CONNECT, MSG_I_QUIT, MSG_SERVER_EVENT,
-    MSG_TIME_SYNC_REQ,
+    handshake, host, read_message_type, time_sync, MSG_CONNECT, MSG_I_HOST, MSG_I_QUIT,
+    MSG_SERVER_EVENT, MSG_TIME_SYNC_REQ,
 };
 use baston_protocol::PlayerDirectory;
 use baston_scripting::{NetOutbound, ScriptHost};
@@ -85,6 +85,9 @@ struct UdpServer {
     peer_sources: HashMap<enet::PeerID, u32>,
     /// Authenticated source → ENet peer.
     source_peers: HashMap<u32, enet::PeerID>,
+    /// Non-OneSync session host: (netId, baseNum). The first client to send
+    /// `msgIHost` becomes host (`IHostPacketHandler.h`).
+    session_host: Option<(u32, u32)>,
 }
 
 /// Spawn the UDP/ENet server task. Returns a handle for outbound sends.
@@ -151,6 +154,7 @@ pub fn spawn_with_net(
         started_at: Instant::now(),
         peer_sources: HashMap::new(),
         source_peers: HashMap::new(),
+        session_host: None,
     };
     tokio::spawn(run(server, cmd_rx, net_rx, poll_interval_ms));
     Ok(UdpHandle { cmd_tx })
@@ -273,6 +277,7 @@ impl UdpServer {
             MSG_CONNECT => self.on_handshake(peer_id, payload),
             MSG_TIME_SYNC_REQ => self.on_time_sync(peer_id, payload),
             MSG_SERVER_EVENT => self.on_server_event(peer_id, payload).await,
+            MSG_I_HOST => self.on_i_host(peer_id, payload),
             MSG_I_QUIT => {
                 self.host.peer_mut(peer_id).disconnect(0);
                 self.on_disconnect(peer_id).await;
@@ -311,7 +316,7 @@ impl UdpServer {
             .map(|a| a.to_string())
             .unwrap_or_else(|| "unknown".into());
         // connectOK: netId = source (BASTON is not OneSync in Phase B).
-        let reply = handshake::build_connect_ok(source);
+        let reply = handshake::build_connect_ok(source, self.session_host);
         if let Err(e) = peer.send(0, &enet::Packet::reliable(reply.as_slice())) {
             tracing::warn!(target: "udp", source, error = ?e, "connectOK send failed");
             return;
@@ -397,6 +402,34 @@ impl UdpServer {
         }
     }
 
+    /// `msgIHost`: a client announces itself as session host (non-OneSync,
+    /// `IHostPacketHandler.h`). First one wins; the choice is broadcast.
+    fn on_i_host(&mut self, peer_id: enet::PeerID, payload: &[u8]) {
+        let Some(&source) = self.peer_sources.get(&peer_id) else {
+            return;
+        };
+        let Some(base_num) = host::parse_i_host(payload) else {
+            return;
+        };
+        if self.session_host.is_some() {
+            return;
+        }
+        self.session_host = Some((source, base_num));
+        tracing::info!(target: "baston", source, base_num, "session host elected");
+        self.broadcast_host(source as u16, base_num);
+    }
+
+    fn broadcast_host(&mut self, net_id: u16, base_num: u32) {
+        let packet = host::build_server_i_host(net_id, base_num);
+        let peers: Vec<_> = self.peer_sources.keys().copied().collect();
+        for peer_id in peers {
+            let peer = self.host.peer_mut(peer_id);
+            if let Err(e) = peer.send(0, &enet::Packet::reliable(packet.as_slice())) {
+                tracing::warn!(target: "udp", error = ?e, "host broadcast failed");
+            }
+        }
+    }
+
     /// Outbound client event from a script runtime → `msgNetEvent` packet.
     fn handle_net_outbound(&mut self, outbound: NetOutbound) {
         match outbound {
@@ -471,6 +504,11 @@ impl UdpServer {
             return;
         };
         self.source_peers.remove(&source);
+        // Host left: clear and announce "no host" (GameServer.cpp drop path).
+        if self.session_host.is_some_and(|(id, _)| id == source) {
+            self.session_host = None;
+            self.broadcast_host(0xFFFF, 0);
+        }
         let name = self
             .players
             .remove(source)
