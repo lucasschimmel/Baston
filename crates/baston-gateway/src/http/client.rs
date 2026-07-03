@@ -20,7 +20,7 @@ use super::AppState;
 const DEFAULT_PLAYER_NAME: &str = "Player";
 
 /// Extract fields from either a url-encoded or JSON body, leniently.
-fn extract_field(body: &str, field: &str) -> Option<String> {
+pub(super) fn extract_field(body: &str, field: &str) -> Option<String> {
     if body.trim_start().starts_with('{') {
         let value: serde_json::Value = serde_json::from_str(body).ok()?;
         return value.get(field).and_then(|v| v.as_str()).map(String::from);
@@ -89,11 +89,32 @@ pub async fn client_connect(
         .unwrap_or_else(|| DEFAULT_PLAYER_NAME.to_owned());
     let ip = peer_ip(&headers);
 
-    // FiveM sends several POST /client calls (getEndpoints, initConnect, ...).
-    // Only initConnect runs the connection flow; other methods get an ack.
+    // FiveM multiplexes several methods over POST /client
+    // (ClientHttpHandler.cpp → ClientMethodRegistry).
     let method = extract_field(&body, "method").unwrap_or_else(|| "initConnect".to_owned());
-    if method != "initConnect" {
-        return Json(json!({ "defer": false })).into_response();
+    match method.as_str() {
+        "initConnect" => {}
+        "getConfiguration" => {
+            return super::configuration::get_configuration(&state, &headers, &body).await
+        }
+        // No alternate endpoints configured (sv_endpoints equivalent).
+        "getEndpoints" => return Json(json!([])).into_response(),
+        other => {
+            tracing::debug!(target: "gateway", method = %other, "unhandled /client method");
+            return Json(json!({ "error": "invalid method" })).into_response();
+        }
+    }
+
+    // Client/server version gate (InitConnectMethod.cpp: protocol < 12).
+    let protocol: u32 = extract_field(&body, "protocol")
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0);
+    if protocol < baston_protocol::connection::MIN_CLIENT_PROTOCOL {
+        return client_error("Client/server version mismatch. Restart your game client to update.");
+    }
+    let game_name = extract_field(&body, "gameName").unwrap_or_else(|| "gta5".to_owned());
+    if game_name != "gta5" {
+        return client_error(format!("Client/Server game mismatch: {game_name}/gta5"));
     }
 
     let source = state.players.allocate_source();
@@ -133,14 +154,24 @@ pub async fn client_connect(
                 name: name.clone(),
                 identifiers,
             });
+            state.players.bind_token(token.clone(), source);
             tracing::info!(target: "gateway", source, %name, "connection accepted");
-            Json(json!({
-                "token": token,
-                "defer": false,
-                "source": source,
-                "status": "ok",
-            }))
-            .into_response()
+            tracing::info!(
+                target: "baston",
+                "connection ticket issued: session={token} udp={}",
+                state.config.server.port,
+            );
+
+            let mut response =
+                serde_json::to_value(baston_protocol::connection::InitConnectResponse::new(
+                    token,
+                    &game_name,
+                    state.config.server.max_players,
+                ))
+                .unwrap_or_else(|_| json!({}));
+            // Non-FXServer extras (harmless to the client, used by our tests).
+            response["status"] = json!("ok");
+            Json(response).into_response()
         }
         Ok(Ok(Err(reason))) => {
             tracing::info!(target: "gateway", source, %name, %reason, "connection rejected");

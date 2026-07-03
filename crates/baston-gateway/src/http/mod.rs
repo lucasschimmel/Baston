@@ -2,8 +2,12 @@
 //! `POST /client` connection endpoint.
 
 mod client;
+mod configuration;
 mod files;
 mod info;
+mod packfile_cache;
+
+pub use packfile_cache::PackfileCache;
 
 use std::sync::Arc;
 
@@ -26,6 +30,7 @@ pub struct AppState {
     pub players: Arc<PlayerRegistry>,
     pub script_host: ScriptHost,
     pub auth: AuthService,
+    pub packfiles: PackfileCache,
 }
 
 /// Build the gateway router.

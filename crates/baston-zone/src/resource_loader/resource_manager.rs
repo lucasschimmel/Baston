@@ -205,6 +205,19 @@ impl ResourceManager {
             .collect()
     }
 
+    /// Root directory + parsed manifest of a started resource (used by the
+    /// gateway to build the client packfile and `getConfiguration`).
+    pub async fn started_resource(
+        &self,
+        name: &str,
+    ) -> Option<(PathBuf, baston_protocol::ResourceManifest)> {
+        let resources = self.resources.lock().await;
+        resources
+            .get(name)
+            .filter(|e| e.state == ResourceState::Started)
+            .map(|e| (e.discovered.root.clone(), e.discovered.manifest.clone()))
+    }
+
     /// Map an absolute file path back to the resource that owns it (used by
     /// the hot-reload watcher).
     pub async fn resource_for_path(&self, path: &Path) -> Option<String> {

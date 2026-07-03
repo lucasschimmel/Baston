@@ -48,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
         players,
         script_host,
         auth,
+        packfiles: baston_gateway::http::PackfileCache::new(),
     });
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));

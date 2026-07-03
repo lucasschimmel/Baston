@@ -1,0 +1,61 @@
+//! `POST /client method=getConfiguration` — resource list with packfile
+//! hashes (GetConfigurationMethod.cpp).
+
+use std::collections::BTreeMap;
+
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use baston_protocol::connection::{
+    GetConfigurationResponse, ResourceConfiguration, DEFAULT_RESOURCE_SET,
+};
+use serde_json::json;
+
+use super::AppState;
+
+/// Handle `getConfiguration`. The client authenticates with the connection
+/// token from `initConnect` in the `X-CitizenFX-Token` header.
+pub async fn get_configuration(state: &AppState, headers: &HeaderMap, body: &str) -> Response {
+    let token = headers
+        .get("x-citizenfx-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+
+    if state.players.source_for_token(token).is_none() && !state.config.dev.auth_bypass {
+        return Json(json!({ "error": "Not a valid client." })).into_response();
+    }
+
+    // Optional `resources` filter: semicolon-separated names.
+    let filter: Vec<String> = super::client::extract_field(body, "resources")
+        .map(|f| f.split(';').map(str::to_owned).collect())
+        .unwrap_or_default();
+
+    let mut resources = Vec::new();
+    for name in state.resource_manager.started_names().await {
+        if !filter.is_empty() && !filter.contains(&name) {
+            continue;
+        }
+        // Resources with no client files are server-only: not sent.
+        let Some(pack) = state.packfiles.get(&state.resource_manager, &name).await else {
+            continue;
+        };
+        resources.push(ResourceConfiguration {
+            name: name.clone(),
+            files: BTreeMap::from([(DEFAULT_RESOURCE_SET.to_owned(), pack.sha1_hex.clone())]),
+            stream_files: BTreeMap::new(),
+        });
+    }
+
+    tracing::info!(
+        target: "baston",
+        count = resources.len(),
+        "resource configuration served"
+    );
+
+    Json(GetConfigurationResponse {
+        // The FiveM client substitutes the server address for %s.
+        file_server: "https://%s/files".to_owned(),
+        resources,
+    })
+    .into_response()
+}

@@ -35,6 +35,24 @@ pub async fn serve_resource_file(
     State(state): State<Arc<AppState>>,
     AxumPath((resource, path)): AxumPath<(String, String)>,
 ) -> Response {
+    // The per-resource packfile is built in memory, not read from disk
+    // (FXServer serves it from cache/files/<resource>/resource.rpf).
+    if path == baston_protocol::connection::DEFAULT_RESOURCE_SET {
+        return match state
+            .packfiles
+            .get(&state.resource_manager, &resource)
+            .await
+        {
+            Some(pack) => (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/octet-stream")],
+                pack.bytes.as_ref().clone(),
+            )
+                .into_response(),
+            None => StatusCode::NOT_FOUND.into_response(),
+        };
+    }
+
     let (Some(resource), Some(rel)) = (sanitize(&resource), sanitize(&path)) else {
         return StatusCode::BAD_REQUEST.into_response();
     };

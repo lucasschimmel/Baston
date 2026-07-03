@@ -28,16 +28,24 @@ AddEventHandler('playerDropped', function (reason) {
 fn write_axiom_core(dir: &Path, script: &str) {
     let root = dir.join("axiom-core");
     std::fs::create_dir_all(root.join("dist/server")).unwrap();
+    std::fs::create_dir_all(root.join("dist/client")).unwrap();
     std::fs::write(
         root.join("manifest.json"),
         serde_json::json!({
             "name": "axiom-core",
             "server_scripts": ["dist/server/index.js"],
+            "client_scripts": ["dist/client/index.js"],
+            "files": ["dist/client/index.js"],
         })
         .to_string(),
     )
     .unwrap();
     std::fs::write(root.join("dist/server/index.js"), script).unwrap();
+    std::fs::write(
+        root.join("dist/client/index.js"),
+        "console.log('client boot')",
+    )
+    .unwrap();
 }
 
 async fn app(dir: &Path, script: &str) -> axum::Router {
@@ -62,6 +70,7 @@ async fn app(dir: &Path, script: &str) -> axum::Router {
         players,
         script_host,
         auth,
+        packfiles: baston_gateway::http::PackfileCache::new(),
     }))
 }
 
@@ -132,7 +141,9 @@ async fn client_connect_runs_player_connecting_and_accepts() {
         .oneshot(
             Request::post("/client")
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from("method=initConnect&name=LucasTest"))
+                .body(Body::from(
+                    "method=initConnect&name=LucasTest&protocol=12&gameName=gta5&guid=1",
+                ))
                 .unwrap(),
         )
         .await
@@ -161,7 +172,9 @@ async fn client_connect_rejected_with_reason() {
         .oneshot(
             Request::post("/client")
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from("method=initConnect&name=Intruder"))
+                .body(Body::from(
+                    "method=initConnect&name=Intruder&protocol=12&gameName=gta5&guid=2",
+                ))
                 .unwrap(),
         )
         .await
@@ -169,6 +182,126 @@ async fn client_connect_rejected_with_reason() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let json = body_json(response).await;
     assert_eq!(json["error"], "Not whitelisted");
+}
+
+#[tokio::test]
+async fn init_connect_response_has_fxserver_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(dir.path(), AXIOM_CORE_JS).await;
+    let response = app
+        .oneshot(
+            Request::post("/client")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "method=initConnect&name=Proto&protocol=12&gameName=gta5&guid=9",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let json = body_json(response).await;
+    assert_eq!(json["protocol"], 5);
+    assert!(json["sH"].is_boolean(), "client requires non-null sH");
+    assert_eq!(json["netlibVersion"], 2);
+    assert_eq!(json["maxClients"], 32);
+    assert!(json["handover"].is_object());
+}
+
+#[tokio::test]
+async fn old_protocol_client_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(dir.path(), AXIOM_CORE_JS).await;
+    let response = app
+        .oneshot(
+            Request::post("/client")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("method=initConnect&name=Old&protocol=5&guid=9"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let json = body_json(response).await;
+    assert!(json["error"].as_str().unwrap().contains("version mismatch"));
+}
+
+#[tokio::test]
+async fn get_configuration_lists_resource_packfile_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(dir.path(), AXIOM_CORE_JS).await;
+    let response = app
+        .oneshot(
+            Request::post("/client")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("method=getConfiguration"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["fileServer"], "https://%s/files");
+    assert_eq!(json["resources"][0]["name"], "axiom-core");
+    let hash = json["resources"][0]["files"]["resource.rpf"]
+        .as_str()
+        .unwrap();
+    assert_eq!(hash.len(), 40, "sha1 hex of the packfile");
+}
+
+#[tokio::test]
+async fn resource_rpf_downloads_and_hash_tracks_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(dir.path(), AXIOM_CORE_JS).await;
+
+    let rpf = app
+        .clone()
+        .oneshot(
+            Request::get("/files/axiom-core/resource.rpf")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rpf.status(), StatusCode::OK);
+    let bytes = rpf.into_body().collect().await.unwrap().to_bytes();
+    // RPF2 magic
+    assert_eq!(&bytes[..4], &0x3246_5052u32.to_le_bytes());
+
+    // Hash changes when a client file changes (hot-reload invalidation).
+    let config1 = app
+        .clone()
+        .oneshot(
+            Request::post("/client")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("method=getConfiguration"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let hash1 = body_json(config1).await["resources"][0]["files"]["resource.rpf"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    std::fs::write(
+        dir.path().join("axiom-core/dist/client/index.js"),
+        "console.log('client boot v2')",
+    )
+    .unwrap();
+
+    let config2 = app
+        .oneshot(
+            Request::post("/client")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("method=getConfiguration"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let hash2 = body_json(config2).await["resources"][0]["files"]["resource.rpf"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(hash1, hash2);
 }
 
 #[tokio::test]
@@ -187,7 +320,9 @@ async fn client_connect_times_out_when_deferral_never_resolves() {
         .oneshot(
             Request::post("/client")
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from("method=initConnect&name=Ghost"))
+                .body(Body::from(
+                    "method=initConnect&name=Ghost&protocol=12&gameName=gta5&guid=3",
+                ))
                 .unwrap(),
         )
         .await

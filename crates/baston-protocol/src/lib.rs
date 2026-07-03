@@ -1,5 +1,6 @@
 //! Shared types exchanged between BASTON components (gateway, zone, scripting).
 
+pub mod connection;
 pub mod players;
 
 pub use players::PlayerDirectory;

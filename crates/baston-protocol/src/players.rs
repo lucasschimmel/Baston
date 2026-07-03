@@ -15,6 +15,9 @@ use crate::PlayerInfo;
 #[derive(Default)]
 pub struct PlayerDirectory {
     players: DashMap<u32, PlayerInfo>,
+    /// Connection token (from `initConnect`) → source. Authenticates
+    /// follow-up HTTP calls (`X-CitizenFX-Token`) and the UDP handshake.
+    session_tokens: DashMap<String, u32>,
     next_source: AtomicU32,
 }
 
@@ -22,9 +25,20 @@ impl PlayerDirectory {
     pub fn new() -> Self {
         Self {
             players: DashMap::new(),
+            session_tokens: DashMap::new(),
             // FiveM source ids start at 1; 0 is "no player".
             next_source: AtomicU32::new(1),
         }
+    }
+
+    /// Bind a connection token to a source (issued at `initConnect`).
+    pub fn bind_token(&self, token: String, source: u32) {
+        self.session_tokens.insert(token, source);
+    }
+
+    /// Resolve a connection token back to its source.
+    pub fn source_for_token(&self, token: &str) -> Option<u32> {
+        self.session_tokens.get(token).map(|s| *s)
     }
 
     /// Allocate the next source id.
@@ -37,6 +51,7 @@ impl PlayerDirectory {
     }
 
     pub fn remove(&self, source: u32) -> Option<PlayerInfo> {
+        self.session_tokens.retain(|_, s| *s != source);
         self.players.remove(&source).map(|(_, p)| p)
     }
 
