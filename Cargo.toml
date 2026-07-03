@@ -25,6 +25,7 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 async-nats = "0.38"
 bincode = "2"
 uuid = { version = "1", features = ["v4"] }
+rusty_enet = "0.4"
 rsa = "0.9"
 sha1 = { version = "0.10", features = ["oid"] }
 base64 = "0.22"

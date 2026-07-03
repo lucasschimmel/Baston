@@ -41,6 +41,15 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let port = config.server.port;
+    let udp_port = config.udp.port.unwrap_or(port);
+    let _udp = baston_gateway::udp::spawn(
+        udp_port,
+        config.udp.poll_interval_ms,
+        config.server.max_players,
+        Arc::clone(&players),
+        script_host.clone(),
+    )?;
+
     let auth = AuthService::new(&config.auth)?;
     let state = Arc::new(AppState {
         config,

@@ -2,6 +2,7 @@
 
 pub mod connection;
 pub mod players;
+pub mod udp;
 
 pub use players::PlayerDirectory;
 

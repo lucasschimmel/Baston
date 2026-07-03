@@ -14,6 +14,11 @@ http_timeout_secs = 5
 [resources]
 path = "resources"
 
+[udp]
+# ENet game transport. Defaults to server.port (FiveM muxes TCP+UDP on one port).
+# port = 30120
+poll_interval_ms = 5
+
 [connection]
 # Seconds to wait for playerConnecting deferrals before kicking.
 deferral_timeout_secs = 10

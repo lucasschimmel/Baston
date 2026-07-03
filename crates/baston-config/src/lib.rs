@@ -37,7 +37,21 @@ pub struct BastonConfig {
     #[serde(default)]
     pub connection: ConnectionConfig,
     #[serde(default)]
+    pub udp: UdpConfig,
+    #[serde(default)]
     pub dev: DevConfig,
+}
+
+/// `[udp]` section — game transport (ENet).
+#[derive(Debug, Clone, Deserialize)]
+pub struct UdpConfig {
+    /// UDP port for the ENet game channel. Defaults to `server.port`
+    /// (FiveM muxes TCP and UDP on the same port number).
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// How often the ENet host is polled, in milliseconds.
+    #[serde(default = "default_udp_poll_interval")]
+    pub poll_interval_ms: u64,
 }
 
 /// `[server]` section.
@@ -111,6 +125,9 @@ fn default_pubkey_url() -> String {
 fn default_auth_timeout() -> u64 {
     5
 }
+fn default_udp_poll_interval() -> u64 {
+    5
+}
 fn default_true() -> bool {
     true
 }
@@ -134,6 +151,14 @@ impl Default for ConnectionConfig {
     fn default() -> Self {
         Self {
             deferral_timeout_secs: default_deferral_timeout(),
+        }
+    }
+}
+impl Default for UdpConfig {
+    fn default() -> Self {
+        Self {
+            port: None,
+            poll_interval_ms: default_udp_poll_interval(),
         }
     }
 }
