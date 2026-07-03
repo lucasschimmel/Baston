@@ -272,7 +272,7 @@ async fn snapshot_pipeline_between_two_clients() {
         let deadline = Instant::now() + Duration::from_secs(15);
 
         // Phase 1: B must receive A's entity as a CREATED upsert.
-        let mut a_entity = None;
+        let a_entity;
         loop {
             a.send(1, &build_state_update(&state_update([0.0, 0.0, 0.0])));
             a.pump();
