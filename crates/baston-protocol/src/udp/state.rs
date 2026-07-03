@@ -62,12 +62,28 @@ pub fn client_state_update_from_json(args: &serde_json::Value) -> Option<ClientS
     })
 }
 
+/// Field-level delta for an entity the client already knows. Only fields
+/// that changed since the last snapshot sent to THIS client are present —
+/// the dominant bandwidth saver of the pipeline (~4x vs full states).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EntityDelta {
+    pub entity_id: EntityId,
+    pub coords: Option<[f32; 3]>,
+    pub heading: Option<f32>,
+    pub velocity: Option<[f32; 3]>,
+    pub health: Option<f32>,
+    pub armour: Option<f32>,
+    pub extra: Option<crate::entity::EntityExtra>,
+    pub network_owner: Option<Option<u32>>,
+}
+
 /// One entity operation inside a snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EntityOp {
-    /// Create-or-update. Carries the dirty flags so the client applies only
-    /// the changed fields (delta) once it already knows the entity.
+    /// Full state — sent once when the entity enters the client's AoI.
     Upsert(DirtyEntity),
+    /// Changed-fields-only update for a known entity.
+    Delta(EntityDelta),
     /// Entity left the client's AoI or despawned.
     Delete(EntityId),
 }

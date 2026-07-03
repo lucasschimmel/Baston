@@ -66,6 +66,7 @@ async fn zone_to_client_snapshot_end_to_end() {
         450.0,
         20,
     )
+    .with_consumer_name(format!("test-{}", uuid::Uuid::new_v4().simple()))
     .spawn();
 
     // Give the durable consumer a moment to attach before publishing.
@@ -99,6 +100,7 @@ async fn zone_to_client_snapshot_end_to_end() {
         ops.iter()
             .filter_map(|op| match op {
                 EntityOp::Upsert(d) => Some(d.entity_id),
+                EntityOp::Delta(d) => Some(d.entity_id),
                 EntityOp::Delete(_) => None,
             })
             .collect()

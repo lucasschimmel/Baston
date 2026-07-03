@@ -155,6 +155,14 @@ fn start_server(player_names: &[&str]) -> (Server, Vec<String>) {
     )
 }
 
+/// Private coordinate region for this binary — concurrent test binaries
+/// share the NATS stream and must not overlap AoIs.
+const BASE: [f32; 3] = [50_000.0, 50_000.0, 20.0];
+
+fn offset(local: [f32; 3]) -> [f32; 3] {
+    [BASE[0] + local[0], BASE[1] + local[1], BASE[2] + local[2]]
+}
+
 fn state_update(coords: [f32; 3]) -> ClientStateUpdate {
     ClientStateUpdate {
         entity_id: None,
@@ -257,6 +265,7 @@ async fn snapshot_pipeline_between_two_clients() {
         450.0,
         20,
     )
+    .with_consumer_name(format!("test-{}", uuid::Uuid::new_v4().simple()))
     .spawn();
     // Let the durable consumer attach before clients start reporting.
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -274,16 +283,22 @@ async fn snapshot_pipeline_between_two_clients() {
         // Phase 1: B must receive A's entity as a CREATED upsert.
         let a_entity;
         loop {
-            a.send(1, &build_state_update(&state_update([0.0, 0.0, 0.0])));
+            a.send(1, &build_state_update(&state_update(offset([0.0, 0.0, 0.0]))));
             a.pump();
-            b.send(1, &build_state_update(&state_update([100.0, 0.0, 0.0])));
+            b.send(1, &build_state_update(&state_update(offset([100.0, 0.0, 0.0]))));
             if let Some((_, payload)) =
                 b.wait_for_message(MSG_BASTON_SNAPSHOT, Duration::from_millis(300))
             {
                 let snapshot = parse_snapshot(&payload).unwrap();
-                if let Some(EntityOp::Upsert(d)) = snapshot.ops.first() {
+                // Concurrent test binaries share the NATS stream; find A's
+                // entity by owner rather than assuming it is the only one.
+                let found = snapshot.ops.iter().find_map(|op| match op {
+                    EntityOp::Upsert(d) if d.state.network_owner == Some(1) => Some(d.clone()),
+                    _ => None,
+                });
+                if let Some(d) = found {
                     assert!(d.dirty_fields.contains(DirtyFlags::CREATED));
-                    assert_eq!(d.state.coords, [0.0, 0.0, 0.0]);
+                    assert_eq!(d.state.coords, offset([0.0, 0.0, 0.0]));
                     a_entity = Some(d.entity_id);
                     break;
                 }
@@ -295,24 +310,16 @@ async fn snapshot_pipeline_between_two_clients() {
         // Phase 2: A moves; B sees a non-CREATED update with new coords.
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
-            a.send(1, &build_state_update(&state_update([5.0, 0.0, 0.0])));
+            a.send(1, &build_state_update(&state_update(offset([5.0, 0.0, 0.0]))));
             a.pump();
             if let Some((_, payload)) =
                 b.wait_for_message(MSG_BASTON_SNAPSHOT, Duration::from_millis(300))
             {
                 let snapshot = parse_snapshot(&payload).unwrap();
-                let update = snapshot.ops.iter().find_map(|op| match op {
-                    EntityOp::Upsert(d)
-                        if d.entity_id == a_entity
-                            && !d.dirty_fields.contains(DirtyFlags::CREATED)
-                            && d.state.coords == [5.0, 0.0, 0.0] =>
-                    {
-                        Some(d.clone())
-                    }
-                    _ => None,
-                });
-                if let Some(update) = update {
-                    assert!(update.dirty_fields.contains(DirtyFlags::COORDS));
+                let moved = snapshot.ops.iter().any(|op| matches!(op,
+                    EntityOp::Delta(d)
+                        if d.entity_id == a_entity && d.coords == Some(offset([5.0, 0.0, 0.0]))));
+                if moved {
                     break;
                 }
             }
@@ -323,7 +330,7 @@ async fn snapshot_pipeline_between_two_clients() {
         drop(a);
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
-            b.send(1, &build_state_update(&state_update([100.0, 0.0, 0.0])));
+            b.send(1, &build_state_update(&state_update(offset([100.0, 0.0, 0.0]))));
             if let Some((_, payload)) =
                 b.wait_for_message(MSG_BASTON_SNAPSHOT, Duration::from_millis(300))
             {
@@ -341,7 +348,7 @@ async fn snapshot_pipeline_between_two_clients() {
 
         // Phase 4: B keeps reporting; B must never receive its own entity.
         for _ in 0..10 {
-            b.send(1, &build_state_update(&state_update([100.0, 0.0, 0.0])));
+            b.send(1, &build_state_update(&state_update(offset([100.0, 0.0, 0.0]))));
             if let Some((_, payload)) =
                 b.wait_for_message(MSG_BASTON_SNAPSHOT, Duration::from_millis(100))
             {
@@ -353,6 +360,11 @@ async fn snapshot_pipeline_between_two_clients() {
                             Some(2),
                             "B must not be echoed its own entity"
                         );
+                    }
+                    if let EntityOp::Delta(d) = op {
+                        // Deltas always follow an Upsert baseline; A is gone,
+                        // so nothing (least of all B itself) may delta here.
+                        panic!("unexpected delta after A left: {:?}", d.entity_id);
                     }
                 }
             }

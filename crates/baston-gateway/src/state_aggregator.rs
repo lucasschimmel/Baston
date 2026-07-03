@@ -37,10 +37,8 @@ pub fn update_rate_for_distance(dist: f32) -> Duration {
 /// What the push loop knows about one connected client.
 #[derive(Default)]
 pub struct ClientEntityTracker {
-    /// Entities the client has been sent a create for.
-    known_entities: std::collections::HashSet<EntityId>,
-    /// Last time an update for the entity was pushed (variable-rate skip).
-    last_sent_at: HashMap<EntityId, Instant>,
+    /// Per known entity: when and what was last sent (delta baseline).
+    last_sent: HashMap<EntityId, (Instant, EntityState)>,
 }
 
 pub struct StateAggregator {
@@ -52,6 +50,7 @@ pub struct StateAggregator {
     aoi_radius: f32,
     push_interval: Duration,
     trackers: DashMap<u32, ClientEntityTracker>,
+    consumer_name: String,
 }
 
 impl StateAggregator {
@@ -72,7 +71,15 @@ impl StateAggregator {
             aoi_radius,
             push_interval: Duration::from_millis(push_interval_ms.max(1)),
             trackers: DashMap::new(),
+            consumer_name: "baston-gateway".to_owned(),
         }
+    }
+
+    /// Override the durable consumer name (tests must not share the live
+    /// gateway's consumer, or messages get load-balanced away).
+    pub fn with_consumer_name(mut self, name: impl Into<String>) -> Self {
+        self.consumer_name = name.into();
+        self
     }
 
     pub fn world_state(&self) -> Arc<DashMap<EntityId, EntityState>> {
@@ -104,7 +111,7 @@ impl StateAggregator {
         let stream = js.get_stream(STATE_STREAM_NAME).await?;
         let consumer = stream
             .create_consumer(async_nats::jetstream::consumer::pull::Config {
-                durable_name: Some("baston-gateway".to_string()),
+                durable_name: Some(self.consumer_name.clone()),
                 filter_subject: STATE_SUBJECT_WILDCARD.to_string(),
                 ..Default::default()
             })
@@ -188,11 +195,9 @@ impl StateAggregator {
         if ops.is_empty() {
             return;
         }
-        // Creates/deletes must survive packet loss; pure updates are
+        // Creates/deletes must survive packet loss; pure deltas are
         // superseded 50ms later anyway.
-        let reliable = ops
-            .iter()
-            .any(|op| !matches!(op, EntityOp::Upsert(d) if !d.dirty_fields.contains(DirtyFlags::CREATED)));
+        let reliable = ops.iter().any(|op| !matches!(op, EntityOp::Delta(_)));
         let entity_count = ops.len();
         let packet = build_snapshot(&EntitySnapshot { tick, ops });
         metrics::gauge!("entities_per_client", "source" => source.to_string())
@@ -235,37 +240,38 @@ pub fn compute_client_ops(
         }
         visible.insert(state.entity_id);
 
-        if tracker.known_entities.contains(&state.entity_id) {
-            // Variable update rate by distance (jalon C5): skip until due.
-            let due = tracker
-                .last_sent_at
-                .get(&state.entity_id)
-                .is_none_or(|last| now.duration_since(*last) >= update_rate_for_distance(dist));
-            if !due {
-                continue;
+        match tracker.last_sent.get(&state.entity_id) {
+            Some((last_at, baseline)) => {
+                // Variable update rate by distance (jalon C5): skip until due.
+                if now.duration_since(*last_at) < update_rate_for_distance(dist) {
+                    continue;
+                }
+                // Field-level delta vs what THIS client last saw; identical
+                // state → nothing on the wire at all.
+                let Some(delta) = build_delta(baseline, state) else {
+                    continue;
+                };
+                ops.push(EntityOp::Delta(delta));
+                tracker
+                    .last_sent
+                    .insert(state.entity_id, (now, state.clone()));
             }
-            tracker.last_sent_at.insert(state.entity_id, now);
-            ops.push(EntityOp::Upsert(DirtyEntity {
-                entity_id: state.entity_id,
-                // Per-client field-level deltas are Phase D; a known entity
-                // gets the full field set minus CREATED.
-                dirty_fields: DirtyFlags::all() - DirtyFlags::CREATED - DirtyFlags::DELETED,
-                state: state.clone(),
-            }));
-        } else {
-            tracker.known_entities.insert(state.entity_id);
-            tracker.last_sent_at.insert(state.entity_id, now);
-            ops.push(EntityOp::Upsert(DirtyEntity {
-                entity_id: state.entity_id,
-                dirty_fields: DirtyFlags::all() - DirtyFlags::DELETED,
-                state: state.clone(),
-            }));
+            None => {
+                ops.push(EntityOp::Upsert(DirtyEntity {
+                    entity_id: state.entity_id,
+                    dirty_fields: DirtyFlags::all() - DirtyFlags::DELETED,
+                    state: state.clone(),
+                }));
+                tracker
+                    .last_sent
+                    .insert(state.entity_id, (now, state.clone()));
+            }
         }
     }
 
     // Entities the client knew that are gone (despawn) or out of AoI:
     // exactly one Delete, then forgotten.
-    tracker.known_entities.retain(|id| {
+    tracker.last_sent.retain(|id, _| {
         if visible.contains(id) {
             true
         } else {
@@ -273,9 +279,37 @@ pub fn compute_client_ops(
             false
         }
     });
-    tracker.last_sent_at.retain(|id, _| visible.contains(id));
 
     ops
+}
+
+/// Changed fields between the client's baseline and the current state;
+/// `None` when nothing differs.
+fn build_delta(
+    baseline: &EntityState,
+    current: &EntityState,
+) -> Option<baston_protocol::udp::state::EntityDelta> {
+    let mut delta = baston_protocol::udp::state::EntityDelta {
+        entity_id: current.entity_id,
+        coords: (baseline.coords != current.coords).then_some(current.coords),
+        heading: (baseline.heading != current.heading).then_some(current.heading),
+        velocity: (baseline.velocity != current.velocity).then_some(current.velocity),
+        health: (baseline.health != current.health).then_some(current.health),
+        armour: (baseline.armour != current.armour).then_some(current.armour),
+        extra: (baseline.extra != current.extra).then(|| current.extra.clone()),
+        network_owner: None,
+    };
+    if baseline.network_owner != current.network_owner {
+        delta.network_owner = Some(current.network_owner);
+    }
+    let empty = delta.coords.is_none()
+        && delta.heading.is_none()
+        && delta.velocity.is_none()
+        && delta.health.is_none()
+        && delta.armour.is_none()
+        && delta.extra.is_none()
+        && delta.network_owner.is_none();
+    (!empty).then_some(delta)
 }
 
 #[cfg(test)]
@@ -349,13 +383,23 @@ mod tests {
         assert_eq!(ops.len(), 1);
         assert!(matches!(&ops[0], EntityOp::Upsert(d) if d.dirty_fields.contains(DirtyFlags::CREATED)));
 
-        // Still in range after the rate-limit window → plain update.
+        // Still in range, moved again → field-level delta (coords only).
         std::thread::sleep(update_rate_for_distance(100.0));
+        entity.coords = [110.0, 0.0, 0.0];
+        world.insert(id, entity.clone());
         let ops = compute_client_ops(&world, &mut tracker, 1, CENTER, 450.0);
         assert_eq!(ops.len(), 1);
-        assert!(
-            matches!(&ops[0], EntityOp::Upsert(d) if !d.dirty_fields.contains(DirtyFlags::CREATED))
-        );
+        match &ops[0] {
+            EntityOp::Delta(d) => {
+                assert_eq!(d.coords, Some([110.0, 0.0, 0.0]));
+                assert!(d.heading.is_none() && d.health.is_none());
+            }
+            other => panic!("expected Delta, got {other:?}"),
+        }
+
+        // Unchanged state after the window → nothing on the wire.
+        std::thread::sleep(update_rate_for_distance(110.0));
+        assert!(compute_client_ops(&world, &mut tracker, 1, CENTER, 450.0).is_empty());
     }
 
     #[test]

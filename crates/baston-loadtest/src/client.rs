@@ -20,21 +20,28 @@ use crate::Stats;
 const REPORT_INTERVAL: Duration = Duration::from_millis(50);
 const WALK_SPEED_MPS: f32 = 1.5;
 
-/// Deterministic per-client spawn point: clusters of 25 so AoI overlap is
-/// guaranteed without putting all 100 peds on one spot.
+/// Deterministic pseudo-random spawn over a 4×4 km play area — matches the
+/// roadmap's "position aléatoire sur la map"; with a 450m AoI each client
+/// averages a handful of visible neighbors, like a real populated server.
 fn spawn_point(index: usize) -> [f32; 3] {
-    let cluster = (index / 25) as f32;
-    let slot = (index % 25) as f32;
-    [
-        cluster * 300.0 + (slot % 5.0) * 20.0,
-        (slot / 5.0).floor() * 20.0,
-        20.0,
-    ]
+    let h = (index as u64).wrapping_mul(0x9E3779B97F4A7C15);
+    let x = ((h >> 8) % 4000) as f32 - 2000.0;
+    let y = ((h >> 32) % 4000) as f32 - 2000.0;
+    [x, y, 20.0]
 }
 
 /// Cheap deterministic direction change (no rand dependency).
 fn heading_for(index: usize, tick: u64) -> f32 {
     (((index as u64).wrapping_mul(2654435761).wrapping_add(tick / 40)) % 360) as f32
+}
+
+/// Recover the 32-bit send-time from the health/armour stamp pair.
+fn record_latency(stats: &Stats, health: f32, armour: f32) {
+    let sent = (health as u32) & 0xFFFF | ((armour as u32) << 16);
+    let now = stats.now_ms();
+    if sent > 0 && now >= sent && now - sent < 10_000 {
+        stats.latencies_ms.lock().unwrap().push(f64::from(now - sent));
+    }
 }
 
 pub fn run_client(index: usize, token: String, server: SocketAddr, stats: Arc<Stats>) {
@@ -97,6 +104,10 @@ pub fn run_client(index: usize, token: String, server: SocketAddr, stats: Arc<St
     let mut last_report = Instant::now() - REPORT_INTERVAL;
     let mut known: HashSet<EntityId> = HashSet::new();
     let mut deleted: HashSet<EntityId> = HashSet::new();
+    // Last seen (health, armour) per entity — the latency stamp may arrive
+    // split across deltas.
+    let mut stamps: std::collections::HashMap<EntityId, (f32, f32)> =
+        std::collections::HashMap::new();
     let mut dropped = false;
 
     while !stats.stop.load(Ordering::Relaxed) {
@@ -161,23 +172,31 @@ pub fn run_client(index: usize, token: String, server: SocketAddr, stats: Arc<St
                                 continue;
                             }
                             known.insert(id);
-                            // Latency stamp (only meaningful for player peds
-                            // reported by other loadtest clients).
-                            let sent = (dirty.state.health as u32) & 0xFFFF
-                                | ((dirty.state.armour as u32) << 16);
-                            let now = stats.now_ms();
-                            if sent > 0 && now >= sent && now - sent < 10_000 {
-                                stats
-                                    .latencies_ms
-                                    .lock()
-                                    .unwrap()
-                                    .push(f64::from(now - sent));
+                            stamps.insert(id, (dirty.state.health, dirty.state.armour));
+                            record_latency(&stats, dirty.state.health, dirty.state.armour);
+                        }
+                        EntityOp::Delta(delta) => {
+                            let id = delta.entity_id;
+                            if deleted.contains(&id) || !known.contains(&id) {
+                                stats.desyncs.fetch_add(1, Ordering::Relaxed);
+                                continue;
+                            }
+                            let entry = stamps.entry(id).or_insert((0.0, 0.0));
+                            if let Some(h) = delta.health {
+                                entry.0 = h;
+                            }
+                            if let Some(a) = delta.armour {
+                                entry.1 = a;
+                            }
+                            if delta.health.is_some() || delta.armour.is_some() {
+                                record_latency(&stats, entry.0, entry.1);
                             }
                         }
                         EntityOp::Delete(id) => {
                             if !known.remove(&id) {
                                 stats.desyncs.fetch_add(1, Ordering::Relaxed);
                             }
+                            stamps.remove(&id);
                             deleted.insert(id);
                         }
                     }

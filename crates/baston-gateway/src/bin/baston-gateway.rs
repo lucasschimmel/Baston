@@ -8,6 +8,22 @@ use baston_gateway::{router, AppState, AuthService, PlayerRegistry};
 use baston_scripting::{DeferralRegistry, ScriptHost};
 use baston_zone::resource_loader::{spawn_hot_reload, ResourceManager};
 
+/// Raise the Windows timer resolution to 1ms. Without this the default
+/// ~15.6ms granularity turns the 16ms StateSyncEmitter tick into ~31ms
+/// (jitter ~15ms vs the < 2ms Phase C target).
+#[cfg(windows)]
+fn raise_timer_resolution() {
+    #[link(name = "winmm")]
+    extern "system" {
+        fn timeBeginPeriod(u_period: u32) -> u32;
+    }
+    // 0 = TIMERR_NOERROR; failure just means default resolution.
+    let result = unsafe { timeBeginPeriod(1) };
+    if result != 0 {
+        tracing::warn!(target: "baston", result, "timeBeginPeriod(1) failed — expect timer jitter");
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -16,6 +32,9 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "info,tower_http=info".into()),
         )
         .init();
+
+    #[cfg(windows)]
+    raise_timer_resolution();
 
     let config_path = std::env::var("BASTON_CONFIG").unwrap_or_else(|_| "baston.toml".into());
     let config = BastonConfig::load(Path::new(&config_path))?;
