@@ -4,7 +4,10 @@
 pub mod auth;
 pub mod http;
 pub mod players;
+pub mod state_aggregator;
 pub mod udp;
+
+pub use state_aggregator::StateAggregator;
 
 pub use auth::{AuthService, ValidatedPlayer};
 pub use http::{router, AppState};

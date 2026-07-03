@@ -80,7 +80,19 @@ async fn main() -> anyhow::Result<()> {
         Some(net_rx),
         Some(Arc::clone(&state_ingest)),
     )?;
-    let _ = (&nats, &udp); // aggregator wiring lands in jalon C3
+
+    // Jalon C3: NATS → per-client AoI-filtered snapshots.
+    if let Some(nats) = nats {
+        baston_gateway::StateAggregator::new(
+            nats,
+            Arc::clone(&players),
+            Arc::clone(&state_ingest),
+            udp.clone(),
+            config.state_sync.aoi_radius,
+            config.state_sync.push_interval_ms,
+        )
+        .spawn();
+    }
 
     let auth = AuthService::new(&config.auth)?;
     let state = Arc::new(AppState {

@@ -64,6 +64,13 @@ pub struct UdpHandle {
 }
 
 impl UdpHandle {
+    /// Handle wired to nothing — sends are dropped. For tests that need a
+    /// `StateAggregator` without an ENet host.
+    pub fn disconnected() -> (Self, mpsc::UnboundedReceiver<UdpCommand>) {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        (Self { cmd_tx }, cmd_rx)
+    }
+
     pub fn send_to_source(&self, source: u32, channel: u8, data: Vec<u8>, reliable: bool) {
         let _ = self.cmd_tx.send(UdpCommand::SendToSource {
             source,
