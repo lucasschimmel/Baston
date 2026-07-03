@@ -181,6 +181,27 @@ async fn main() -> anyhow::Result<()> {
         .spawn();
     }
 
+    // Phase D: zone federation (gRPC registry + routing). Disabled by default;
+    // Docker Compose enables it via [meshing] in baston.toml or env.
+    let mesh = if config.meshing.enabled {
+        let registry = Arc::new(baston_gateway::ZoneRegistry::new(
+            std::time::Duration::from_secs(config.meshing.zone_timeout_secs),
+        ));
+        let router = Arc::new(baston_gateway::ConnectionRouter::new());
+        let mesh = baston_gateway::GatewayMesh::new(Arc::clone(&registry), router);
+        let grpc_addr: std::net::SocketAddr = config.meshing.gateway_grpc_addr.parse()?;
+        mesh.spawn_grpc_server(grpc_addr);
+        // Zone failure recovery is completed in jalon D6; eviction + logging
+        // already run here so silent zones leave the routing quadtree.
+        registry.spawn_liveness_monitor(Arc::new(|zone_id| {
+            tracing::error!(target: "gateway", zone = %zone_id,
+                "zone failure detected — initiating recovery");
+        }));
+        Some(mesh)
+    } else {
+        None
+    };
+
     let auth = AuthService::new(&config.auth)?;
     let state = Arc::new(AppState {
         config,
@@ -189,6 +210,7 @@ async fn main() -> anyhow::Result<()> {
         script_host,
         auth,
         packfiles: baston_gateway::http::PackfileCache::new(),
+        mesh,
     });
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));

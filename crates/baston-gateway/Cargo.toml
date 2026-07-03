@@ -31,6 +31,8 @@ metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 axum-server = { workspace = true }
 rustls = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
 baston-config = { workspace = true }
 baston-protocol = { workspace = true }
 baston-scripting = { workspace = true }

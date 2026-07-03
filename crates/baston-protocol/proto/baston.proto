@@ -1,0 +1,108 @@
+// BASTON zone-federation protocol (Phase D).
+// Gateway <-> Zone control plane. High-frequency state sync stays on NATS.
+syntax = "proto3";
+package baston;
+
+// Implemented by the Gateway; called by Zone Servers.
+service GatewayService {
+  rpc RegisterZone(RegisterZoneRequest) returns (RegisterZoneResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc PrepareHandoff(PrepareHandoffRequest) returns (PrepareHandoffResponse);
+  rpc ConfirmHandoff(ConfirmHandoffRequest) returns (ConfirmHandoffResponse);
+}
+
+// Implemented by each Zone Server; called by the Gateway (and Zone A during
+// the final activation step of a handoff, proxied through the Gateway).
+service ZoneService {
+  rpc PrepareForPlayer(PlayerStateRequest) returns (PrepareForPlayerResponse);
+  rpc ActivatePlayer(ActivatePlayerRequest) returns (ActivatePlayerResponse);
+  rpc ReleasePlayer(ReleasePlayerRequest) returns (ReleasePlayerResponse);
+}
+
+message BoundingBox {
+  float x_min = 1;
+  float x_max = 2;
+  float y_min = 3;
+  float y_max = 4;
+}
+
+message RegisterZoneRequest {
+  string zone_id = 1;
+  BoundingBox bounds = 2;
+  // gRPC address the Gateway can call back (ZoneService).
+  string grpc_addr = 3;
+  int32 max_players = 4;
+}
+
+message RegisterZoneResponse {
+  bool accepted = 1;
+  string message = 2;
+}
+
+message HeartbeatRequest {
+  string zone_id = 1;
+  uint32 player_count = 2;
+  uint32 entity_count = 3;
+}
+
+message HeartbeatResponse {
+  bool known = 1; // false => zone was evicted, must re-register
+}
+
+message PrepareHandoffRequest {
+  uint32 player_id = 1;
+  string from_zone = 2;
+  // Empty => Gateway picks the zone covering `predicted_x/y`.
+  string target_zone = 3;
+  float predicted_x = 4;
+  float predicted_y = 5;
+  // bincode-serialized baston_protocol::PlayerStateSnapshot (partial).
+  bytes snapshot = 6;
+}
+
+message PrepareHandoffResponse {
+  bool ready = 1;
+  string target_zone = 2;
+  string message = 3;
+}
+
+message ConfirmHandoffRequest {
+  uint32 player_id = 1;
+  string from_zone = 2;
+  string to_zone = 3;
+}
+
+message ConfirmHandoffResponse {
+  bool ok = 1;
+  string message = 2;
+}
+
+message PlayerStateRequest {
+  uint32 player_id = 1;
+  string from_zone = 2;
+  // bincode-serialized baston_protocol::PlayerStateSnapshot.
+  bytes snapshot = 3;
+}
+
+message PrepareForPlayerResponse {
+  bool ready = 1;
+  string message = 2;
+}
+
+message ActivatePlayerRequest {
+  uint32 player_id = 1;
+}
+
+message ActivatePlayerResponse {
+  bool ok = 1;
+  string message = 2;
+}
+
+message ReleasePlayerRequest {
+  uint32 player_id = 1;
+  string reason = 2;
+}
+
+message ReleasePlayerResponse {
+  bool ok = 1;
+}

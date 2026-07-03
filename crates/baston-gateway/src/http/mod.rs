@@ -31,6 +31,8 @@ pub struct AppState {
     pub script_host: ScriptHost,
     pub auth: AuthService,
     pub packfiles: PackfileCache,
+    /// Phase D zone federation (None when `[meshing]` is disabled).
+    pub mesh: Option<Arc<crate::mesh::GatewayMesh>>,
 }
 
 /// Build the gateway router.

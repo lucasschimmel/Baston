@@ -4,10 +4,32 @@ pub mod connection;
 pub mod entity;
 pub mod events;
 pub mod native;
+pub mod player_snapshot;
 pub mod players;
+pub mod spatial;
 pub mod udp;
 
+/// gRPC types + client/server stubs generated from `proto/baston.proto`
+/// by `tonic-build` (never hand-written).
+pub mod mesh {
+    tonic::include_proto!("baston");
+}
+
+pub use player_snapshot::PlayerStateSnapshot;
 pub use players::PlayerDirectory;
+pub use spatial::Aabb;
+
+impl From<Aabb> for mesh::BoundingBox {
+    fn from(a: Aabb) -> Self {
+        Self { x_min: a.x_min, x_max: a.x_max, y_min: a.y_min, y_max: a.y_max }
+    }
+}
+
+impl From<mesh::BoundingBox> for Aabb {
+    fn from(b: mesh::BoundingBox) -> Self {
+        Aabb::new(b.x_min, b.y_min, b.x_max, b.y_max)
+    }
+}
 
 use serde::{Deserialize, Serialize};
 

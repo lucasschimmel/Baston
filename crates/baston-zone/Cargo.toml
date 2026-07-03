@@ -20,6 +20,11 @@ bincode = { workspace = true }
 uuid = { workspace = true }
 metrics = { workspace = true }
 futures = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+anyhow = { workspace = true }
+tracing-subscriber = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -156,6 +156,12 @@ pub async fn client_connect(
             });
             state.players.bind_token(token.clone(), source);
             tracing::info!(target: "gateway", source, %name, "connection accepted");
+            // Phase D: assign the player a zone. Spawn coords are unknown at
+            // connect time — least-loaded fallback; the boundary/routing
+            // layer re-homes on the first positional update if needed.
+            if let Some(mesh) = &state.mesh {
+                mesh.route_new_player(source, None).await;
+            }
             tracing::info!(
                 target: "baston",
                 "connection ticket issued: session={token} udp={}",

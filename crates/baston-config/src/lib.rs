@@ -53,7 +53,54 @@ pub struct BastonConfig {
     pub metrics: MetricsConfig,
     #[serde(default)]
     pub dev: DevConfig,
+    #[serde(default)]
+    pub meshing: MeshingConfig,
     pub tls: Option<TlsConfig>,
+}
+
+/// `[meshing]` section — Phase D zone federation.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MeshingConfig {
+    /// Enables the federation layer (gRPC servers, registration, heartbeats).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Gateway gRPC listen address (GatewayService).
+    #[serde(default = "default_gateway_grpc_addr")]
+    pub gateway_grpc_addr: String,
+    /// Gateway gRPC address as seen from the zones (registration target).
+    #[serde(default = "default_gateway_grpc_target")]
+    pub gateway_grpc: String,
+    /// Zone gRPC listen address (ZoneService).
+    #[serde(default = "default_zone_grpc_addr")]
+    pub zone_grpc_addr: String,
+    /// Zone gRPC address as seen from the Gateway (what we register).
+    /// Defaults to `{ZONE_ID}:50051` under Docker; falls back to
+    /// `zone_grpc_addr` with 0.0.0.0 replaced by 127.0.0.1.
+    #[serde(default)]
+    pub zone_public_grpc_addr: Option<String>,
+    /// Zone bounds `x_min,y_min,x_max,y_max` (env `ZONE_BOUNDS` overrides).
+    #[serde(default)]
+    pub zone_bounds: Option<String>,
+    #[serde(default = "default_heartbeat_interval")]
+    pub heartbeat_interval_secs: u64,
+    /// Silence window before the Gateway evicts a zone (3 missed heartbeats).
+    #[serde(default = "default_zone_timeout")]
+    pub zone_timeout_secs: u64,
+    /// Distance to the zone edge that triggers handoff preparation (m).
+    #[serde(default = "default_boundary_margin")]
+    pub boundary_margin: f32,
+    /// Boundary scan interval (ms) — coarser than state sync on purpose.
+    #[serde(default = "default_boundary_scan_interval_ms")]
+    pub boundary_scan_interval_ms: u64,
+    /// Anti ping-pong: minimum seconds between two handoffs of one player.
+    #[serde(default = "default_handoff_cooldown")]
+    pub handoff_cooldown_secs: u64,
+    /// Admin HTTP API port (Gateway).
+    #[serde(default = "default_admin_port")]
+    pub admin_port: u16,
+    /// Bearer token for the admin API. Empty = admin API disabled.
+    #[serde(default)]
+    pub admin_token: String,
 }
 
 /// `[nats]` section — state-sync IPC (Phase C).
@@ -208,6 +255,53 @@ fn default_ownership_interval() -> u64 {
 fn default_metrics_port() -> u16 {
     9090
 }
+fn default_gateway_grpc_addr() -> String {
+    "0.0.0.0:50050".to_owned()
+}
+fn default_gateway_grpc_target() -> String {
+    "127.0.0.1:50050".to_owned()
+}
+fn default_zone_grpc_addr() -> String {
+    "0.0.0.0:50051".to_owned()
+}
+fn default_heartbeat_interval() -> u64 {
+    5
+}
+fn default_zone_timeout() -> u64 {
+    15
+}
+fn default_boundary_margin() -> f32 {
+    300.0
+}
+fn default_boundary_scan_interval_ms() -> u64 {
+    500
+}
+fn default_handoff_cooldown() -> u64 {
+    5
+}
+fn default_admin_port() -> u16 {
+    8080
+}
+
+impl Default for MeshingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            gateway_grpc_addr: default_gateway_grpc_addr(),
+            gateway_grpc: default_gateway_grpc_target(),
+            zone_grpc_addr: default_zone_grpc_addr(),
+            zone_public_grpc_addr: None,
+            zone_bounds: None,
+            heartbeat_interval_secs: default_heartbeat_interval(),
+            zone_timeout_secs: default_zone_timeout(),
+            boundary_margin: default_boundary_margin(),
+            boundary_scan_interval_ms: default_boundary_scan_interval_ms(),
+            handoff_cooldown_secs: default_handoff_cooldown(),
+            admin_port: default_admin_port(),
+            admin_token: String::new(),
+        }
+    }
+}
 
 impl Default for NatsConfig {
     fn default() -> Self {
@@ -304,7 +398,51 @@ impl BastonConfig {
         if let Ok(path) = std::env::var("BASTON_RESOURCES_PATH") {
             self.resources.path = PathBuf::from(path);
         }
+        // Phase D federation overrides (Docker Compose contract).
+        if let Ok(zone_id) = std::env::var("ZONE_ID") {
+            self.nats.zone_id = zone_id;
+        }
+        if let Ok(bounds) = std::env::var("ZONE_BOUNDS") {
+            self.meshing.zone_bounds = Some(bounds);
+        }
+        if let Ok(addr) = std::env::var("GATEWAY_GRPC") {
+            self.meshing.gateway_grpc = addr;
+        }
+        if let Ok(url) = std::env::var("NATS_URL") {
+            self.nats.url = url;
+        }
+        if let Ok(addr) = std::env::var("BASTON_GRPC_ADDR") {
+            self.meshing.gateway_grpc_addr = addr;
+        }
+        if let Ok(addr) = std::env::var("ZONE_GRPC_ADDR") {
+            self.meshing.zone_grpc_addr = addr;
+        }
+        if let Ok(addr) = std::env::var("ZONE_PUBLIC_GRPC_ADDR") {
+            self.meshing.zone_public_grpc_addr = Some(addr);
+        }
+        if let Ok(token) = std::env::var("BASTON_ADMIN_TOKEN") {
+            self.meshing.admin_token = token;
+        }
         Ok(())
+    }
+
+    /// The ZoneService address to register with the Gateway.
+    pub fn zone_public_grpc_addr(&self) -> String {
+        if let Some(addr) = &self.meshing.zone_public_grpc_addr {
+            return addr.clone();
+        }
+        // Docker DNS convention: the service is reachable as {ZONE_ID}:{port}.
+        let port = self
+            .meshing
+            .zone_grpc_addr
+            .rsplit(':')
+            .next()
+            .unwrap_or("50051");
+        if std::env::var("ZONE_ID").is_ok() {
+            format!("{}:{}", self.nats.zone_id, port)
+        } else {
+            format!("127.0.0.1:{port}")
+        }
     }
 }
 

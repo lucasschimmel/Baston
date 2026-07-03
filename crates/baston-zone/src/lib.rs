@@ -2,6 +2,7 @@
 //! gateway; the standalone binary split comes in Phase D.
 
 pub mod entity_manager;
+pub mod mesh;
 pub mod ownership;
 pub mod packfile;
 pub mod resource_loader;
