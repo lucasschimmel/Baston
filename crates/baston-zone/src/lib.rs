@@ -1,4 +1,38 @@
-//! Zone server: resource loader + lifecycle (Phase A stub — filled in at milestone A3).
+//! Zone server: resource loader + lifecycle. Phase A runs in-process with the
+//! gateway; the standalone binary split comes in Phase D.
 
-/// Placeholder so the workspace compiles at milestone A1.
-pub fn placeholder() {}
+pub mod resource_loader;
+
+use std::path::PathBuf;
+
+pub use resource_loader::{ResourceManager, ResourceState};
+
+/// Errors produced by the zone / resource layer.
+#[derive(Debug, thiserror::Error)]
+pub enum ZoneError {
+    #[error("failed to read manifest at {path}: {source}")]
+    ManifestRead {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to parse manifest at {path}: {source}")]
+    ManifestParse {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+    #[error("resource {resource} depends on unknown resource {dependency}")]
+    UnknownDependency { resource: String, dependency: String },
+    #[error("cyclic resource dependency involving: {0:?}")]
+    CyclicDependency(Vec<String>),
+    #[error("unknown resource {0}")]
+    UnknownResource(String),
+    #[error("failed to read script {path}: {source}")]
+    ScriptRead {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("scripting error: {0}")]
+    Scripting(#[from] baston_scripting::ScriptError),
+    #[error("file watcher error: {0}")]
+    Watcher(String),
+}
