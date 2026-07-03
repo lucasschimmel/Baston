@@ -1,8 +1,11 @@
 //! Zone server: resource loader + lifecycle. Phase A runs in-process with the
 //! gateway; the standalone binary split comes in Phase D.
 
+pub mod entity_manager;
 pub mod packfile;
 pub mod resource_loader;
+
+pub use entity_manager::EntityManager;
 
 use std::path::PathBuf;
 
