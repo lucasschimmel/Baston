@@ -426,6 +426,15 @@ impl BastonConfig {
         if let Ok(enabled) = std::env::var("BASTON_MESHING_ENABLED") {
             self.meshing.enabled = matches!(enabled.as_str(), "true" | "1" | "yes");
         }
+        if let Ok(port) = std::env::var("BASTON_METRICS_PORT") {
+            self.metrics.port =
+                port.parse()
+                    .map_err(|e: std::num::ParseIntError| ConfigError::EnvOverride {
+                        var: "BASTON_METRICS_PORT",
+                        value: port.clone(),
+                        reason: e.to_string(),
+                    })?;
+        }
         Ok(())
     }
 

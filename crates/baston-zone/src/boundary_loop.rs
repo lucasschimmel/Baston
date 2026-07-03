@@ -32,6 +32,13 @@ pub fn entity_handoff_subject(zone_id: &str) -> String {
 /// Request/reply subject the Gateway answers with the zone covering "x,y".
 pub const RESOLVE_ZONE_SUBJECT: &str = "baston.mesh.resolve_zone";
 
+/// Broadcast subject for cross-zone script events (D5). Every zone publishes
+/// its locally-triggered events here and dispatches those of its siblings.
+pub const CROSS_ZONE_EVENT_SUBJECT: &str = "baston.cross-zone.event.broadcast";
+
+/// Subject on which the Gateway publishes the global player list every ~2s.
+pub const GLOBAL_PLAYERS_SUBJECT: &str = "baston.mesh.players";
+
 /// Callback collecting zone-transferable script state for a player
 /// (`RegisterZoneTransferState`, jalon D4). Returns resource → JSON text.
 /// Async: the collection round-trips through every resource isolate.

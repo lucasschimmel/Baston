@@ -165,7 +165,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Phase D: zone federation (gRPC registry + routing). Disabled by default;
     // Docker Compose enables it via [meshing] in baston.toml or env.
-    let mesh = if config.meshing.enabled {
+    let (mesh, mut recovery_kick_rx) = if config.meshing.enabled {
         let registry = Arc::new(baston_gateway::ZoneRegistry::new(
             std::time::Duration::from_secs(config.meshing.zone_timeout_secs),
         ));
@@ -173,12 +173,26 @@ async fn main() -> anyhow::Result<()> {
         let mesh = baston_gateway::GatewayMesh::new(Arc::clone(&registry), Arc::clone(&router));
         let grpc_addr: std::net::SocketAddr = config.meshing.gateway_grpc_addr.parse()?;
         mesh.spawn_grpc_server(grpc_addr);
-        // Zone failure recovery is completed in jalon D6; eviction + logging
-        // already run here so silent zones leave the routing quadtree.
-        registry.spawn_liveness_monitor(Arc::new(|zone_id| {
-            tracing::error!(target: "gateway", zone = %zone_id,
-                "zone failure detected — initiating recovery");
-        }));
+        // Zone failure recovery (D6): reroute orphans to surviving zones.
+        // The UDP handle doesn't exist yet at this point — recovery kicks go
+        // through a channel drained after the UDP server starts.
+        let (kick_tx, kick_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(u32, String)>();
+        {
+            let mesh = Arc::clone(&mesh);
+            registry.spawn_liveness_monitor(Arc::new(move |zone_id| {
+                let mesh = Arc::clone(&mesh);
+                let kick_tx = kick_tx.clone();
+                tokio::spawn(async move {
+                    mesh.handle_zone_failure(&zone_id, &move |source, reason| {
+                        let _ = kick_tx.send((source, reason.to_owned()));
+                    })
+                    .await;
+                });
+            }));
+        }
+        let recovery_kick_rx: Option<tokio::sync::mpsc::UnboundedReceiver<(u32, String)>> =
+            Some(kick_rx);
         // Admin API (jalon D2) — own port, bearer auth.
         baston_gateway::admin::spawn_admin_api(
             baston_gateway::admin::AdminState {
@@ -220,9 +234,34 @@ async fn main() -> anyhow::Result<()> {
                 }
             });
         }
-        Some(mesh)
+        // D5: publish the global player list every 2s so zones can answer
+        // GetPlayers()/GetPlayerName() across zone boundaries.
+        if let Some(nats) = nats.clone() {
+            let players = Arc::clone(&players);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    interval.tick().await;
+                    let list: Vec<baston_protocol::PlayerInfo> =
+                        players.sources().into_iter().filter_map(|s| players.get(s)).collect();
+                    let Ok(payload) = serde_json::to_vec(&list) else { continue };
+                    if let Err(e) = nats
+                        .publish(
+                            baston_zone::boundary_loop::GLOBAL_PLAYERS_SUBJECT,
+                            payload.into(),
+                        )
+                        .await
+                    {
+                        tracing::warn!(target: "gateway", error = %e,
+                            "global player list publish failed");
+                    }
+                }
+            });
+        }
+        (Some(mesh), recovery_kick_rx)
     } else {
-        None
+        (None, None)
     };
 
     // D4: forward client state updates to the player's current zone, with a
@@ -256,6 +295,17 @@ async fn main() -> anyhow::Result<()> {
         Some(Arc::clone(&state_ingest)),
         mesh_forward,
     )?;
+
+    // D6: apply recovery kicks now that the UDP handle exists.
+    if let Some(mut rx) = recovery_kick_rx.take() {
+        let udp = udp.clone();
+        tokio::spawn(async move {
+            while let Some((source, reason)) = rx.recv().await {
+                tracing::warn!(target: "gateway", source, %reason, "kicking orphaned player");
+                udp.drop_source(source);
+            }
+        });
+    }
 
     // D4/D5: relay zone-emitted client events (TriggerClientEvent from a zone
     // process) to the right UDP peer.

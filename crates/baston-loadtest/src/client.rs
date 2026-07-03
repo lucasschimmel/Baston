@@ -15,20 +15,15 @@ use baston_protocol::udp::{read_message_type, MSG_CONNECT};
 use baston_protocol::udp::state::MSG_BASTON_SNAPSHOT;
 use rusty_enet as enet;
 
-use crate::Stats;
+use crate::{ClientPlan, Stats};
 
 const REPORT_INTERVAL: Duration = Duration::from_millis(50);
 const WALK_SPEED_MPS: f32 = 1.5;
-
-/// Deterministic pseudo-random spawn over a 4×4 km play area — matches the
-/// roadmap's "position aléatoire sur la map"; with a 450m AoI each client
-/// averages a handful of visible neighbors, like a real populated server.
-fn spawn_point(index: usize) -> [f32; 3] {
-    let h = (index as u64).wrapping_mul(0x9E3779B97F4A7C15);
-    let x = ((h >> 8) % 4000) as f32 - 2000.0;
-    let y = ((h >> 32) % 4000) as f32 - 2000.0;
-    [x, y, 20.0]
-}
+/// Crossers drive across the boundary at vehicle-ish speed so each one
+/// crosses roughly once per minute (10%/min fleet-wide with 10% crossers).
+const CROSS_SPEED_MPS: f32 = 15.0;
+/// How far past the boundary a crosser goes before turning back.
+const CROSS_DEPTH: f32 = 400.0;
 
 /// Cheap deterministic direction change (no rand dependency).
 fn heading_for(index: usize, tick: u64) -> f32 {
@@ -44,7 +39,13 @@ fn record_latency(stats: &Stats, health: f32, armour: f32) {
     }
 }
 
-pub fn run_client(index: usize, token: String, server: SocketAddr, stats: Arc<Stats>) {
+pub fn run_client(
+    index: usize,
+    token: String,
+    server: SocketAddr,
+    stats: Arc<Stats>,
+    plan: ClientPlan,
+) {
     let socket = match UdpSocket::bind("0.0.0.0:0") {
         Ok(s) => s,
         Err(_) => {
@@ -99,7 +100,11 @@ pub fn run_client(index: usize, token: String, server: SocketAddr, stats: Arc<St
     stats.connected.fetch_add(1, Ordering::Relaxed);
 
     // Main loop: walk + report + consume snapshots.
-    let mut coords = spawn_point(index);
+    let mut coords = plan.spawn;
+    // Crossers oscillate along X across the boundary at x = 0.
+    let mut cross_dir: f32 = if coords[0] < 0.0 { 1.0 } else { -1.0 };
+    let mut last_side_positive = coords[0] >= 0.0;
+    let mut last_snapshot_at: Option<Instant> = None;
     let mut tick: u64 = 0;
     let mut last_report = Instant::now() - REPORT_INTERVAL;
     let mut known: HashSet<EntityId> = HashSet::new();
@@ -114,11 +119,29 @@ pub fn run_client(index: usize, token: String, server: SocketAddr, stats: Arc<St
         if last_report.elapsed() >= REPORT_INTERVAL {
             last_report = Instant::now();
             tick += 1;
-            let heading = heading_for(index, tick);
-            let (dx, dy) = heading.to_radians().sin_cos();
-            let step = WALK_SPEED_MPS * REPORT_INTERVAL.as_secs_f32();
+            let (heading, dx, dy, speed);
+            if plan.crosser {
+                // Straight line across the boundary, U-turn at ±CROSS_DEPTH.
+                if coords[0] * cross_dir > CROSS_DEPTH {
+                    cross_dir = -cross_dir;
+                }
+                (dx, dy) = (cross_dir, 0.0);
+                heading = if cross_dir > 0.0 { 90.0 } else { 270.0 };
+                speed = CROSS_SPEED_MPS;
+            } else {
+                heading = heading_for(index, tick);
+                (dx, dy) = heading.to_radians().sin_cos();
+                speed = WALK_SPEED_MPS;
+            }
+            let step = speed * REPORT_INTERVAL.as_secs_f32();
             coords[0] += dx * step;
             coords[1] += dy * step;
+            // Count actual boundary crossings (handoff success denominator).
+            let side_positive = coords[0] >= 0.0;
+            if plan.crosser && side_positive != last_side_positive {
+                last_side_positive = side_positive;
+                stats.crossings.fetch_add(1, Ordering::Relaxed);
+            }
 
             // Stamp send-time into health/armour (16 bits each, exact f32).
             let sent = stats.now_ms();
@@ -128,7 +151,7 @@ pub fn run_client(index: usize, token: String, server: SocketAddr, stats: Arc<St
                 model_hash: 0x705E61F2,
                 coords,
                 heading,
-                velocity: [dx * WALK_SPEED_MPS, dy * WALK_SPEED_MPS, 0.0],
+                velocity: [dx * speed, dy * speed, 0.0],
                 health: (sent & 0xFFFF) as f32,
                 armour: (sent >> 16) as f32,
                 extra: None,
@@ -150,6 +173,17 @@ pub fn run_client(index: usize, token: String, server: SocketAddr, stats: Arc<St
                 };
                 if ty != MSG_BASTON_SNAPSHOT {
                     continue;
+                }
+                // Client-visible freeze: a crosser's snapshot stream must not
+                // gap around a handoff (push cadence is 50ms; anything much
+                // above is a stall the player would see).
+                if plan.crosser {
+                    let now = Instant::now();
+                    if let Some(prev) = last_snapshot_at {
+                        let gap = now.duration_since(prev).as_secs_f64() * 1000.0;
+                        stats.crosser_gaps_ms.lock().unwrap().push(gap);
+                    }
+                    last_snapshot_at = Some(now);
                 }
                 let Some(snapshot) = parse_snapshot(payload) else {
                     stats.desyncs.fetch_add(1, Ordering::Relaxed);

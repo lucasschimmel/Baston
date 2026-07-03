@@ -151,6 +151,103 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // ── Cross-zone script events (D5) ──
+    // Outbound: locally-triggered events mirror to siblings over NATS.
+    {
+        let nats = nats.clone();
+        let zone = zone_id.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+        script_host.set_cross_zone_publisher(Arc::new(move |event, args_json| {
+            let _ = tx.send((event.to_owned(), args_json.to_owned()));
+        }));
+        tokio::spawn(async move {
+            while let Some((event, args)) = rx.recv().await {
+                let payload = serde_json::json!({
+                    "from_zone": zone, "event": event, "args": args,
+                });
+                if let Err(e) = nats
+                    .publish(
+                        baston_zone::boundary_loop::CROSS_ZONE_EVENT_SUBJECT,
+                        payload.to_string().into(),
+                    )
+                    .await
+                {
+                    tracing::error!(target: "zone", error = %e, "cross-zone event publish failed");
+                }
+            }
+        });
+    }
+    // Inbound: dispatch sibling events locally (never re-published).
+    {
+        let nats = nats.clone();
+        let zone = zone_id.clone();
+        let host = script_host.clone();
+        tokio::spawn(async move {
+            use futures::StreamExt;
+            let mut sub = match nats
+                .subscribe(baston_zone::boundary_loop::CROSS_ZONE_EVENT_SUBJECT)
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(target: "zone", error = %e, "cross-zone event sub failed");
+                    return;
+                }
+            };
+            while let Some(msg) = sub.next().await {
+                let Ok(v) = serde_json::from_slice::<serde_json::Value>(&msg.payload) else {
+                    continue;
+                };
+                if v["from_zone"].as_str() == Some(zone.as_str()) {
+                    continue; // our own broadcast
+                }
+                let (Some(event), Some(args)) = (v["event"].as_str(), v["args"].as_str()) else {
+                    continue;
+                };
+                if let Err(e) = host.trigger_remote_event(event, args.to_owned()).await {
+                    tracing::warn!(target: "zone", error = %e, "remote event dispatch failed");
+                }
+            }
+        });
+    }
+
+    // ── Global player list (D5) ── the Gateway publishes every ~2s; mirror
+    // it into the local directory so GetPlayers()/GetPlayerName() span zones.
+    {
+        let nats = nats.clone();
+        let players = Arc::clone(&players);
+        tokio::spawn(async move {
+            use futures::StreamExt;
+            let mut sub = match nats
+                .subscribe(baston_zone::boundary_loop::GLOBAL_PLAYERS_SUBJECT)
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(target: "zone", error = %e, "global players sub failed");
+                    return;
+                }
+            };
+            while let Some(msg) = sub.next().await {
+                let Ok(list) =
+                    serde_json::from_slice::<Vec<baston_protocol::PlayerInfo>>(&msg.payload)
+                else {
+                    continue;
+                };
+                let fresh: std::collections::HashSet<u32> =
+                    list.iter().map(|p| p.source).collect();
+                for p in list {
+                    players.insert(p);
+                }
+                for source in players.sources() {
+                    if !fresh.contains(&source) {
+                        players.remove(source);
+                    }
+                }
+            }
+        });
+    }
+
     // Inbound ownerless-entity handoffs from sibling zones.
     baston_zone::boundary_loop::BoundaryLoop::spawn_entity_handoff_consumer(
         nats.clone(),
@@ -179,9 +276,11 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Federation: ZoneService gRPC + registration + heartbeats ──
     let em_for_count = Arc::clone(&entity_manager);
-    let players_for_count = Arc::clone(&players);
+    // Heartbeat load = players ACTIVE in this zone (the local directory also
+    // mirrors the global list for cross-zone GetPlayers, so count via ingest).
+    let ingest_for_count = Arc::clone(&state_ingest);
     let hooks = ZoneMeshHooks {
-        player_count: Arc::new(move || players_for_count.count() as u32),
+        player_count: Arc::new(move || ingest_for_count.player_kinematics().len() as u32),
         entity_count: Arc::new(move || em_for_count.count() as u32),
         // Ghost → active (D4): register the player locally, then fire
         // playerJoining with the restored script_state.

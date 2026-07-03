@@ -58,6 +58,40 @@ impl GatewayMesh {
         Some(zone)
     }
 
+    /// Zone failure recovery (jalon D6): the zone is already evicted from the
+    /// registry; reroute every orphaned player to the least-loaded surviving
+    /// zone, or kick when no zone is left. Returns (rerouted, kicked).
+    pub async fn handle_zone_failure(
+        &self,
+        failed_zone: &str,
+        kick: &(dyn Fn(u32, &str) + Send + Sync),
+    ) -> (usize, usize) {
+        let started = std::time::Instant::now();
+        tracing::error!(target: "gateway", zone = %failed_zone,
+            "zone failure detected — initiating recovery");
+        let orphaned = self.router.players_in_zone(failed_zone);
+        let total = orphaned.len();
+        let (mut rerouted, mut kicked) = (0, 0);
+        for source in orphaned {
+            match self.registry.find_least_loaded_zone_excluding(Some(failed_zone)).await {
+                Some(fallback) => {
+                    self.router.commit_handoff(source, &fallback).await;
+                    rerouted += 1;
+                }
+                None => {
+                    kick(source, "Server zone unavailable");
+                    self.router.remove(source);
+                    kicked += 1;
+                }
+            }
+        }
+        metrics::counter!("zone_recovery_players_rerouted_total").increment(rerouted as u64);
+        tracing::warn!(target: "gateway",
+            "Rerouting {total} players from {failed_zone} — complete in {:.1}s ({rerouted} rerouted, {kicked} kicked)",
+            started.elapsed().as_secs_f64());
+        (rerouted, kicked)
+    }
+
     /// Drain a zone: reroute all its players to the least-loaded other zone.
     /// Returns how many players were rerouted. (Full state migration rides
     /// the D4 handoff path; routing moves immediately so the zone empties.)

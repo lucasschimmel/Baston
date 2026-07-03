@@ -74,6 +74,10 @@ impl ResourceRuntimeHandle {
     }
 }
 
+/// Publishes locally-triggered events to sibling zones (Phase D). Receives
+/// `(event, args_json)`.
+pub type CrossZonePublisher = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
 /// Cloneable orchestrator for all resource runtimes.
 #[derive(Clone)]
 pub struct ScriptHost {
@@ -82,6 +86,15 @@ pub struct ScriptHost {
     players: Arc<PlayerDirectory>,
     net: crate::net_bridge::NetBridge,
     started_at: Instant,
+    cross_zone: Arc<std::sync::RwLock<Option<CrossZonePublisher>>>,
+}
+
+/// Lifecycle/internal events that never leave the local zone.
+fn is_zone_local_event(event: &str) -> bool {
+    event.starts_with("onResource")
+        || event.starts_with("player")
+        || event.starts_with("__baston")
+        || event == "onEntityOwnerChanged"
 }
 
 /// Cap on chained event re-broadcasts per dispatch, so a pair of handlers
@@ -112,7 +125,24 @@ impl ScriptHost {
             players,
             net,
             started_at: Instant::now(),
+            cross_zone: Arc::new(std::sync::RwLock::new(None)),
         })
+    }
+
+    /// Install the Phase D cross-zone event publisher (zone processes only).
+    pub fn set_cross_zone_publisher(&self, publisher: CrossZonePublisher) {
+        *self.cross_zone.write().expect("cross_zone lock poisoned") = Some(publisher);
+    }
+
+    /// Dispatch an event that arrived from ANOTHER zone: local fan-out only,
+    /// never re-published (loop prevention).
+    pub async fn trigger_remote_event(
+        &self,
+        event: &str,
+        args_json: String,
+    ) -> Result<(), ScriptError> {
+        self.broadcast_chain_inner(event.to_owned(), args_json, false).await;
+        Ok(())
     }
 
     /// The net bridge shared with the runtimes (pending native calls).
@@ -293,12 +323,28 @@ impl ScriptHost {
     }
 
     async fn broadcast_chain(&self, event: String, args_json: String) {
+        self.broadcast_chain_inner(event, args_json, true).await;
+    }
+
+    async fn broadcast_chain_inner(&self, event: String, args_json: String, publish_entry: bool) {
         let mut pending = VecDeque::new();
         pending.push_back((event, args_json));
         let mut dispatched = 0;
 
         while let Some((event, args_json)) = pending.pop_front() {
             dispatched += 1;
+            // Cross-zone fan-out (Phase D): locally-originated, non-lifecycle
+            // events mirror to sibling zones. The entry event of a REMOTE
+            // chain is skipped (loop prevention) — but reactions produced by
+            // local handlers are local origin and do propagate.
+            let is_remote_entry = dispatched == 1 && !publish_entry;
+            if !is_remote_entry && !is_zone_local_event(&event) {
+                if let Some(p) =
+                    self.cross_zone.read().expect("cross_zone lock poisoned").as_ref()
+                {
+                    p(&event, &args_json);
+                }
+            }
             if dispatched > MAX_EVENT_CHAIN {
                 tracing::warn!(target: "scripting", %event, "event chain exceeded {MAX_EVENT_CHAIN} dispatches; dropping remainder");
                 break;

@@ -68,11 +68,21 @@ async fn scrape_jitter(metrics_url: &str, http: &reqwest::Client) -> Option<f64>
     }
 }
 
+/// Fetch a single Prometheus sample by exact line prefix.
+async fn scrape_value(url: &str, http: &reqwest::Client, prefix: &str) -> Option<f64> {
+    let body = http.get(url).send().await.ok()?.text().await.ok()?;
+    body.lines()
+        .find_map(|l| l.strip_prefix(prefix).and_then(|v| v.trim().parse::<f64>().ok()))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn print_report(
     stats: &Stats,
     duration: Duration,
     cpu_pct: Option<f64>,
     metrics_url: &str,
+    zone_metrics: &[String],
+    handoffs: bool,
     http: &reqwest::Client,
 ) {
     let mut latencies = stats.latencies_ms.lock().unwrap().clone();
@@ -112,7 +122,57 @@ pub async fn print_report(
         stats.desyncs.load(Ordering::Relaxed),
     );
 
-    let ok = stats.dropped_connections.load(Ordering::Relaxed) == 0
+    // ── Phase D: handoff metrics ──
+    let mut handoff_ok = true;
+    if handoffs {
+        let crossings = stats.crossings.load(Ordering::Relaxed);
+        let committed = scrape_value(metrics_url, http, "handoffs_committed_total ")
+            .await
+            .unwrap_or(0.0);
+        let success_rate = if crossings > 0 {
+            (committed / crossings as f64 * 100.0).min(100.0)
+        } else {
+            f64::NAN
+        };
+        // Handoff latency p99: max across the zone processes' summaries.
+        let mut latency_p99: Option<f64> = None;
+        for url in zone_metrics {
+            if let Some(v) = scrape_value(
+                url,
+                http,
+                "handoff_total_duration_ms{quantile=\"0.99\"} ",
+            )
+            .await
+            {
+                latency_p99 = Some(latency_p99.map_or(v, |cur: f64| cur.max(v)));
+            }
+        }
+        // Client-visible freeze: crosser snapshot-stream gaps. Push cadence
+        // is 50ms; a gap above 150ms (2 missed pushes) is a visible stall.
+        let mut gaps = stats.crosser_gaps_ms.lock().unwrap().clone();
+        gaps.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let max_gap = gaps.last().copied().unwrap_or(0.0);
+        let freeze_ms = if max_gap > 150.0 { max_gap - 50.0 } else { 0.0 };
+
+        println!();
+        println!("--- handoffs (Phase D) ---");
+        println!("boundary crossings : {crossings} (committed on gateway: {committed:.0})");
+        println!("handoff_success_rate: {success_rate:.2}% (target > 99.9%)");
+        match latency_p99 {
+            Some(p) => println!("handoff_latency_p99 : {p:.0}ms (target < 100ms)"),
+            None => println!("handoff_latency_p99 : n/a (zone metrics unreachable)"),
+        }
+        println!(
+            "client_visible_freeze: {freeze_ms:.0}ms (max snapshot gap {max_gap:.0}ms, target 0ms)"
+        );
+        handoff_ok = crossings > 0
+            && success_rate >= 99.9
+            && latency_p99.is_none_or(|p| p < 100.0)
+            && freeze_ms == 0.0;
+    }
+
+    let ok = handoff_ok
+        && stats.dropped_connections.load(Ordering::Relaxed) == 0
         && stats.desyncs.load(Ordering::Relaxed) == 0
         && p50 < 50.0
         && p99 < 100.0
