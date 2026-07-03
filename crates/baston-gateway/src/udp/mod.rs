@@ -14,11 +14,14 @@ use std::net::UdpSocket;
 use std::sync::Arc;
 use std::time::Instant;
 
+use baston_protocol::events;
+use baston_protocol::native::NATIVE_RESULT_EVENT;
 use baston_protocol::udp::{
-    handshake, read_message_type, time_sync, MSG_CONNECT, MSG_I_QUIT, MSG_TIME_SYNC_REQ,
+    handshake, read_message_type, time_sync, MSG_CONNECT, MSG_I_QUIT, MSG_SERVER_EVENT,
+    MSG_TIME_SYNC_REQ,
 };
 use baston_protocol::PlayerDirectory;
-use baston_scripting::ScriptHost;
+use baston_scripting::{NetOutbound, ScriptHost};
 use rusty_enet as enet;
 use tokio::sync::mpsc;
 
@@ -88,6 +91,26 @@ pub fn spawn(
     players: Arc<PlayerDirectory>,
     script_host: ScriptHost,
 ) -> Result<UdpHandle, UdpError> {
+    spawn_with_net(
+        port,
+        poll_interval_ms,
+        max_players,
+        players,
+        script_host,
+        None,
+    )
+}
+
+/// Spawn with the script-runtime net bridge receiver (client events +
+/// native dispatch traffic).
+pub fn spawn_with_net(
+    port: u16,
+    poll_interval_ms: u64,
+    max_players: u32,
+    players: Arc<PlayerDirectory>,
+    script_host: ScriptHost,
+    net_rx: Option<mpsc::UnboundedReceiver<NetOutbound>>,
+) -> Result<UdpHandle, UdpError> {
     let socket =
         UdpSocket::bind(("0.0.0.0", port)).map_err(|source| UdpError::Bind { port, source })?;
     let host = enet::Host::new(
@@ -111,17 +134,20 @@ pub fn spawn(
         peer_sources: HashMap::new(),
         source_peers: HashMap::new(),
     };
-    tokio::spawn(run(server, cmd_rx, poll_interval_ms));
+    tokio::spawn(run(server, cmd_rx, net_rx, poll_interval_ms));
     Ok(UdpHandle { cmd_tx })
 }
 
 async fn run(
     mut server: UdpServer,
     mut cmd_rx: mpsc::UnboundedReceiver<UdpCommand>,
+    net_rx: Option<mpsc::UnboundedReceiver<NetOutbound>>,
     poll_interval_ms: u64,
 ) {
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(poll_interval_ms.max(1)));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // A closed/absent bridge must not wedge the select loop.
+    let mut net_rx = net_rx;
     loop {
         tokio::select! {
             _ = tick.tick() => {
@@ -134,7 +160,26 @@ async fn run(
                     None => server.pump().await,
                 }
             }
+            outbound = recv_net(&mut net_rx) => {
+                if let Some(outbound) = outbound {
+                    server.handle_net_outbound(outbound);
+                }
+            }
         }
+    }
+}
+
+/// Await the net bridge, pending forever when absent or closed.
+async fn recv_net(rx: &mut Option<mpsc::UnboundedReceiver<NetOutbound>>) -> Option<NetOutbound> {
+    match rx {
+        Some(receiver) => match receiver.recv().await {
+            Some(v) => Some(v),
+            None => {
+                *rx = None;
+                std::future::pending().await
+            }
+        },
+        None => std::future::pending().await,
     }
 }
 
@@ -209,6 +254,7 @@ impl UdpServer {
         match msg_type {
             MSG_CONNECT => self.on_handshake(peer_id, payload),
             MSG_TIME_SYNC_REQ => self.on_time_sync(peer_id, payload),
+            MSG_SERVER_EVENT => self.on_server_event(peer_id, payload).await,
             MSG_I_QUIT => {
                 self.host.peer_mut(peer_id).disconnect(0);
                 self.on_disconnect(peer_id).await;
@@ -275,6 +321,75 @@ impl UdpServer {
                 tracing::info!(target: "baston", source, "clock sync: offset={offset:+}ms");
             }
         }
+    }
+
+    /// Outbound client event from a script runtime → `msgNetEvent` packet.
+    fn handle_net_outbound(&mut self, outbound: NetOutbound) {
+        match outbound {
+            NetOutbound::ClientEvent {
+                source,
+                event,
+                args_json,
+            } => {
+                let msgpack = match events::json_args_to_msgpack(&args_json) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::warn!(target: "udp", %event, error = %e, "client event args encode failed");
+                        return;
+                    }
+                };
+                let packet = events::build_net_event(&event, &msgpack);
+                self.handle_command(UdpCommand::SendToSource {
+                    source,
+                    channel: 0,
+                    data: packet,
+                    reliable: true,
+                });
+            }
+        }
+    }
+
+    /// `msgServerEvent` (TriggerServerEvent from the client): either a native
+    /// dispatch result for the shim, or a regular net event for the runtimes.
+    async fn on_server_event(&mut self, peer_id: enet::PeerID, payload: &[u8]) {
+        let Some(&source) = self.peer_sources.get(&peer_id) else {
+            tracing::debug!(target: "udp", "server event from unauthenticated peer ignored");
+            return;
+        };
+        let Some(event) = events::parse_server_event(payload) else {
+            return;
+        };
+        let args = match events::msgpack_to_json_args(event.msgpack_args) {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!(target: "udp", event = %event.name, error = %e, "server event args decode failed");
+                return;
+            }
+        };
+
+        if event.name == NATIVE_RESULT_EVENT {
+            // args: [id, result]
+            let (Some(id), result) = (
+                args.get(0).and_then(|v| v.as_u64()),
+                args.get(1).cloned().unwrap_or(serde_json::Value::Null),
+            ) else {
+                return;
+            };
+            if !self.script_host.net().pending_natives.resolve(id, result) {
+                tracing::debug!(target: "udp", id, "native result for unknown call (timed out?)");
+            }
+            return;
+        }
+
+        // Dispatch detached: a handler may itself await a native-call round
+        // trip that only THIS task can resolve — blocking here would deadlock.
+        let script_host = self.script_host.clone();
+        let name = event.name.clone();
+        tokio::spawn(async move {
+            if let Err(e) = script_host.trigger_net_event(&name, source, &args).await {
+                tracing::error!(target: "udp", event = %name, error = %e, "net event dispatch failed");
+            }
+        });
     }
 
     async fn on_disconnect(&mut self, peer_id: enet::PeerID) {

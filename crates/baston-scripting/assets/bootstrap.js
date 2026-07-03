@@ -57,6 +57,26 @@
     ops.op_trigger_event(name, JSON.stringify(args));
   }
 
+  function TriggerClientEvent(name, source, ...args) {
+    ops.op_trigger_client_event(String(name), source >>> 0, JSON.stringify(args));
+  }
+
+  // Server → client native dispatch through the BASTON shim (see
+  // baston-protocol native.rs). Returns a Promise.
+  async function InvokeNativeOnClient(source, hashHex, args, expectsReturn) {
+    const raw = await ops.op_invoke_native_on_client(
+      source >>> 0,
+      String(hashHex),
+      JSON.stringify(args ?? []),
+      expectsReturn !== false
+    );
+    const result = JSON.parse(raw);
+    if (result && typeof result === "object" && result.__error) {
+      throw new Error(result.__error);
+    }
+    return result;
+  }
+
   // --- exports ---
 
   const localExports = new Map();
@@ -109,6 +129,16 @@
     }
   }
 
+  function dispatchWithSource(name, source, argsJson) {
+    const prev = globalThis.source;
+    globalThis.source = source;
+    try {
+      dispatch(name, argsJson);
+    } finally {
+      globalThis.source = prev;
+    }
+  }
+
   function dispatchPlayerConnecting(source, playerName) {
     const handlers = eventHandlers.get("playerConnecting");
     if (!handlers || handlers.size === 0) return;
@@ -137,7 +167,7 @@
     }
   }
 
-  globalThis.__baston = { dispatch, dispatchPlayerConnecting };
+  globalThis.__baston = { dispatch, dispatchWithSource, dispatchPlayerConnecting };
 
   // --- FiveM-style globals ---
 
@@ -147,7 +177,13 @@
   globalThis.RemoveEventHandler = RemoveEventHandler;
   globalThis.TriggerEvent = TriggerEvent;
   globalThis.emit = TriggerEvent;
-  globalThis.RegisterNetEvent = function () {}; // Phase A stub
+  globalThis.TriggerClientEvent = TriggerClientEvent;
+  globalThis.emitNet = TriggerClientEvent;
+  globalThis.InvokeNativeOnClient = InvokeNativeOnClient;
+  // GetPlayerPed(source): round trip to the player's client (Phase B).
+  globalThis.GetPlayerPed = (source) =>
+    InvokeNativeOnClient(source, "0x43A66C31C68491C0", [-1], true);
+  globalThis.RegisterNetEvent = function () {}; // net events auto-registered
   globalThis.exports = exportsProxy;
   globalThis.GetCurrentResourceName = () => ops.op_get_current_resource_name();
   globalThis.GetGameTimer = () => ops.op_get_game_timer();

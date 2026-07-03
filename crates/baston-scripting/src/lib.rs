@@ -10,9 +10,11 @@ mod deferrals;
 mod error;
 mod extensions;
 mod host;
+pub mod net_bridge;
 mod runtime;
 
 pub use deferrals::{DeferralOutcome, DeferralRegistry};
 pub use error::ScriptError;
 pub use host::{ScriptHost, ScriptSource};
+pub use net_bridge::{NetBridge, NetOutbound};
 pub use runtime::ScriptRuntime;

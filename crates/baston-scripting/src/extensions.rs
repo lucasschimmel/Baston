@@ -39,6 +39,12 @@ pub struct SharedDeferrals(pub Arc<DeferralRegistry>);
 /// read by player natives).
 pub struct SharedPlayers(pub Arc<baston_protocol::PlayerDirectory>);
 
+/// Net bridge handle stored in `OpState` (client events + native dispatch).
+pub struct SharedNet(pub crate::net_bridge::NetBridge);
+
+/// How long a server → client native call may wait for its result.
+const NATIVE_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1000);
+
 // --- 1. console ---
 
 #[op2(fast)]
@@ -67,9 +73,113 @@ fn op_trigger_event(state: &mut OpState, #[string] event: String, #[string] args
         .push_back((event, args_json));
 }
 
+/// `TriggerClientEvent(name, source, ...args)` — routed to the game
+/// transport as a `msgNetEvent` packet.
+#[op2(fast)]
+fn op_trigger_client_event(
+    state: &mut OpState,
+    #[string] event: String,
+    source: u32,
+    #[string] args_json: String,
+) {
+    let net = &state.borrow::<SharedNet>().0;
+    if net
+        .tx
+        .send(crate::net_bridge::NetOutbound::ClientEvent {
+            source,
+            event: event.clone(),
+            args_json,
+        })
+        .is_err()
+    {
+        tracing::warn!(target: "events", %event, source, "client event dropped: net bridge closed");
+    }
+}
+
+/// Dispatch a GTA native to `source`'s client via the BASTON shim and await
+/// the result. Returns a JSON string; errors are `{"__error": "..."}` so the
+/// polyfill can throw without deno_core error plumbing.
+#[op2]
+#[string]
+async fn op_invoke_native_on_client(
+    state: std::rc::Rc<std::cell::RefCell<OpState>>,
+    source: u32,
+    #[string] hash_hex: String,
+    #[string] args_json: String,
+    expects_return: bool,
+) -> String {
+    use baston_protocol::native::{NativeCall, INVOKE_NATIVE_EVENT};
+
+    fn err(message: impl std::fmt::Display) -> String {
+        serde_json::json!({ "__error": message.to_string() }).to_string()
+    }
+
+    let hash = match u64::from_str_radix(hash_hex.trim_start_matches("0x"), 16) {
+        Ok(h) => h,
+        Err(e) => return err(format!("invalid native hash {hash_hex}: {e}")),
+    };
+    let args: Vec<serde_json::Value> = match serde_json::from_str(&args_json) {
+        Ok(a) => a,
+        Err(e) => return err(format!("invalid native args: {e}")),
+    };
+
+    static REGISTRY: std::sync::OnceLock<baston_protocol::native::NativeRegistry> =
+        std::sync::OnceLock::new();
+    if let Err(e) = REGISTRY
+        .get_or_init(baston_protocol::native::NativeRegistry::new)
+        .validate(hash, args.len())
+    {
+        return err(e);
+    }
+
+    let net = state.borrow().borrow::<SharedNet>().0.clone();
+    let (id, rx) = net.pending_natives.register();
+    let call = NativeCall {
+        id,
+        hash: format!("0x{hash:016X}"),
+        args,
+    };
+    let payload = serde_json::json!([call]);
+    if net
+        .tx
+        .send(crate::net_bridge::NetOutbound::ClientEvent {
+            source,
+            event: INVOKE_NATIVE_EVENT.to_owned(),
+            args_json: payload.to_string(),
+        })
+        .is_err()
+    {
+        net.pending_natives.cancel(id);
+        return err("net bridge closed");
+    }
+
+    if !expects_return {
+        // Fire-and-forget: the shim still replies, but nobody waits.
+        net.pending_natives.cancel(id);
+        return "null".to_owned();
+    }
+
+    match tokio::time::timeout(NATIVE_CALL_TIMEOUT, rx).await {
+        Ok(Ok(value)) => value.to_string(),
+        Ok(Err(_)) => {
+            net.pending_natives.cancel(id);
+            err("native result channel closed")
+        }
+        Err(_) => {
+            net.pending_natives.cancel(id);
+            err(format!("native call 0x{hash:016X} timed out"))
+        }
+    }
+}
+
 deno_core::extension!(
     baston_events,
-    ops = [op_add_event_handler, op_trigger_event]
+    ops = [
+        op_add_event_handler,
+        op_trigger_event,
+        op_trigger_client_event,
+        op_invoke_native_on_client,
+    ]
 );
 
 // --- 3. exports ---

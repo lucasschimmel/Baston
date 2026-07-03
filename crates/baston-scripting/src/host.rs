@@ -42,6 +42,12 @@ enum RuntimeCommand {
         player_name: String,
         reply: oneshot::Sender<Result<QueuedEvents, ScriptError>>,
     },
+    DispatchNetEvent {
+        event: String,
+        source: u32,
+        args_json: String,
+        reply: oneshot::Sender<Result<QueuedEvents, ScriptError>>,
+    },
 }
 
 /// `Send` handle to one resource's isolate thread. Dropping it shuts the
@@ -70,6 +76,7 @@ pub struct ScriptHost {
     runtimes: Arc<RwLock<HashMap<String, ResourceRuntimeHandle>>>,
     deferrals: Arc<DeferralRegistry>,
     players: Arc<PlayerDirectory>,
+    net: crate::net_bridge::NetBridge,
     started_at: Instant,
 }
 
@@ -78,17 +85,71 @@ pub struct ScriptHost {
 const MAX_EVENT_CHAIN: usize = 64;
 
 impl ScriptHost {
-    /// Create the host. `deferrals` and `players` are shared with the gateway.
+    /// Create the host. `deferrals` and `players` are shared with the
+    /// gateway. A default net bridge is created; the gateway takes its
+    /// receiving end via [`ScriptHost::spawn_with_net`].
     pub fn spawn(
         deferrals: Arc<DeferralRegistry>,
         players: Arc<PlayerDirectory>,
+    ) -> Result<Self, ScriptError> {
+        let (net, _rx) = crate::net_bridge::NetBridge::new();
+        Self::spawn_with_net(deferrals, players, net)
+    }
+
+    /// Create the host with an externally-owned net bridge.
+    pub fn spawn_with_net(
+        deferrals: Arc<DeferralRegistry>,
+        players: Arc<PlayerDirectory>,
+        net: crate::net_bridge::NetBridge,
     ) -> Result<Self, ScriptError> {
         Ok(Self {
             runtimes: Arc::new(RwLock::new(HashMap::new())),
             deferrals,
             players,
+            net,
             started_at: Instant::now(),
         })
+    }
+
+    /// The net bridge shared with the runtimes (pending native calls).
+    pub fn net(&self) -> &crate::net_bridge::NetBridge {
+        &self.net
+    }
+
+    /// Dispatch a client-originated net event into every runtime with
+    /// `globalThis.source` bound.
+    pub async fn trigger_net_event(
+        &self,
+        event: &str,
+        source: u32,
+        args: &serde_json::Value,
+    ) -> Result<(), ScriptError> {
+        let args_json =
+            serde_json::to_string(args).map_err(|e| ScriptError::HostStart(e.to_string()))?;
+        let mut queued = Vec::new();
+        {
+            let runtimes = self.runtimes.read().await;
+            for (resource, handle) in runtimes.iter() {
+                let event = event.to_owned();
+                let args_json = args_json.clone();
+                match handle
+                    .send(|reply| RuntimeCommand::DispatchNetEvent {
+                        event,
+                        source,
+                        args_json,
+                        reply,
+                    })
+                    .await
+                {
+                    Ok(mut q) => queued.append(&mut q),
+                    Err(e) => {
+                        tracing::error!(target: "scripting", %resource, error = %e, "net event dispatch failed");
+                    }
+                }
+            }
+        }
+        self.rebroadcast(queued).await;
+        Ok(())
     }
 
     /// The deferral registry shared with the JS runtimes.
@@ -112,6 +173,7 @@ impl ScriptHost {
             self.started_at,
             Arc::clone(&self.deferrals),
             Arc::clone(&self.players),
+            self.net.clone(),
         )?;
         let queued = handle
             .send(|reply| RuntimeCommand::ExecuteScripts { scripts, reply })
@@ -235,6 +297,7 @@ fn spawn_runtime_thread(
     started_at: Instant,
     deferrals: Arc<DeferralRegistry>,
     players: Arc<PlayerDirectory>,
+    net: crate::net_bridge::NetBridge,
 ) -> Result<ResourceRuntimeHandle, ScriptError> {
     let (tx, mut rx) = mpsc::channel::<RuntimeCommand>(64);
     let name = resource_name.to_owned();
@@ -255,7 +318,7 @@ fn spawn_runtime_thread(
                     return;
                 }
             };
-            let mut runtime = match ScriptRuntime::new(&name, started_at, deferrals, players) {
+            let mut runtime = match ScriptRuntime::new(&name, started_at, deferrals, players, net) {
                 Ok(r) => r,
                 Err(e) => {
                     let _ = init_tx.send(Err(e));
@@ -297,6 +360,16 @@ fn spawn_runtime_thread(
                             let result = runtime
                                 .dispatch_player_connecting(source, &player_name)
                                 .await;
+                            let _ = reply.send(result.map(|()| runtime.drain_queued_events()));
+                        }
+                        RuntimeCommand::DispatchNetEvent {
+                            event,
+                            source,
+                            args_json,
+                            reply,
+                        } => {
+                            let result =
+                                runtime.dispatch_net_event(&event, source, &args_json).await;
                             let _ = reply.send(result.map(|()| runtime.drain_queued_events()));
                         }
                     }

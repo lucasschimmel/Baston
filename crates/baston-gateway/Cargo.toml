@@ -31,5 +31,6 @@ baston-zone = { workspace = true }
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+rmp-serde = { workspace = true }
 tempfile = "3"
 toml = { workspace = true }

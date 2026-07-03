@@ -27,7 +27,9 @@ async fn main() -> anyhow::Result<()> {
 
     let deferrals = Arc::new(DeferralRegistry::new());
     let players = Arc::new(PlayerRegistry::new());
-    let script_host = ScriptHost::spawn(Arc::clone(&deferrals), Arc::clone(&players))?;
+    let (net_bridge, net_rx) = baston_scripting::NetBridge::new();
+    let script_host =
+        ScriptHost::spawn_with_net(Arc::clone(&deferrals), Arc::clone(&players), net_bridge)?;
     let resource_manager = ResourceManager::new(script_host.clone(), config.resources.path.clone());
 
     resource_manager.discover().await?;
@@ -42,12 +44,13 @@ async fn main() -> anyhow::Result<()> {
 
     let port = config.server.port;
     let udp_port = config.udp.port.unwrap_or(port);
-    let _udp = baston_gateway::udp::spawn(
+    let _udp = baston_gateway::udp::spawn_with_net(
         udp_port,
         config.udp.poll_interval_ms,
         config.server.max_players,
         Arc::clone(&players),
         script_host.clone(),
+        Some(net_rx),
     )?;
 
     let auth = AuthService::new(&config.auth)?;

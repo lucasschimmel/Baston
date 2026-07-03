@@ -10,7 +10,10 @@ use baston_protocol::PlayerDirectory;
 
 use crate::deferrals::DeferralRegistry;
 use crate::error::ScriptError;
-use crate::extensions::{all_extensions, RuntimeContext, SharedDeferrals, SharedPlayers};
+use crate::extensions::{
+    all_extensions, RuntimeContext, SharedDeferrals, SharedNet, SharedPlayers,
+};
+use crate::net_bridge::NetBridge;
 
 const BOOTSTRAP_JS: &str = include_str!("../assets/bootstrap.js");
 
@@ -29,6 +32,7 @@ impl ScriptRuntime {
         host_started_at: Instant,
         deferrals: Arc<DeferralRegistry>,
         players: Arc<PlayerDirectory>,
+        net: NetBridge,
     ) -> Result<Self, ScriptError> {
         let mut js = JsRuntime::new(RuntimeOptions {
             extensions: all_extensions(),
@@ -47,6 +51,7 @@ impl ScriptRuntime {
             });
             op_state.put(SharedDeferrals(deferrals));
             op_state.put(SharedPlayers(players));
+            op_state.put(SharedNet(net));
         }
 
         js.execute_script("baston:bootstrap.js", BOOTSTRAP_JS)
@@ -94,6 +99,22 @@ impl ScriptRuntime {
         let code = format!(
             "globalThis.__baston.dispatch({}, {});",
             serde_json::to_string(event).unwrap_or_else(|_| "\"\"".into()),
+            serde_json::to_string(args_json).unwrap_or_else(|_| "\"[]\"".into()),
+        );
+        self.run_dispatch(event, code).await
+    }
+
+    /// Dispatch a net event (from a client) with `globalThis.source` bound.
+    pub async fn dispatch_net_event(
+        &mut self,
+        event: &str,
+        source: u32,
+        args_json: &str,
+    ) -> Result<(), ScriptError> {
+        let code = format!(
+            "globalThis.__baston.dispatchWithSource({}, {}, {});",
+            serde_json::to_string(event).unwrap_or_else(|_| "\"\"".into()),
+            source,
             serde_json::to_string(args_json).unwrap_or_else(|_| "\"[]\"".into()),
         );
         self.run_dispatch(event, code).await

@@ -26,6 +26,7 @@ async-nats = "0.38"
 bincode = "2"
 uuid = { version = "1", features = ["v4"] }
 rusty_enet = "0.4"
+rmp-serde = "1"
 rsa = "0.9"
 sha1 = { version = "0.10", features = ["oid"] }
 base64 = "0.22"

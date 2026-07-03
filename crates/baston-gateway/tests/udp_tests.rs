@@ -5,9 +5,12 @@ use std::net::UdpSocket;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use baston_protocol::udp::{handshake, read_message_type, time_sync, MSG_CONNECT, MSG_TIME_SYNC};
-use baston_protocol::{PlayerDirectory, PlayerInfo};
-use baston_scripting::{DeferralRegistry, ScriptHost};
+use baston_protocol::udp::{
+    handshake, read_message_type, time_sync, MSG_CONNECT, MSG_NET_EVENT, MSG_SERVER_EVENT,
+    MSG_TIME_SYNC,
+};
+use baston_protocol::{events, PlayerDirectory, PlayerInfo};
+use baston_scripting::{DeferralRegistry, NetBridge, ScriptHost, ScriptSource};
 use rusty_enet as enet;
 
 struct TestClient {
@@ -158,6 +161,130 @@ async fn time_sync_echoes_request() {
     assert_eq!(ty, MSG_TIME_SYNC);
     assert_eq!(u32::from_le_bytes(payload[..4].try_into().unwrap()), 111);
     assert_eq!(u32::from_le_bytes(payload[4..8].try_into().unwrap()), 3);
+}
+
+/// Parse a `msgNetEvent` packet: (event name, args as JSON).
+fn parse_net_event(data: &[u8]) -> Option<(String, serde_json::Value)> {
+    let (ty, payload) = read_message_type(data)?;
+    if ty != MSG_NET_EVENT {
+        return None;
+    }
+    // u16 sourceNetId | u16 nameLen | name+NUL | msgpack args
+    let name_len = u16::from_le_bytes(payload[2..4].try_into().ok()?) as usize;
+    let name = String::from_utf8_lossy(&payload[4..4 + name_len - 1]).into_owned();
+    let args = events::msgpack_to_json_args(&payload[4 + name_len..]).ok()?;
+    Some((name, args))
+}
+
+/// Build a `msgServerEvent` packet from JSON args.
+fn build_server_event(name: &str, args: &serde_json::Value) -> Vec<u8> {
+    let mut out = MSG_SERVER_EVENT.to_le_bytes().to_vec();
+    out.extend_from_slice(&((name.len() + 1) as u16).to_le_bytes());
+    out.extend_from_slice(name.as_bytes());
+    out.push(0);
+    out.extend_from_slice(&rmp_serde::to_vec(args).unwrap());
+    out
+}
+
+/// B4 exit criterion: a server script calls `GetPlayerPed(source)`; the
+/// (simulated) client executes the native and returns the ped id.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_dispatch_roundtrip_through_simulated_client() {
+    // Server with a script that answers 'test:requestPed'.
+    let players = Arc::new(PlayerDirectory::new());
+    let (net_bridge, net_rx) = NetBridge::new();
+    let script_host = ScriptHost::spawn_with_net(
+        Arc::new(DeferralRegistry::new()),
+        Arc::clone(&players),
+        net_bridge,
+    )
+    .unwrap();
+    script_host
+        .load_resource(
+            "axiom-core",
+            vec![ScriptSource {
+                path: "server.js".into(),
+                code: r#"
+                AddEventHandler('test:requestPed', async () => {
+                  const source = globalThis.source;
+                  const ped = await GetPlayerPed(source);
+                  console.log('[axiom-core] player ped: ' + ped);
+                  TriggerClientEvent('test:pedResult', source, ped);
+                });
+                "#
+                .into(),
+            }],
+        )
+        .await
+        .unwrap();
+
+    let source = players.allocate_source();
+    players.insert(PlayerInfo {
+        source,
+        name: "NativeTester".into(),
+        identifiers: vec![format!("license:dev-{source}")],
+    });
+    players.bind_token("native-test-token".into(), source);
+
+    let port = {
+        let probe = UdpSocket::bind("127.0.0.1:0").unwrap();
+        probe.local_addr().unwrap().port()
+    };
+    baston_gateway::udp::spawn_with_net(port, 2, 8, players, script_host, Some(net_rx)).unwrap();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut client = TestClient::connect(port);
+        client.wait_event(Duration::from_secs(5)).expect("connect");
+        client.send(0, &handshake_packet("native-test-token"));
+        client
+            .wait_event(Duration::from_secs(5))
+            .expect("connectOK");
+
+        // Kick off the server-side handler.
+        client.send(
+            0,
+            &build_server_event("test:requestPed", &serde_json::json!([])),
+        );
+
+        // Act as the BASTON client shim + assert the final event.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            let Some((_, data, _)) = client.wait_event(Duration::from_secs(5)) else {
+                continue;
+            };
+            let Some((name, args)) = parse_net_event(&data) else {
+                continue;
+            };
+            match name.as_str() {
+                "__baston:invokeNative" => {
+                    let call = &args[0];
+                    assert_eq!(call["hash"], "0x43A66C31C68491C0", "GET_PLAYER_PED");
+                    let id = call["id"].as_u64().unwrap();
+                    // "Execute" the native locally: ped id 1234.
+                    client.send(
+                        0,
+                        &build_server_event(
+                            "__baston:nativeResult",
+                            &serde_json::json!([id, 1234]),
+                        ),
+                    );
+                }
+                "test:pedResult" => {
+                    tx.send(args[0].clone()).unwrap();
+                    return;
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let ped = tokio::task::spawn_blocking(move || {
+        rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(ped, serde_json::json!(1234));
 }
 
 #[tokio::test(flavor = "multi_thread")]
