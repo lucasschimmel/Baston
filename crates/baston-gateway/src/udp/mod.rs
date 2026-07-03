@@ -346,7 +346,11 @@ impl UdpServer {
 
         // onPlayerJoining towards the joining client (netId, name, slot).
         let name = self.players.get(source).map(|p| p.name).unwrap_or_default();
-        let args = serde_json::json!([source, name, -1]);
+        // slotId MUST be msgpack-unsigned: the client converts it with
+        // `as<uint32_t>()` (HookPlayerNameHandling.cpp) and a negative int
+        // throws msgpack::type_error → client crash. FXServer's "no slot" is
+        // the unsigned representation of -1.
+        let args = serde_json::json!([source, name, u32::MAX]);
         if let Ok(msgpack) = events::json_args_to_msgpack(&args.to_string()) {
             let packet = events::build_net_event("onPlayerJoining", &msgpack);
             self.handle_command(UdpCommand::SendToSource {
