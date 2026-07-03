@@ -102,6 +102,101 @@ async fn starts_in_dependency_order() {
 }
 
 #[tokio::test]
+async fn plain_resource_unaffected_by_decryptor_pipeline() {
+    // Non-regression: with the default PlainDecryptor, a plain resource loads
+    // and starts exactly as before D-bis.
+    let dir = tempfile::tempdir().unwrap();
+    write_resource(dir.path(), "axiom-core", &[], "console.log('[axiom-core] up')");
+
+    let manager = manager(dir.path());
+    manager.discover().await.expect("discover");
+    manager.start("axiom-core").await.expect("start");
+    assert_eq!(
+        manager.status().await,
+        vec![("axiom-core".into(), ResourceState::Started)]
+    );
+}
+
+#[tokio::test]
+async fn cfx_encrypted_script_without_plugin_fails_to_start() {
+    // A file carrying the CFX "FXAP" magic, loaded with the default
+    // PlainDecryptor, must fail cleanly (not a V8 SyntaxError) and mark Error.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("escrow-test");
+    std::fs::create_dir_all(root.join("dist/server")).unwrap();
+    let manifest = serde_json::json!({
+        "name": "escrow-test",
+        "version": "0.0.1",
+        "dependencies": [],
+        "server_scripts": ["dist/server/index.js"],
+    });
+    std::fs::write(root.join("manifest.json"), manifest.to_string()).unwrap();
+    let mut encrypted = b"FXAP".to_vec();
+    encrypted.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+    std::fs::write(root.join("dist/server/index.js"), &encrypted).unwrap();
+
+    let manager = manager(dir.path());
+    manager.discover().await.expect("discover");
+    let err = manager.start("escrow-test").await.expect_err("must fail");
+    assert!(
+        matches!(err, baston_zone::ZoneError::Decrypt { .. }),
+        "expected Decrypt error, got {err:?}"
+    );
+    assert_eq!(
+        manager.status().await,
+        vec![("escrow-test".into(), ResourceState::Error)]
+    );
+}
+
+/// Test decryptor: strips a leading "FXAP" magic and returns the rest as-is.
+struct StubDecryptor;
+impl baston_core::script_decryptor::ScriptDecryptor for StubDecryptor {
+    fn decrypt(
+        &self,
+        _resource: &str,
+        _file: &str,
+        bytes: &[u8],
+        _entitlement: Option<&baston_core::script_decryptor::EntitlementContext>,
+    ) -> Result<Vec<u8>, baston_core::script_decryptor::DecryptError> {
+        if baston_core::script_decryptor::is_cfx_encrypted(bytes) {
+            Ok(bytes[4..].to_vec())
+        } else {
+            Ok(bytes.to_vec())
+        }
+    }
+    fn supports_encrypted(&self) -> bool {
+        true
+    }
+}
+
+#[tokio::test]
+async fn installed_decryptor_starts_encrypted_resource() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("escrow-test");
+    std::fs::create_dir_all(root.join("dist/server")).unwrap();
+    let manifest = serde_json::json!({
+        "name": "escrow-test",
+        "version": "0.0.1",
+        "dependencies": [],
+        "server_scripts": ["dist/server/index.js"],
+    });
+    std::fs::write(root.join("manifest.json"), manifest.to_string()).unwrap();
+    // "FXAP" magic + valid JS payload; the stub decryptor unwraps it.
+    let mut encrypted = b"FXAP".to_vec();
+    encrypted.extend_from_slice(b"console.log('[escrow-test] decrypted up')");
+    std::fs::write(root.join("dist/server/index.js"), &encrypted).unwrap();
+
+    let manager = manager(dir.path());
+    manager.set_script_decryptor(Arc::new(StubDecryptor));
+    manager.discover().await.expect("discover");
+    manager.start("escrow-test").await.expect("start decrypted");
+    assert_eq!(
+        manager.status().await,
+        vec![("escrow-test".into(), ResourceState::Started)]
+    );
+}
+
+#[tokio::test]
 async fn invalid_script_marks_resource_error() {
     let dir = tempfile::tempdir().unwrap();
     write_resource(dir.path(), "broken", &[], "this is not javascript {{{");

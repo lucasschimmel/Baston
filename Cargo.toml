@@ -43,6 +43,7 @@ base64 = "0.22"
 hex = "0.4"
 
 baston-config = { path = "crates/baston-config" }
+baston-core = { path = "crates/baston-core" }
 baston-protocol = { path = "crates/baston-protocol" }
 baston-scripting = { path = "crates/baston-scripting" }
 baston-zone = { path = "crates/baston-zone" }

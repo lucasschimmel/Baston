@@ -48,6 +48,13 @@ pub enum ZoneError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("failed to decrypt script {path}: {source}")]
+    Decrypt {
+        path: PathBuf,
+        source: baston_core::script_decryptor::DecryptError,
+    },
+    #[error("decrypted script {path} is not valid UTF-8")]
+    ScriptNotUtf8 { path: PathBuf },
     #[error("scripting error: {0}")]
     Scripting(#[from] baston_scripting::ScriptError),
     #[error("file watcher error: {0}")]

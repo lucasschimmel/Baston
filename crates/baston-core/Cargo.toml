@@ -1,0 +1,10 @@
+[package]
+name = "baston-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }

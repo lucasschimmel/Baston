@@ -3,8 +3,10 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
+use baston_core::script_decryptor::{PlainDecryptor, ScriptDecryptor};
 use baston_scripting::{ScriptHost, ScriptSource};
 use tokio::sync::Mutex;
 
@@ -32,6 +34,11 @@ pub struct ResourceManager {
     script_host: ScriptHost,
     resources: Mutex<HashMap<String, ResourceEntry>>,
     resources_dir: PathBuf,
+    /// Script decryptor. `PlainDecryptor` by default; the escrow plugin
+    /// replaces it via [`ResourceManager::set_script_decryptor`]. Behind a
+    /// `RwLock` so the plugin can install itself after construction on the
+    /// shared `Arc<Self>`; the guard is always dropped before any `.await`.
+    decryptor: RwLock<Arc<dyn ScriptDecryptor>>,
 }
 
 impl ResourceManager {
@@ -40,11 +47,38 @@ impl ResourceManager {
             script_host,
             resources: Mutex::new(HashMap::new()),
             resources_dir,
+            decryptor: RwLock::new(Arc::new(PlainDecryptor)),
         })
     }
 
     pub fn resources_dir(&self) -> &Path {
         &self.resources_dir
+    }
+
+    /// Install an external script decryptor (called by `baston-escrow-plugin`).
+    /// Takes `&self` so it works through the shared `Arc<ResourceManager>`.
+    pub fn set_script_decryptor(&self, decryptor: Arc<dyn ScriptDecryptor>) {
+        let supports_encrypted = decryptor.supports_encrypted();
+        // `RwLock` write poisoning only happens if a reader panicked while
+        // holding the lock; the read path just clones an Arc and never panics,
+        // so recover the guard rather than propagating.
+        *self
+            .decryptor
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = decryptor;
+        tracing::info!(
+            supports_encrypted,
+            "script decryptor replaced (escrow plugin active)"
+        );
+    }
+
+    /// Snapshot the current decryptor (cheap `Arc` clone), releasing the lock
+    /// immediately so it is never held across an `.await`.
+    fn decryptor(&self) -> Arc<dyn ScriptDecryptor> {
+        self.decryptor
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Scan the resources directory and register everything found (state
@@ -119,16 +153,51 @@ impl ResourceManager {
         root: &Path,
         script_paths: &[String],
     ) -> Result<(), ZoneError> {
+        let decryptor = self.decryptor();
         let mut scripts = Vec::with_capacity(script_paths.len());
         for rel in script_paths {
             let path = root.join(rel);
-            let code =
-                tokio::fs::read_to_string(&path)
-                    .await
-                    .map_err(|source| ZoneError::ScriptRead {
+            let raw = tokio::fs::read(&path)
+                .await
+                .map_err(|source| ZoneError::ScriptRead {
+                    path: path.clone(),
+                    source,
+                })?;
+
+            let encrypted = baston_core::script_decryptor::is_cfx_encrypted(&raw);
+            let started = Instant::now();
+            let bytes = match decryptor.decrypt(name, rel, &raw, None) {
+                Ok(bytes) => {
+                    let status = if encrypted { "decrypted" } else { "plain" };
+                    metrics::counter!("baston_scripts_loaded_total", "status" => status)
+                        .increment(1);
+                    if encrypted {
+                        metrics::histogram!("baston_decrypt_duration_seconds")
+                            .record(started.elapsed().as_secs_f64());
+                        tracing::info!(
+                            target: "resources",
+                            resource = name,
+                            file = rel,
+                            plain_bytes = bytes.len(),
+                            encrypted_bytes = raw.len(),
+                            "resource script decrypted OK"
+                        );
+                    }
+                    bytes
+                }
+                Err(source) => {
+                    metrics::counter!("baston_scripts_loaded_total", "status" => "error")
+                        .increment(1);
+                    return Err(ZoneError::Decrypt {
                         path: path.clone(),
                         source,
-                    })?;
+                    });
+                }
+            };
+
+            let code = String::from_utf8(bytes).map_err(|_| ZoneError::ScriptNotUtf8 {
+                path: path.clone(),
+            })?;
             scripts.push(ScriptSource {
                 path: rel.clone(),
                 code,
