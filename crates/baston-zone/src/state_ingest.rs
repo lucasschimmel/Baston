@@ -62,6 +62,18 @@ impl StateIngest {
         self.player_entities.get(&source).map(|e| *e)
     }
 
+    /// Connected players' (source, coords, velocity) — boundary detection (D3).
+    pub fn player_kinematics(&self) -> Vec<(u32, [f32; 3], [f32; 3])> {
+        self.player_entities
+            .iter()
+            .filter_map(|entry| {
+                self.entity_manager
+                    .get(*entry.value())
+                    .map(|state| (*entry.key(), state.coords, state.velocity))
+            })
+            .collect()
+    }
+
     /// Connected players' (source, coords), for ownership assignment.
     pub fn player_positions(&self) -> Vec<(u32, [f32; 3])> {
         self.player_entities

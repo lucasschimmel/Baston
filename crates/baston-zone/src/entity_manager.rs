@@ -166,6 +166,16 @@ impl EntityManager {
         self.entities.iter().map(|e| e.value().clone()).collect()
     }
 
+    /// Entities network-owned by a player (occupied vehicle, etc.) — used to
+    /// build the handoff snapshot (D4).
+    pub fn entities_owned_by(&self, source: u32) -> Vec<EntityState> {
+        self.entities
+            .iter()
+            .filter(|e| e.value().network_owner == Some(source))
+            .map(|e| e.value().clone())
+            .collect()
+    }
+
     pub fn count(&self) -> usize {
         self.entities.len()
     }

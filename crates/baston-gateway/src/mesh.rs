@@ -58,6 +58,27 @@ impl GatewayMesh {
         Some(zone)
     }
 
+    /// Drain a zone: reroute all its players to the least-loaded other zone.
+    /// Returns how many players were rerouted. (Full state migration rides
+    /// the D4 handoff path; routing moves immediately so the zone empties.)
+    pub async fn drain_zone(&self, zone_id: &str) -> usize {
+        let players = self.router.players_in_zone(zone_id);
+        let mut moved = 0;
+        for source in players {
+            let Some(fallback) =
+                self.registry.find_least_loaded_zone_excluding(Some(zone_id)).await
+            else {
+                tracing::error!(target: "gateway",
+                    "drain {zone_id}: no fallback zone available — player={source} left in place");
+                break;
+            };
+            self.router.commit_handoff(source, &fallback).await;
+            moved += 1;
+        }
+        tracing::info!(target: "gateway", zone = %zone_id, moved, "zone drained");
+        moved
+    }
+
     /// Start the gRPC server for zone registration/heartbeat/handoff.
     pub fn spawn_grpc_server(
         self: &Arc<Self>,
@@ -143,14 +164,18 @@ impl GatewayService for GatewayGrpc {
                 ready: false,
                 target_zone: String::new(),
                 message: "no live zone covers the target coordinates".into(),
+                target_zone_grpc: String::new(),
             }));
         };
+        let target_zone_grpc =
+            self.mesh.registry.zone_grpc_addr(&target_zone).await.unwrap_or_default();
 
         let Some(mut client) = self.mesh.registry.zone_client(&target_zone).await else {
             return Ok(Response::new(PrepareHandoffResponse {
                 ready: false,
                 target_zone,
                 message: "target zone has no gRPC client".into(),
+                target_zone_grpc: String::new(),
             }));
         };
 
@@ -172,6 +197,7 @@ impl GatewayService for GatewayGrpc {
                     ready: inner.ready,
                     target_zone,
                     message: inner.message,
+                    target_zone_grpc,
                 }))
             }
             Ok(Err(status)) => {
@@ -183,6 +209,7 @@ impl GatewayService for GatewayGrpc {
                     ready: false,
                     target_zone,
                     message: status.to_string(),
+                    target_zone_grpc: String::new(),
                 }))
             }
             Err(_) => {
@@ -194,6 +221,7 @@ impl GatewayService for GatewayGrpc {
                     ready: false,
                     target_zone,
                     message: "prepare timeout".into(),
+                    target_zone_grpc: String::new(),
                 }))
             }
         }

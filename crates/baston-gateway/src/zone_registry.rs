@@ -165,9 +165,15 @@ impl ZoneRegistry {
 
     /// Zone with the fewest active players (fallback routing / recovery).
     pub async fn find_least_loaded_zone(&self) -> Option<String> {
+        self.find_least_loaded_zone_excluding(None).await
+    }
+
+    /// Least-loaded zone, optionally excluding one (drain / failure recovery).
+    pub async fn find_least_loaded_zone_excluding(&self, exclude: Option<&str>) -> Option<String> {
         let zones = self.zones.read().await;
         zones
             .values()
+            .filter(|z| Some(z.zone_id.as_str()) != exclude)
             .min_by_key(|z| z.player_count.load(Ordering::Relaxed))
             .map(|z| z.zone_id.clone())
     }
@@ -175,6 +181,10 @@ impl ZoneRegistry {
     /// Clone of a zone's gRPC client (cheap: channels are ref-counted).
     pub async fn zone_client(&self, zone_id: &str) -> Option<ZoneServiceClient<Channel>> {
         self.zones.read().await.get(zone_id).map(|z| z.grpc_client.clone())
+    }
+
+    pub async fn zone_grpc_addr(&self, zone_id: &str) -> Option<String> {
+        self.zones.read().await.get(zone_id).map(|z| z.grpc_addr.clone())
     }
 
     pub async fn zone_bounds(&self, zone_id: &str) -> Option<Aabb> {

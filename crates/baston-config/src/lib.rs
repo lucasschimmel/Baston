@@ -423,6 +423,9 @@ impl BastonConfig {
         if let Ok(token) = std::env::var("BASTON_ADMIN_TOKEN") {
             self.meshing.admin_token = token;
         }
+        if let Ok(enabled) = std::env::var("BASTON_MESHING_ENABLED") {
+            self.meshing.enabled = matches!(enabled.as_str(), "true" | "1" | "yes");
+        }
         Ok(())
     }
 

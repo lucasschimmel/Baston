@@ -167,7 +167,36 @@
     }
   }
 
-  globalThis.__baston = { dispatch, dispatchWithSource, dispatchPlayerConnecting };
+  // --- Zone transfer state (Phase D handoffs) ---
+  // Resources register callbacks returning the state BASTON must carry to the
+  // next zone. Collection merges all callbacks of this resource into one
+  // object and reports it to Rust.
+  const zoneTransferCallbacks = [];
+  function RegisterZoneTransferState(cb) {
+    if (typeof cb !== "function") return;
+    zoneTransferCallbacks.push(cb);
+    ops.op_register_zone_transfer_state();
+  }
+  function collectZoneTransferState(source) {
+    if (zoneTransferCallbacks.length === 0) return;
+    const merged = {};
+    for (const cb of zoneTransferCallbacks) {
+      try {
+        Object.assign(merged, cb(source) || {});
+      } catch (e) {
+        console.error(`[baston] error in zone transfer state callback: ${stringify(e)}`);
+      }
+    }
+    ops.op_report_zone_transfer_state(JSON.stringify(merged));
+  }
+
+  globalThis.__baston = {
+    dispatch,
+    dispatchWithSource,
+    dispatchPlayerConnecting,
+    collectZoneTransferState,
+  };
+  globalThis.RegisterZoneTransferState = RegisterZoneTransferState;
 
   // --- FiveM-style globals ---
 

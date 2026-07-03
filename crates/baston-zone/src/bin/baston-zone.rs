@@ -142,13 +142,49 @@ async fn main() -> anyhow::Result<()> {
     let hooks = ZoneMeshHooks {
         player_count: Arc::new(move || players_for_count.count() as u32),
         entity_count: Arc::new(move || em_for_count.count() as u32),
-        // Full activation (playerJoining + script_state restore) lands in D4.
-        on_activate_player: Arc::new(|player_id, _snapshot| {
-            tracing::info!(target: "zone", player = player_id, "activate hook (D4 wiring pending)");
-        }),
-        on_release_player: Arc::new(|player_id, reason| {
-            tracing::info!(target: "zone", player = player_id, reason, "release hook");
-        }),
+        // Ghost → active (D4): register the player locally, then fire
+        // playerJoining with the restored script_state.
+        on_activate_player: {
+            let players = Arc::clone(&players);
+            let host = script_host.clone();
+            Arc::new(move |player_id, snapshot| {
+                players.insert(baston_protocol::PlayerInfo {
+                    source: player_id,
+                    name: snapshot.name.clone(),
+                    identifiers: snapshot.identifiers.clone(),
+                });
+                // script_state: resource → JSON text, decoded for the event.
+                let state_obj: serde_json::Map<String, serde_json::Value> = snapshot
+                    .script_state
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            serde_json::from_str(v).unwrap_or(serde_json::Value::Null),
+                        )
+                    })
+                    .collect();
+                let host = host.clone();
+                tokio::spawn(async move {
+                    let args = [
+                        serde_json::json!(player_id),
+                        serde_json::Value::Object(state_obj),
+                    ];
+                    if let Err(e) = host.trigger_event("playerJoining", &args).await {
+                        tracing::warn!(target: "zone", error = %e, "playerJoining dispatch failed");
+                    }
+                });
+            })
+        },
+        on_release_player: {
+            let players = Arc::clone(&players);
+            let ingest = Arc::clone(&state_ingest);
+            Arc::new(move |player_id, reason| {
+                tracing::info!(target: "zone", player = player_id, reason, "release hook");
+                ingest.on_player_dropped(player_id);
+                players.remove(player_id);
+            })
+        },
     };
     let mesh = ZoneMesh::connect(
         zone_id.clone(),
@@ -164,6 +200,55 @@ async fn main() -> anyhow::Result<()> {
     let grpc_task = mesh.spawn_grpc_server(grpc_addr);
     mesh.register_with_gateway().await?;
     mesh.spawn_heartbeat_loop(config.meshing.heartbeat_interval_secs);
+
+    // ── Boundary detection + handoff orchestration (D3/D4) ──
+    let handoff_manager = baston_zone::handoff_manager::HandoffManager::new(
+        zone_id.clone(),
+        mesh.gateway_client(),
+        config.meshing.handoff_cooldown_secs,
+    );
+    let cleanup_ingest = Arc::clone(&state_ingest);
+    let cleanup_em = Arc::clone(&entity_manager);
+    let cleanup_players = Arc::clone(&players);
+    let cleanup_host = script_host.clone();
+    baston_zone::boundary_loop::BoundaryLoop {
+        detector: baston_zone::boundary_detector::BoundaryDetector::new(
+            bounds,
+            config.meshing.boundary_margin,
+        ),
+        manager: Arc::clone(&handoff_manager),
+        mesh: Arc::clone(&mesh),
+        ingest: Arc::clone(&state_ingest),
+        players: Arc::clone(&players),
+        scan_interval: std::time::Duration::from_millis(config.meshing.boundary_scan_interval_ms),
+        // Real collector (RegisterZoneTransferState) wired via the script host.
+        collect_script_state: {
+            let host = script_host.clone();
+            Arc::new(move |source| {
+                let host = host.clone();
+                Box::pin(async move { host.collect_zone_transfer_state(source).await })
+            })
+        },
+        post_handoff_cleanup: Arc::new(move |source| {
+            // Internal playerDropped: scripts see the player leave THIS zone,
+            // nothing is fired to the network (the client never disconnected).
+            let host = cleanup_host.clone();
+            tokio::spawn(async move {
+                let args =
+                    [serde_json::json!(source), serde_json::json!("zone handoff (internal)")];
+                if let Err(e) = host.trigger_event("playerDropped", &args).await {
+                    tracing::warn!(target: "zone", error = %e, "internal playerDropped failed");
+                }
+            });
+            // Release owned entities + the ped, forget the player locally.
+            for entity in cleanup_em.entities_owned_by(source) {
+                cleanup_em.remove_entity(entity.entity_id);
+            }
+            cleanup_ingest.on_player_dropped(source);
+            cleanup_players.remove(source);
+        }),
+    }
+    .spawn();
 
     tracing::info!(target: "zone", zone = %zone_id, "zone online");
     grpc_task.await?;

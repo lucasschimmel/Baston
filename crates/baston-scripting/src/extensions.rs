@@ -29,6 +29,11 @@ pub struct RuntimeContext {
     pub handled_events: HashSet<String>,
     /// Export names registered by this resource (bookkeeping).
     pub exports: HashSet<String>,
+    /// Whether this resource registered a `RegisterZoneTransferState` callback.
+    pub has_zone_transfer_state: bool,
+    /// JSON collected by `op_report_zone_transfer_state` during the last
+    /// `collectZoneTransferState` dispatch (jalon D4 handoff).
+    pub collected_transfer_state: Option<String>,
 }
 
 /// Shared deferral registry handle stored in `OpState` (one per process,
@@ -311,6 +316,28 @@ fn op_set_kick_reason(state: &mut OpState, source: u32, #[string] reason: String
         .set_kick_reason(source, reason);
 }
 
+// --- 7. zone mesh (Phase D handoffs) ---
+
+/// `RegisterZoneTransferState(cb)` — bookkeeping; the callback stays JS-side.
+#[op2(fast)]
+fn op_register_zone_transfer_state(state: &mut OpState) {
+    let ctx = state.borrow_mut::<RuntimeContext>();
+    tracing::debug!(target: "mesh", resource = %ctx.resource_name, "zone transfer state registered");
+    ctx.has_zone_transfer_state = true;
+}
+
+/// Called by `__baston.collectZoneTransferState(source)` to hand the merged
+/// JSON object back to Rust.
+#[op2(fast)]
+fn op_report_zone_transfer_state(state: &mut OpState, #[string] json: String) {
+    state.borrow_mut::<RuntimeContext>().collected_transfer_state = Some(json);
+}
+
+deno_core::extension!(
+    baston_mesh,
+    ops = [op_register_zone_transfer_state, op_report_zone_transfer_state]
+);
+
 deno_core::extension!(
     baston_deferrals,
     ops = [
@@ -331,5 +358,6 @@ pub fn all_extensions() -> Vec<deno_core::Extension> {
         baston_runtime::init(),
         baston_players::init(),
         baston_deferrals::init(),
+        baston_mesh::init(),
     ]
 }

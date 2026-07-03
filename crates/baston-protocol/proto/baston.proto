@@ -64,6 +64,9 @@ message PrepareHandoffResponse {
   bool ready = 1;
   string target_zone = 2;
   string message = 3;
+  // ZoneService address of the target zone, so the source zone can call
+  // ActivatePlayer directly after ConfirmHandoff.
+  string target_zone_grpc = 4;
 }
 
 message ConfirmHandoffRequest {

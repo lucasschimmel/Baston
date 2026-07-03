@@ -48,6 +48,10 @@ enum RuntimeCommand {
         args_json: String,
         reply: oneshot::Sender<Result<QueuedEvents, ScriptError>>,
     },
+    CollectTransferState {
+        source: u32,
+        reply: oneshot::Sender<Result<Option<String>, ScriptError>>,
+    },
 }
 
 /// `Send` handle to one resource's isolate thread. Dropping it shuts the
@@ -150,6 +154,36 @@ impl ScriptHost {
         }
         self.rebroadcast(queued).await;
         Ok(())
+    }
+
+    /// Collect zone-transferable script state for a handoff (jalon D4):
+    /// resource name → merged JSON object from its
+    /// `RegisterZoneTransferState` callbacks.
+    pub async fn collect_zone_transfer_state(
+        &self,
+        source: u32,
+    ) -> std::collections::HashMap<String, String> {
+        let mut out = std::collections::HashMap::new();
+        let runtimes = self.runtimes.read().await;
+        for (resource, handle) in runtimes.iter() {
+            let (reply, rx) = oneshot::channel();
+            if handle.tx.send(RuntimeCommand::CollectTransferState { source, reply }).await.is_err()
+            {
+                continue;
+            }
+            match rx.await {
+                Ok(Ok(Some(json))) => {
+                    out.insert(resource.clone(), json);
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(e)) => {
+                    tracing::error!(target: "scripting", %resource, error = %e,
+                        "zone transfer state collection failed");
+                }
+                Err(_) => {}
+            }
+        }
+        out
     }
 
     /// The deferral registry shared with the JS runtimes.
@@ -371,6 +405,10 @@ fn spawn_runtime_thread(
                             let result =
                                 runtime.dispatch_net_event(&event, source, &args_json).await;
                             let _ = reply.send(result.map(|()| runtime.drain_queued_events()));
+                        }
+                        RuntimeCommand::CollectTransferState { source, reply } => {
+                            let result = runtime.collect_zone_transfer_state(source).await;
+                            let _ = reply.send(result);
                         }
                     }
                 }

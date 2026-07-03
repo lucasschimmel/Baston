@@ -197,6 +197,15 @@ async fn main() -> anyhow::Result<()> {
             tracing::error!(target: "gateway", zone = %zone_id,
                 "zone failure detected — initiating recovery");
         }));
+        // Admin API (jalon D2) — own port, bearer auth.
+        baston_gateway::admin::spawn_admin_api(
+            baston_gateway::admin::AdminState {
+                mesh: Arc::clone(&mesh),
+                players: Arc::clone(&players),
+                token: config.meshing.admin_token.clone(),
+            },
+            config.meshing.admin_port,
+        );
         Some(mesh)
     } else {
         None

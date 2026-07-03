@@ -48,6 +48,8 @@ impl ScriptRuntime {
                 queued_events: VecDeque::new(),
                 handled_events: Default::default(),
                 exports: Default::default(),
+                has_zone_transfer_state: false,
+                collected_transfer_state: None,
             });
             op_state.put(SharedDeferrals(deferrals));
             op_state.put(SharedPlayers(players));
@@ -156,6 +158,27 @@ impl ScriptRuntime {
                 script: "<event loop>".to_owned(),
                 message: e.to_string(),
             })
+    }
+
+    /// Run the resource's `RegisterZoneTransferState` callbacks and return
+    /// the merged JSON object (None if the resource registered none).
+    pub async fn collect_zone_transfer_state(
+        &mut self,
+        source: u32,
+    ) -> Result<Option<String>, ScriptError> {
+        {
+            let op_state = self.js.op_state();
+            let has = op_state.borrow().borrow::<RuntimeContext>().has_zone_transfer_state;
+            if !has {
+                return Ok(None);
+            }
+            op_state.borrow_mut().borrow_mut::<RuntimeContext>().collected_transfer_state = None;
+        }
+        let code = format!("globalThis.__baston.collectZoneTransferState({source});");
+        self.run_dispatch("collectZoneTransferState", code).await?;
+        let op_state = self.js.op_state();
+        let mut op_state = op_state.borrow_mut();
+        Ok(op_state.borrow_mut::<RuntimeContext>().collected_transfer_state.take())
     }
 
     /// Drain events queued by `TriggerEvent` during the last execution.

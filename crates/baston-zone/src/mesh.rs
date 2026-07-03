@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use baston_protocol::mesh::gateway_service_client::GatewayServiceClient;
+use baston_protocol::mesh::zone_service_client::ZoneServiceClient;
 use baston_protocol::mesh::zone_service_server::{ZoneService, ZoneServiceServer};
 use baston_protocol::mesh::{
     ActivatePlayerRequest, ActivatePlayerResponse, HeartbeatRequest, PlayerStateRequest,
@@ -42,6 +43,9 @@ pub struct ZoneMesh {
     pub max_players: u32,
     gateway: GatewayServiceClient<Channel>,
     ghosts: DashMap<u32, GhostState>,
+    /// Lazy gRPC clients to sibling zones, keyed by address (ActivatePlayer
+    /// after a handoff commit).
+    peer_clients: DashMap<String, ZoneServiceClient<Channel>>,
     hooks: ZoneMeshHooks,
 }
 
@@ -65,6 +69,7 @@ impl ZoneMesh {
             max_players,
             gateway,
             ghosts: DashMap::new(),
+            peer_clients: DashMap::new(),
             hooks,
         }))
     }
@@ -158,6 +163,20 @@ impl ZoneMesh {
 
     pub fn gateway_client(&self) -> GatewayServiceClient<Channel> {
         self.gateway.clone()
+    }
+
+    /// Lazy, cached client to a sibling zone's ZoneService.
+    pub fn peer_client(&self, addr: &str) -> Result<ZoneServiceClient<Channel>, String> {
+        if let Some(c) = self.peer_clients.get(addr) {
+            return Ok(c.clone());
+        }
+        let endpoint = Channel::from_shared(normalize_grpc_uri(addr))
+            .map_err(|e| format!("invalid peer zone addr {addr:?}: {e}"))?
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(2));
+        let client = ZoneServiceClient::new(endpoint.connect_lazy());
+        self.peer_clients.insert(addr.to_owned(), client.clone());
+        Ok(client)
     }
 
     pub fn ghost_state(&self, player_id: u32) -> Option<&'static str> {
