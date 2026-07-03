@@ -302,6 +302,58 @@ impl UdpServer {
             target: "baston",
             "UDP connection established: source={source} addr={addr} latency={latency_ms}ms"
         );
+
+        self.send_post_connect(source);
+    }
+
+    /// What FXServer sends/fires once the game connection is up
+    /// (`ClientRegistry::HandleConnectedClient` + `ServerConsoleReplication.cpp`):
+    /// replicated convars, the `onPlayerJoining` client event, and the
+    /// server-side `playerJoining` event.
+    fn send_post_connect(&mut self, source: u32) {
+        // msgConVars: msgpack map of ConVar_Replicated variables.
+        let convars = std::collections::BTreeMap::from([("onesync".to_owned(), "off".to_owned())]);
+        if let Ok(payload) = rmp_serde::to_vec(&convars) {
+            let mut packet = baston_protocol::udp::hash_rage_string("msgConVars")
+                .to_le_bytes()
+                .to_vec();
+            packet.extend_from_slice(&payload);
+            self.handle_command(UdpCommand::SendToSource {
+                source,
+                channel: 0,
+                data: packet,
+                reliable: true,
+            });
+        }
+
+        // onPlayerJoining towards the joining client (netId, name, slot).
+        let name = self.players.get(source).map(|p| p.name).unwrap_or_default();
+        let args = serde_json::json!([source, name, -1]);
+        if let Ok(msgpack) = events::json_args_to_msgpack(&args.to_string()) {
+            let packet = events::build_net_event("onPlayerJoining", &msgpack);
+            self.handle_command(UdpCommand::SendToSource {
+                source,
+                channel: 0,
+                data: packet,
+                reliable: true,
+            });
+        }
+
+        // playerJoining(oldID) in the server runtimes, source bound. Detached:
+        // handlers may await native round trips serviced by this task.
+        let script_host = self.script_host.clone();
+        tokio::spawn(async move {
+            if let Err(e) = script_host
+                .trigger_net_event(
+                    "playerJoining",
+                    source,
+                    &serde_json::json!([source.to_string()]),
+                )
+                .await
+            {
+                tracing::error!(target: "udp", error = %e, "playerJoining dispatch failed");
+            }
+        });
     }
 
     fn on_time_sync(&mut self, peer_id: enet::PeerID, payload: &[u8]) {

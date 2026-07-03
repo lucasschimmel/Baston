@@ -1,6 +1,7 @@
 {
   "name": "axiom-core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "server_scripts": ["dist/server/index.js"],
-  "files": ["dist/server/index.js"]
+  "client_scripts": ["dist/client/index.js"],
+  "files": ["dist/client/index.js"]
 }

@@ -147,10 +147,18 @@ async fn time_sync_echoes_request() {
                 request_sequence: 3,
             }),
         );
-        let (channel, data, _) = client
-            .wait_event(Duration::from_secs(5))
-            .expect("no time sync response");
-        tx.send((channel, data)).unwrap();
+        // Skip unrelated post-connect traffic (msgConVars, onPlayerJoining).
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            let (channel, data, _) = client
+                .wait_event(Duration::from_secs(5))
+                .expect("no time sync response");
+            if read_message_type(&data).is_some_and(|(ty, _)| ty == MSG_TIME_SYNC) {
+                tx.send((channel, data)).unwrap();
+                return;
+            }
+        }
+        panic!("time sync response never arrived");
     });
 
     let (channel, data) = tokio::task::spawn_blocking(move || rx.recv().unwrap())
@@ -285,6 +293,121 @@ async fn native_dispatch_roundtrip_through_simulated_client() {
     .await
     .unwrap();
     assert_eq!(ped, serde_json::json!(1234));
+}
+
+/// B5 exit criterion: full spawn sequence — playerJoining fires on UDP
+/// connect, the server pushes 'axiom:core:spawnCharacter', the (simulated)
+/// client runs the spawn natives and reports 'axiom:core:onCharacterSpawned'.
+#[tokio::test(flavor = "multi_thread")]
+async fn spawn_sequence_end_to_end() {
+    let players = Arc::new(PlayerDirectory::new());
+    let (net_bridge, net_rx) = NetBridge::new();
+    let script_host = ScriptHost::spawn_with_net(
+        Arc::new(DeferralRegistry::new()),
+        Arc::clone(&players),
+        net_bridge,
+    )
+    .unwrap();
+    // Load the real axiom-core server script from the repo.
+    let server_js = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../resources/axiom-core/dist/server/index.js"),
+    )
+    .unwrap();
+    // Observe onCharacterSpawned from Rust via a marker event.
+    let observer = r#"
+        AddEventHandler('axiom:core:onCharacterSpawned', () => {
+          TriggerClientEvent('test:spawnObserved', globalThis.source ?? 1);
+        });
+    "#;
+    script_host
+        .load_resource(
+            "axiom-core",
+            vec![
+                ScriptSource {
+                    path: "dist/server/index.js".into(),
+                    code: server_js,
+                },
+                ScriptSource {
+                    path: "observer.js".into(),
+                    code: observer.into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+    let source = players.allocate_source();
+    players.insert(PlayerInfo {
+        source,
+        name: "Spawnee".into(),
+        identifiers: vec![format!("license:dev-{source}")],
+    });
+    players.bind_token("spawn-token".into(), source);
+
+    let port = {
+        let probe = UdpSocket::bind("127.0.0.1:0").unwrap();
+        probe.local_addr().unwrap().port()
+    };
+    baston_gateway::udp::spawn_with_net(port, 2, 8, players, script_host, Some(net_rx)).unwrap();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut client = TestClient::connect(port);
+        client.wait_event(Duration::from_secs(5)).expect("connect");
+        client.send(0, &handshake_packet("spawn-token"));
+
+        // Simulated FiveM client: track observed events, execute natives.
+        let mut got_convars = false;
+        let mut got_spawn_event = false;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            let Some((_, data, _)) = client.wait_event(Duration::from_secs(5)) else {
+                continue;
+            };
+            if let Some((ty, _)) = read_message_type(&data) {
+                if ty == baston_protocol::udp::hash_rage_string("msgConVars") {
+                    got_convars = true;
+                    continue;
+                }
+            }
+            let Some((name, args)) = parse_net_event(&data) else {
+                continue;
+            };
+            match name.as_str() {
+                "axiom:core:spawnCharacter" => {
+                    let opts = &args[0];
+                    assert_eq!(opts["model"], "mp_m_freemode_01");
+                    assert_eq!(opts["x"], -1037.0);
+                    got_spawn_event = true;
+                    // Client script would run the spawn natives here, then:
+                    client.send(
+                        0,
+                        &build_server_event(
+                            "axiom:core:onCharacterSpawned",
+                            &serde_json::json!([]),
+                        ),
+                    );
+                }
+                "test:spawnObserved" => {
+                    tx.send((got_convars, got_spawn_event)).unwrap();
+                    return;
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let (got_convars, got_spawn_event) = tokio::task::spawn_blocking(move || {
+        rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(got_convars, "msgConVars sent after handshake");
+    assert!(
+        got_spawn_event,
+        "spawnCharacter event pushed on playerJoining"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
