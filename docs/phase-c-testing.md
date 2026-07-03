@@ -21,9 +21,10 @@ cargo build --release -p baston-gateway -p baston-loadtest
 ```
 
 Deux configs :
-- `baston.toml` — auth CFX réelle, pour les tests avec vrai client. **Canary
-  31725+ exige HTTPS pour le download packfile → la section `[tls]` doit
-  pointer vers un cert (mkcert).**
+- `baston.toml` — auth CFX réelle, pour les tests avec vrai client. **Pas de
+  TLS** : le port jeu reste en HTTP clair (un listener TLS-only casse les
+  requêtes plaintext du client → `Received HTTP/0.9`). Le download packfile
+  passe en HTTP via un fileServer littéral (validé Phase B, canary 31725).
 - `baston-bench.toml` — `auth_bypass = true`, 128 slots, pour le loadtest.
 
 Endpoints utiles :
@@ -91,7 +92,7 @@ Points d'attention :
 Reprend le flow Phase B et vérifie que la Phase C n'a rien cassé + que le
 reporting d'état fonctionne.
 
-1. `baston.toml` (auth réelle + TLS), lancer le serveur, `connect localhost:30120`.
+1. `baston.toml` (auth réelle, HTTP clair sans `[tls]`), lancer le serveur, `connect localhost:30120`.
 2. Checklist console serveur :
    - `player authenticated: license:...` → `UDP connection established` →
      `session host elected` → `[axiom-core] onCharacterSpawned` (= Phase B OK).

@@ -121,8 +121,11 @@ docker compose stop prometheus grafana   # garder nats si tu enchaînes le pipel
 
 # PIPELINE B — avec le jeu (1 puis 2 clients réels)
 
-Prérequis : cert TLS en place (`[tls]` dans `baston.toml` — canary 31725+
-télécharge le packfile en HTTPS), NATS up (A1), build fait (A2).
+Prérequis : NATS up (A1), build fait (A2). **PAS de TLS** — le port jeu doit
+rester en HTTP clair (le client FiveM envoie des requêtes en plaintext ; un
+listener TLS-only les casse avec `Received HTTP/0.9 when not allowed`). Ne pas
+mettre de section `[tls]` dans `baston.toml`. Le download packfile passe en
+HTTP clair via un fileServer littéral (validé Phase B sur canary 31725).
 
 ## B1. Lancer le serveur en mode réel (terminal 1)
 
@@ -134,7 +137,9 @@ C:\Users\osiri\.cache\baston-target\release\baston-gateway.exe
 ```
 
 ✅ Attendu : mêmes lignes qu'en A4 **sans** le warn auth_bypass, et
-`HTTPS gateway listening` (pas `TLS not configured`).
+`HTTP gateway listening` (HTTP clair, c'est le mode correct — pas de TLS).
+❌ Si tu vois `HTTPS gateway listening` : tu as une section `[tls]` dans
+`baston.toml`, à retirer (elle casse la connexion avec `Received HTTP/0.9`).
 
 ## B2. Client 1 — connexion + spawn (Phase B toujours OK ?)
 
