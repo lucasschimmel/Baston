@@ -1,0 +1,20 @@
+# BASTON runtime configuration (Phase A)
+
+[server]
+name = "BASTON Dev"
+port = 30120
+max_players = 32
+
+[auth]
+# Phase A: accept every connection without CFX token validation.
+bypass = true
+
+[resources]
+path = "resources"
+
+[connection]
+# Seconds to wait for playerConnecting deferrals before kicking.
+deferral_timeout_secs = 10
+
+[dev]
+hot_reload = true

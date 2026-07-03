@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0-alpha"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1.52", features = ["full"] }
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "2"
+deno_core = "0.406"
+dashmap = "6"
+notify = "8"
+tower-http = { version = "0.7", features = ["trace", "cors"] }
+
+baston-config = { path = "crates/baston-config" }
+baston-protocol = { path = "crates/baston-protocol" }
+baston-scripting = { path = "crates/baston-scripting" }
+baston-zone = { path = "crates/baston-zone" }
+baston-gateway = { path = "crates/baston-gateway" }
+
+[profile.dev]
+# deno_core/v8 is extremely slow unoptimized; opt-level 1 keeps dev iteration usable.
+opt-level = 1

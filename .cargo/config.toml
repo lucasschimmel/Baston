@@ -1,0 +1,7 @@
+# The v8 crate's build.rs creates a Windows symlink whenever the cargo target
+# dir and the cargo registry live on different drives (D: vs C:), which fails
+# without Developer Mode. Keeping the target dir on C: avoids that entirely,
+# and doubles as the shared target dir recommended by the Phase A roadmap.
+# Machine-local setting — not meaningful on CI (Linux ignores the issue).
+[build]
+target-dir = "C:/Users/osiri/.cache/baston-target"
