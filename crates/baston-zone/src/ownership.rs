@@ -162,7 +162,8 @@ mod tests {
         let vid = vehicle.entity_id;
         mgr.spawn_entity(vehicle);
 
-        let changes: Arc<std::sync::Mutex<Vec<(EntityId, Option<u32>)>>> = Default::default();
+        type ChangeLog = Arc<std::sync::Mutex<Vec<(EntityId, Option<u32>)>>>;
+        let changes: ChangeLog = Default::default();
         let sink = Arc::clone(&changes);
         let monitor = OwnershipMonitor::new(
             Arc::clone(&mgr),

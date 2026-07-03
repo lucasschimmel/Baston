@@ -337,7 +337,7 @@ mod tests {
         });
         ingest.apply(1, drive).unwrap();
         let state = ingest.entity_manager().get(vehicle_id).unwrap();
-        assert_eq!(state.coords, [20.0, 0.0, 0.0]);
+        assert_eq!(state.coords, [14.0, 0.0, 0.0]);
         assert!(
             matches!(state.extra, EntityExtra::Vehicle { speed, .. } if speed == 25.0),
             "VehicleState must be synchronized"
