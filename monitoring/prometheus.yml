@@ -2,7 +2,16 @@ global:
   scrape_interval: 5s
 
 scrape_configs:
-  - job_name: baston
+  - job_name: baston-gateway
     static_configs:
-      # BASTON gateway/zone metrics endpoint on the host ([metrics] port).
+      - targets: ["gateway:9090"]
+        labels: { component: gateway }
+      # Host-run gateway (dev without Docker for the Rust processes).
       - targets: ["host.docker.internal:9090"]
+        labels: { component: gateway-host }
+  - job_name: baston-zones
+    static_configs:
+      - targets: ["zone-a:9090"]
+        labels: { component: zone, zone: zone-a }
+      - targets: ["zone-b:9090"]
+        labels: { component: zone, zone: zone-b }

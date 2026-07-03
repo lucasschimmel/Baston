@@ -1,0 +1,37 @@
+# BASTON runtime configuration for Docker Compose (Phase D).
+# Env vars (ZONE_ID, ZONE_BOUNDS, GATEWAY_GRPC, NATS_URL, ...) override this.
+
+[server]
+name = "BASTON Mesh Dev"
+port = 30120
+max_players = 1500
+
+[resources]
+path = "resources"
+
+[udp]
+poll_interval_ms = 5
+
+[connection]
+deferral_timeout_secs = 10
+
+[dev]
+hot_reload = false
+# Loadtest clients don't carry CFX tickets.
+auth_bypass = true
+
+[meshing]
+enabled = true
+gateway_grpc_addr = "0.0.0.0:50050"
+heartbeat_interval_secs = 5
+zone_timeout_secs = 15
+boundary_margin = 300.0
+boundary_scan_interval_ms = 500
+handoff_cooldown_secs = 5
+admin_port = 8080
+# Override with BASTON_ADMIN_TOKEN in compose.
+admin_token = "dev-admin-token"
+
+[metrics]
+enabled = true
+port = 9090

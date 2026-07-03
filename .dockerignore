@@ -1,0 +1,8 @@
+target/
+.git/
+# Machine-local cargo config (Windows target-dir breaks the Linux builder).
+.cargo/
+*.pem
+docs/
+monitoring/
+resources/**/node_modules/
