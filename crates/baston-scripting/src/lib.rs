@@ -1,4 +1,18 @@
-//! deno_core-based scripting runtime for BASTON (Phase A stub — filled in at milestone A2).
+//! deno_core-based scripting runtime for BASTON.
+//!
+//! - [`ScriptRuntime`]: one V8 isolate per resource (FiveM polyfills injected).
+//! - [`ScriptHost`]: owns all runtimes on a dedicated thread; the process
+//!   talks to it via a `Send` handle.
+//! - [`DeferralRegistry`]: `playerConnecting` deferral state shared with the
+//!   HTTP gateway.
 
-/// Placeholder so the workspace compiles at milestone A1.
-pub fn placeholder() {}
+mod deferrals;
+mod error;
+mod extensions;
+mod host;
+mod runtime;
+
+pub use deferrals::{DeferralOutcome, DeferralRegistry};
+pub use error::ScriptError;
+pub use host::{ScriptHost, ScriptSource};
+pub use runtime::ScriptRuntime;
