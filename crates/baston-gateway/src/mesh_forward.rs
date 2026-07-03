@@ -14,6 +14,7 @@ use baston_protocol::udp::state::ClientStateUpdate;
 use tokio::sync::mpsc;
 
 use crate::connection_router::ConnectionRouter;
+use crate::zone_registry::ZoneRegistry;
 
 /// How long updates are buffered around a handoff commit.
 const HANDOFF_HOLD: Duration = Duration::from_millis(50);
@@ -39,9 +40,13 @@ pub struct MeshForwarder {
 }
 
 impl MeshForwarder {
-    pub fn spawn(nats: async_nats::Client, router: Arc<ConnectionRouter>) -> Self {
+    pub fn spawn(
+        nats: async_nats::Client,
+        router: Arc<ConnectionRouter>,
+        registry: Arc<ZoneRegistry>,
+    ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        tokio::spawn(run(nats, router, rx, tx.clone()));
+        tokio::spawn(run(nats, router, registry, rx, tx.clone()));
         Self { tx }
     }
 
@@ -60,15 +65,34 @@ impl MeshForwarder {
 async fn run(
     nats: async_nats::Client,
     router: Arc<ConnectionRouter>,
+    registry: Arc<ZoneRegistry>,
     mut rx: mpsc::UnboundedReceiver<ForwardMsg>,
     tx: mpsc::UnboundedSender<ForwardMsg>,
 ) {
     // source → (hold started, buffered updates)
     let mut holds: HashMap<u32, (Instant, Vec<ClientStateUpdate>)> = HashMap::new();
+    // Players whose first update was already seen (spawn re-homing done).
+    let mut homed: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
     while let Some(msg) = rx.recv().await {
         match msg {
             ForwardMsg::Update { source, update } => {
+                // Connection-time routing has no coordinates (least-loaded
+                // fallback). The FIRST positional update carries the spawn
+                // point: re-home the player to the covering zone before any
+                // zone ingests it — later boundary crossings go through the
+                // real handoff protocol instead.
+                if homed.insert(source) {
+                    let (x, y) = (update.coords[0], update.coords[1]);
+                    let current = router.zone_of(source);
+                    if let Some(correct) = registry.find_zone_for_coords(x, y).await {
+                        if current.as_deref() != Some(correct.as_str()) {
+                            router.assign(source, &correct);
+                            tracing::info!(target: "gateway",
+                                "player={source} spawn=({x:.0}, {y:.0}) → re-homed to {correct}");
+                        }
+                    }
+                }
                 if let Some((started, buf)) = holds.get_mut(&source) {
                     if started.elapsed() < HANDOFF_HOLD {
                         buf.push(update);

@@ -234,6 +234,26 @@ async fn main() -> anyhow::Result<()> {
                 }
             });
         }
+        // Routing-table hygiene: drop entries for players that disconnected
+        // (the UDP layer removes them from the registry; without this sweep
+        // the router accretes stale sources across sessions).
+        {
+            let mesh = Arc::clone(&mesh);
+            let players = Arc::clone(&players);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    interval.tick().await;
+                    for (source, _) in mesh.router.all() {
+                        if players.get(source).is_none() {
+                            mesh.router.remove(source);
+                        }
+                    }
+                }
+            });
+        }
+
         // D5: publish the global player list every 2s so zones can answer
         // GetPlayers()/GetPlayerName() across zone boundaries.
         if let Some(nats) = nats.clone() {
@@ -271,6 +291,7 @@ async fn main() -> anyhow::Result<()> {
             let fwd = baston_gateway::mesh_forward::MeshForwarder::spawn(
                 nats_client,
                 Arc::clone(&mesh.router),
+                Arc::clone(&mesh.registry),
             );
             let hook_fwd = fwd.clone();
             mesh.set_handoff_committed_hook(Arc::new(move |source, from, to| {

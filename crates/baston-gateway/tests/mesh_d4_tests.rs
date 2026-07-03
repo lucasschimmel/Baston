@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use baston_gateway::mesh_forward::{ingest_subject, MeshForwarder};
-use baston_gateway::ConnectionRouter;
+use baston_gateway::{ConnectionRouter, ZoneRegistry};
 use baston_protocol::entity::{new_entity_id, EntityExtra, EntityState, EntityType};
 use baston_protocol::udp::state::ClientStateUpdate;
 use baston_zone::boundary_loop::{entity_handoff_subject, BoundaryLoop, EntityHandoffPayload};
@@ -64,7 +64,26 @@ async fn forwarder_routes_to_current_zone_and_holds_during_handoff() {
     let mut sub_a = nats.subscribe(ingest_subject("zone-fwd-a")).await.unwrap();
     let mut sub_b = nats.subscribe(ingest_subject("zone-fwd-b")).await.unwrap();
 
-    let fwd = MeshForwarder::spawn(nats.clone(), Arc::clone(&router));
+    let registry = Arc::new(ZoneRegistry::new(Duration::from_secs(15)));
+    registry
+        .register_zone(
+            "zone-fwd-a",
+            baston_protocol::Aabb::new(-4000.0, -4000.0, 0.0, 4000.0),
+            "127.0.0.1:1",
+            100,
+        )
+        .await
+        .unwrap();
+    registry
+        .register_zone(
+            "zone-fwd-b",
+            baston_protocol::Aabb::new(0.0, -4000.0, 4000.0, 4000.0),
+            "127.0.0.1:2",
+            100,
+        )
+        .await
+        .unwrap();
+    let fwd = MeshForwarder::spawn(nats.clone(), Arc::clone(&router), registry);
     fwd.forward(1, update(-100.0));
     let got = collect_updates(&mut sub_a, 1, Duration::from_secs(2)).await;
     assert_eq!(got.len(), 1, "update must reach zone A before the handoff");

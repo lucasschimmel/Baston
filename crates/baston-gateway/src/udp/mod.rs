@@ -209,7 +209,18 @@ async fn run(
             }
             cmd = cmd_rx.recv() => {
                 match cmd {
-                    Some(cmd) => server.handle_command(cmd),
+                    Some(cmd) => {
+                        server.handle_command(cmd);
+                        // Batch-drain: at 2000 clients the aggregator emits
+                        // tens of thousands of sends per second — one select
+                        // iteration per command starves the ENet pump.
+                        let mut drained = 0;
+                        while let Ok(cmd) = cmd_rx.try_recv() {
+                            server.handle_command(cmd);
+                            drained += 1;
+                            if drained >= 4096 { break; }
+                        }
+                    }
                     // All handles dropped: keep servicing ENet regardless.
                     None => server.pump().await,
                 }
@@ -334,6 +345,11 @@ impl UdpServer {
         let Some(connect) = handshake::parse_connect(payload) else {
             return;
         };
+        // Binary-protocol clients (loadtest) declare themselves up front:
+        // they sync via BASTON snapshots, so the O(n²) non-OneSync
+        // onPlayerJoining mutual-knowledge broadcast is skipped for them.
+        let is_baston_client = payload.windows(15).any(|w| w == b"bastonClient=1&")
+            || payload.ends_with(b"bastonClient=1");
         let Some(source) = self.players.source_for_token(&connect.token) else {
             tracing::warn!(target: "udp", "handshake with unknown connection token; dropping peer");
             self.host.peer_mut(peer_id).disconnect(0);
@@ -360,14 +376,19 @@ impl UdpServer {
             "UDP connection established: source={source} addr={addr} latency={latency_ms}ms"
         );
 
-        self.send_post_connect(source);
+        if is_baston_client {
+            if let Some(ingest) = &self.state_ingest {
+                ingest.mark_snapshot_subscriber(source);
+            }
+        }
+        self.send_post_connect(source, is_baston_client);
     }
 
     /// What FXServer sends/fires once the game connection is up
     /// (`ClientRegistry::HandleConnectedClient` + `ServerConsoleReplication.cpp`):
     /// replicated convars, the `onPlayerJoining` client event, and the
     /// server-side `playerJoining` event.
-    fn send_post_connect(&mut self, source: u32) {
+    fn send_post_connect(&mut self, source: u32, is_baston_client: bool) {
         // msgConVars: msgpack map of ConVar_Replicated variables.
         let convars = std::collections::BTreeMap::from([("onesync".to_owned(), "off".to_owned())]);
         if let Ok(payload) = rmp_serde::to_vec(&convars) {
@@ -393,15 +414,30 @@ impl UdpServer {
         // throws msgpack::type_error → client crash. Non-OneSync never
         // assigns slots (`ClientRegistry.cpp` gates on IsOneSync), so every
         // slot is the unsigned representation of -1.
-        let name = self.players.get(source).map(|p| p.name).unwrap_or_default();
-        let all_sources: Vec<u32> = self.peer_sources.values().copied().collect();
-        for &other in &all_sources {
-            // The joiner about everyone (itself included, as FXServer does)…
-            let other_name = self.players.get(other).map(|p| p.name).unwrap_or_default();
-            self.send_player_event("onPlayerJoining", source, other, &other_name);
-            // …and everyone else about the joiner.
-            if other != source {
-                self.send_player_event("onPlayerJoining", other, source, &name);
+        // Binary BASTON clients sync via snapshots — the mutual-knowledge
+        // broadcast is pure O(n²) noise for them (2000 joins ≈ 4M reliable
+        // packets, enough to sink the connect phase of a mesh benchmark).
+        if !is_baston_client {
+            let name = self.players.get(source).map(|p| p.name).unwrap_or_default();
+            let others: Vec<(u32, bool)> = self
+                .peer_sources
+                .values()
+                .map(|&s| {
+                    let sub = self
+                        .state_ingest
+                        .as_ref()
+                        .is_some_and(|i| i.is_snapshot_subscriber(s));
+                    (s, sub)
+                })
+                .collect();
+            for (other, other_is_subscriber) in others {
+                // The joiner about everyone (itself included, as FXServer does)…
+                let other_name = self.players.get(other).map(|p| p.name).unwrap_or_default();
+                self.send_player_event("onPlayerJoining", source, other, &other_name);
+                // …and everyone else (real clients only) about the joiner.
+                if other != source && !other_is_subscriber {
+                    self.send_player_event("onPlayerJoining", other, source, &name);
+                }
             }
         }
 

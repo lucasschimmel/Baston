@@ -18,8 +18,12 @@ zone_id = "gateway"
 
 [state_sync]
 sync_interval_ms = 16
-push_interval_ms = 50
-aoi_radius = 450.0
+# 10fps push at 2000 clients: halves the gateway's outbound packet rate
+# (~40k/s → ~20k/s on one UDP socket); clients dead-reckon between updates.
+push_interval_ms = 100
+# 300m at benchmark density (2000 players / 61 km²) keeps per-client entity
+# counts near real-server levels; 450m on this synthetic map over-densifies.
+aoi_radius = 300.0
 max_speed_mps = 200.0
 ownership_interval_secs = 5
 

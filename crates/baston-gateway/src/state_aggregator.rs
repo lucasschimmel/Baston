@@ -162,11 +162,30 @@ impl StateAggregator {
         let mut interval = tokio::time::interval(self.push_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut tick: u64 = 0;
+        // Parallel fan-out: the per-client AoI work is O(clients × visible)
+        // and saturates one core well before 2000 clients on a single task.
+        let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
         loop {
             interval.tick().await;
             tick += 1;
-            for source in self.players.sources() {
-                self.push_to_client(source, tick);
+            // Spatial grid built once per tick: cell > AoI radius so a 3×3
+            // neighborhood always covers the client's interest sphere.
+            let grid = Arc::new(SpatialGrid::build(&self.world_state, self.aoi_radius));
+            let sources = self.players.sources();
+            let chunk = sources.len().div_ceil(workers).max(1);
+            let mut tasks = Vec::new();
+            for part in sources.chunks(chunk) {
+                let this = Arc::clone(&self);
+                let grid = Arc::clone(&grid);
+                let part = part.to_vec();
+                tasks.push(tokio::spawn(async move {
+                    for source in part {
+                        this.push_to_client(source, tick, &grid);
+                    }
+                }));
+            }
+            for t in tasks {
+                let _ = t.await;
             }
             // Drop trackers of players that left.
             self.trackers
@@ -175,7 +194,7 @@ impl StateAggregator {
     }
 
     /// Build and send one client's snapshot for this tick.
-    fn push_to_client(&self, source: u32, tick: u64) {
+    fn push_to_client(&self, source: u32, tick: u64, grid: &SpatialGrid) {
         // Real FiveM clients sync through the msgRoute relay; only
         // binary-protocol clients (loadtest) consume snapshots.
         if !self.state_ingest.is_snapshot_subscriber(source) {
@@ -186,13 +205,21 @@ impl StateAggregator {
         let Some(player_entity) = self.state_ingest.player_entity(source) else {
             return;
         };
-        let Some(center) = self.world_state.get(&player_entity).map(|e| e.coords) else {
+        // Read the viewpoint from the LOCAL entity manager, not world_state:
+        // in mesh mode world_state holds the zone processes' entities (their
+        // own UUIDs) and never contains the gateway-local player entity.
+        let Some(center) = self
+            .state_ingest
+            .entity_manager()
+            .get(player_entity)
+            .map(|e| e.coords)
+        else {
             return;
         };
 
         let mut tracker = self.trackers.entry(source).or_default();
-        let ops = compute_client_ops(
-            &self.world_state,
+        let ops = compute_client_ops_from(
+            grid.candidates(center),
             &mut tracker,
             source,
             center,
@@ -220,6 +247,38 @@ impl StateAggregator {
     }
 }
 
+/// Uniform grid over the world, rebuilt each push tick. Cell size exceeds
+/// the AoI radius so any interest sphere fits in a 3×3 cell neighborhood —
+/// per-client work drops from O(world) to O(local density).
+pub struct SpatialGrid {
+    cell: f32,
+    cells: HashMap<(i32, i32), Vec<EntityState>>,
+}
+
+impl SpatialGrid {
+    pub fn build(world: &DashMap<EntityId, EntityState>, aoi_radius: f32) -> Self {
+        let cell = aoi_radius.max(1.0) * 1.05;
+        let mut cells: HashMap<(i32, i32), Vec<EntityState>> = HashMap::new();
+        for entry in world.iter() {
+            let s = entry.value();
+            let key = ((s.coords[0] / cell).floor() as i32, (s.coords[1] / cell).floor() as i32);
+            cells.entry(key).or_default().push(s.clone());
+        }
+        Self { cell, cells }
+    }
+
+    /// Entities in the 3×3 neighborhood of `center` (superset of the AoI).
+    pub fn candidates(&self, center: [f32; 3]) -> impl Iterator<Item = &EntityState> {
+        let cx = (center[0] / self.cell).floor() as i32;
+        let cy = (center[1] / self.cell).floor() as i32;
+        (-1..=1).flat_map(move |dx| {
+            (-1..=1).flat_map(move |dy| {
+                self.cells.get(&(cx + dx, cy + dy)).into_iter().flatten()
+            })
+        })
+    }
+}
+
 /// Pure per-client op computation: AoI filter + enter/leave tracking +
 /// per-distance rate limiting. Separated from the aggregator for testability.
 pub fn compute_client_ops(
@@ -229,12 +288,23 @@ pub fn compute_client_ops(
     center: [f32; 3],
     radius: f32,
 ) -> Vec<EntityOp> {
+    let states: Vec<EntityState> = world.iter().map(|e| e.value().clone()).collect();
+    compute_client_ops_from(states.iter(), tracker, viewer_source, center, radius)
+}
+
+/// Grid-backed variant: `candidates` must be a superset of the AoI sphere.
+pub fn compute_client_ops_from<'a>(
+    candidates: impl Iterator<Item = &'a EntityState>,
+    tracker: &mut ClientEntityTracker,
+    viewer_source: u32,
+    center: [f32; 3],
+    radius: f32,
+) -> Vec<EntityOp> {
     let now = Instant::now();
     let mut ops = Vec::new();
     let mut visible = std::collections::HashSet::new();
 
-    for entry in world.iter() {
-        let state = entry.value();
+    for state in candidates {
         // The network owner is the authority on its own entities — echoing
         // its state back would fight the local simulation.
         if state.network_owner == Some(viewer_source) {
