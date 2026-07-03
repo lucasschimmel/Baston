@@ -8,7 +8,7 @@
 //! `nameLen` counts the trailing NUL (ConstrainedBytesArray<2, u16::MAX>).
 //! Event arguments are a msgpack array.
 
-use crate::udp::{MSG_NET_EVENT, MSG_SERVER_EVENT};
+use crate::udp::MSG_NET_EVENT;
 
 /// Server → client event (TriggerClientEvent).
 pub fn build_net_event(event_name: &str, msgpack_args: &[u8]) -> Vec<u8> {
