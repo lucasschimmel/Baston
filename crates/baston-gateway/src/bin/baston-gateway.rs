@@ -69,6 +69,27 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Jalon C5: dynamic network ownership with scripted notification.
+    let owner_event_host = script_host.clone();
+    let ownership = baston_zone::OwnershipMonitor::new(
+        Arc::clone(&entity_manager),
+        Arc::clone(&state_ingest),
+        config.state_sync.ownership_interval_secs,
+        Some(Arc::new(move |entity_id, new_owner| {
+            let host = owner_event_host.clone();
+            tokio::spawn(async move {
+                let args = [
+                    serde_json::json!(entity_id.to_string()),
+                    serde_json::json!(new_owner),
+                ];
+                if let Err(e) = host.trigger_event("onEntityOwnerChanged", &args).await {
+                    tracing::warn!(target: "zone", error = %e, "onEntityOwnerChanged dispatch failed");
+                }
+            });
+        })),
+    );
+    tokio::spawn(ownership.run());
+
     let port = config.server.port;
     let udp_port = config.udp.port.unwrap_or(port);
     let udp = baston_gateway::udp::spawn_with_net(

@@ -122,6 +122,24 @@ pub const PHASE_B_NATIVES: &[NativeSignature] = &[
         args: &[NativeType::Entity],
         returns: NativeType::Bool,
     },
+    // Phase C vehicle natives (FivemDocs/natives/VEHICLE/*.md).
+    NativeSignature {
+        name: "SET_VEHICLE_ENGINE_ON",
+        hash: NativeHash(0x2497C4717C8B881E),
+        args: &[
+            NativeType::Entity,
+            NativeType::Bool,
+            NativeType::Bool,
+            NativeType::Bool,
+        ],
+        returns: NativeType::Void,
+    },
+    NativeSignature {
+        name: "SET_VEHICLE_DOORS_LOCKED",
+        hash: NativeHash(0xB664292EAECF7FA6),
+        args: &[NativeType::Entity, NativeType::Int],
+        returns: NativeType::Void,
+    },
 ];
 
 /// Lookup + arity validation for dispatched natives.

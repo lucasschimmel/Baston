@@ -2,12 +2,14 @@
 //! gateway; the standalone binary split comes in Phase D.
 
 pub mod entity_manager;
+pub mod ownership;
 pub mod packfile;
 pub mod resource_loader;
 pub mod state_ingest;
 pub mod state_sync;
 
 pub use entity_manager::EntityManager;
+pub use ownership::OwnershipMonitor;
 pub use state_ingest::StateIngest;
 pub use state_sync::StateSyncEmitter;
 

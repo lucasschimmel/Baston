@@ -10,7 +10,7 @@
 use std::time::Instant;
 
 use baston_protocol::entity::{
-    distance3d, new_entity_id, EntityId, EntityState, EntityStateUpdate, EntityType,
+    distance3d, new_entity_id, EntityExtra, EntityId, EntityState, EntityStateUpdate, EntityType,
 };
 use baston_protocol::udp::state::ClientStateUpdate;
 use dashmap::DashMap;
@@ -62,6 +62,18 @@ impl StateIngest {
         self.player_entities.get(&source).map(|e| *e)
     }
 
+    /// Connected players' (source, coords), for ownership assignment.
+    pub fn player_positions(&self) -> Vec<(u32, [f32; 3])> {
+        self.player_entities
+            .iter()
+            .filter_map(|entry| {
+                self.entity_manager
+                    .get(*entry.value())
+                    .map(|state| (*entry.key(), state.coords))
+            })
+            .collect()
+    }
+
     /// Apply a validated client state update coming from `source`.
     pub fn apply(&self, source: u32, update: ClientStateUpdate) -> Result<EntityId, RejectReason> {
         let entity_id = match update.entity_id {
@@ -72,6 +84,11 @@ impl StateIngest {
             },
             Some(id) => {
                 let Some(state) = self.entity_manager.get(id) else {
+                    // A client may register a non-player entity it just
+                    // created locally (vehicle, object); it becomes owner.
+                    if update.entity_type != EntityType::Player {
+                        return Ok(self.spawn_owned_entity(source, id, &update));
+                    }
                     return Err(RejectReason::UnknownEntity);
                 };
                 if state.network_owner != Some(source) {
@@ -84,7 +101,10 @@ impl StateIngest {
         };
 
         if let Some((at, from)) = self.last_accepted.get(&entity_id).map(|e| *e) {
-            let dt = at.elapsed().as_secs_f32().max(1e-3);
+            // Clients report every ~50-100ms; flooring dt at one report
+            // interval keeps back-to-back packets (burst delivery) from
+            // reading as implausible speed.
+            let dt = at.elapsed().as_secs_f32().max(0.05);
             let speed = distance3d(from, update.coords) / dt;
             if speed > self.max_speed_mps {
                 tracing::warn!(
@@ -102,6 +122,25 @@ impl StateIngest {
         self.last_accepted
             .insert(entity_id, (Instant::now(), update.coords));
 
+        // Mounting a vehicle transfers the vehicle's network ownership to
+        // the driver (jalon C5).
+        if let Some(EntityExtra::Player {
+            is_in_vehicle: true,
+            vehicle_id: Some(vehicle),
+        }) = &update.extra
+        {
+            let vehicle = *vehicle;
+            if self
+                .entity_manager
+                .get(vehicle)
+                .is_some_and(|v| v.network_owner != Some(source))
+            {
+                self.entity_manager.set_network_owner(vehicle, Some(source));
+                tracing::info!(target: "zone", source, vehicle_id = %vehicle,
+                    "vehicle ownership transferred to occupant");
+            }
+        }
+
         self.entity_manager.update_entity(
             entity_id,
             EntityStateUpdate {
@@ -117,6 +156,33 @@ impl StateIngest {
         Ok(entity_id)
     }
 
+    /// Register a client-created non-player entity (vehicle/object/ped).
+    fn spawn_owned_entity(
+        &self,
+        source: u32,
+        id: EntityId,
+        update: &ClientStateUpdate,
+    ) -> EntityId {
+        self.entity_manager.spawn_entity(EntityState {
+            entity_id: id,
+            entity_type: update.entity_type,
+            network_owner: Some(source),
+            model_hash: update.model_hash,
+            coords: update.coords,
+            heading: update.heading,
+            velocity: update.velocity,
+            health: update.health,
+            armour: update.armour,
+            extra: update.extra.clone().unwrap_or(EntityExtra::Object {
+                is_static: false,
+            }),
+        });
+        self.last_accepted.insert(id, (Instant::now(), update.coords));
+        tracing::info!(target: "zone", source, entity_id = %id,
+            entity_type = ?update.entity_type, "client entity registered");
+        id
+    }
+
     fn spawn_player_entity(&self, source: u32, update: &ClientStateUpdate) -> EntityId {
         let id = new_entity_id();
         self.entity_manager.spawn_entity(EntityState {
@@ -129,12 +195,10 @@ impl StateIngest {
             velocity: update.velocity,
             health: update.health,
             armour: update.armour,
-            extra: update.extra.clone().unwrap_or(
-                baston_protocol::entity::EntityExtra::Player {
-                    is_in_vehicle: false,
-                    vehicle_id: None,
-                },
-            ),
+            extra: update.extra.clone().unwrap_or(EntityExtra::Player {
+                is_in_vehicle: false,
+                vehicle_id: None,
+            }),
         });
         self.player_entities.insert(source, id);
         self.last_accepted
@@ -201,8 +265,8 @@ mod tests {
     fn plausible_movement_is_accepted() {
         let ingest = ingest();
         let id = ingest.apply(1, sample([0.0; 3])).unwrap();
-        // Even with dt≈0, 0.1m over the clamped 1ms floor stays under 200 m/s.
-        let id2 = ingest.apply(1, sample([0.1, 0.0, 0.0])).unwrap();
+        // 5m over the 50ms dt floor = 100 m/s, under the 200 m/s ceiling.
+        let id2 = ingest.apply(1, sample([5.0, 0.0, 0.0])).unwrap();
         assert_eq!(id, id2);
     }
 
@@ -225,6 +289,59 @@ mod tests {
         let mut update = sample([1.0, 0.0, 0.0]);
         update.entity_id = Some(victim);
         assert_eq!(ingest.apply(2, update).unwrap_err(), RejectReason::NotOwner);
+    }
+
+    #[test]
+    fn mounting_vehicle_transfers_ownership_and_syncs_state() {
+        let ingest = ingest();
+        ingest.apply(1, sample([0.0; 3])).unwrap();
+        ingest.apply(2, sample([5.0, 0.0, 0.0])).unwrap();
+
+        // Player 2 registers a vehicle it created locally.
+        let vehicle_id = baston_protocol::entity::new_entity_id();
+        let mut register = sample([6.0, 0.0, 0.0]);
+        register.entity_id = Some(vehicle_id);
+        register.entity_type = EntityType::Vehicle;
+        register.extra = Some(EntityExtra::Vehicle {
+            speed: 0.0,
+            engine_health: 1000.0,
+            doors_open: 0,
+        });
+        ingest.apply(2, register).unwrap();
+        assert_eq!(
+            ingest.entity_manager().get(vehicle_id).unwrap().network_owner,
+            Some(2)
+        );
+
+        // Player 1 mounts it → ownership transfers to player 1.
+        let mut mount = sample([6.0, 0.0, 0.0]);
+        mount.extra = Some(EntityExtra::Player {
+            is_in_vehicle: true,
+            vehicle_id: Some(vehicle_id),
+        });
+        ingest.apply(1, mount).unwrap();
+        assert_eq!(
+            ingest.entity_manager().get(vehicle_id).unwrap().network_owner,
+            Some(1)
+        );
+
+        // Player 1 can now report VehicleState updates for it (8m at the
+        // 50ms dt floor = 160 m/s, plausible for a vehicle).
+        let mut drive = sample([14.0, 0.0, 0.0]);
+        drive.entity_id = Some(vehicle_id);
+        drive.entity_type = EntityType::Vehicle;
+        drive.extra = Some(EntityExtra::Vehicle {
+            speed: 25.0,
+            engine_health: 990.0,
+            doors_open: 0b01,
+        });
+        ingest.apply(1, drive).unwrap();
+        let state = ingest.entity_manager().get(vehicle_id).unwrap();
+        assert_eq!(state.coords, [20.0, 0.0, 0.0]);
+        assert!(
+            matches!(state.extra, EntityExtra::Vehicle { speed, .. } if speed == 25.0),
+            "VehicleState must be synchronized"
+        );
     }
 
     #[test]
