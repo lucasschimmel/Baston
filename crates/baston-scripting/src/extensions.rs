@@ -48,6 +48,15 @@ pub struct SharedPlayers(pub Arc<baston_protocol::PlayerDirectory>);
 pub struct SharedNet(pub crate::net_bridge::NetBridge);
 
 /// How long a server → client native call may wait for its result.
+///
+/// This is also the upper bound on how long one such call can stall the
+/// resource's runtime: the host command loop runs one dispatch to completion at
+/// a time, so while a handler awaits a native result no other event for that
+/// resource is serviced (see `op_invoke_native_on_client`). Keep it low enough
+/// to bound a slow/hostile client's impact, but above realistic client RTT so
+/// legitimate results aren't dropped. Removing the stall entirely needs the
+/// host loop to drive dispatches concurrently on the shared isolate (tracked
+/// separately — it's a redesign of the execution model, not a local change).
 const NATIVE_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1000);
 
 // --- 1. console ---
@@ -90,14 +99,14 @@ fn op_trigger_client_event(
     let net = &state.borrow::<SharedNet>().0;
     if net
         .tx
-        .send(crate::net_bridge::NetOutbound::ClientEvent {
+        .try_send(crate::net_bridge::NetOutbound::ClientEvent {
             source,
             event: event.clone(),
             args_json,
         })
         .is_err()
     {
-        tracing::warn!(target: "events", %event, source, "client event dropped: net bridge closed");
+        tracing::warn!(target: "events", %event, source, "client event dropped: net bridge full or closed");
     }
 }
 
@@ -147,7 +156,7 @@ async fn op_invoke_native_on_client(
     let payload = serde_json::json!([call]);
     if net
         .tx
-        .send(crate::net_bridge::NetOutbound::ClientEvent {
+        .try_send(crate::net_bridge::NetOutbound::ClientEvent {
             source,
             event: INVOKE_NATIVE_EVENT.to_owned(),
             args_json: payload.to_string(),
@@ -155,7 +164,7 @@ async fn op_invoke_native_on_client(
         .is_err()
     {
         net.pending_natives.cancel(id);
-        return err("net bridge closed");
+        return err("net bridge full or closed");
     }
 
     if !expects_return {
@@ -330,12 +339,17 @@ fn op_register_zone_transfer_state(state: &mut OpState) {
 /// JSON object back to Rust.
 #[op2(fast)]
 fn op_report_zone_transfer_state(state: &mut OpState, #[string] json: String) {
-    state.borrow_mut::<RuntimeContext>().collected_transfer_state = Some(json);
+    state
+        .borrow_mut::<RuntimeContext>()
+        .collected_transfer_state = Some(json);
 }
 
 deno_core::extension!(
     baston_mesh,
-    ops = [op_register_zone_transfer_state, op_report_zone_transfer_state]
+    ops = [
+        op_register_zone_transfer_state,
+        op_report_zone_transfer_state
+    ]
 );
 
 deno_core::extension!(

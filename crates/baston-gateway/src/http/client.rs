@@ -36,8 +36,14 @@ fn client_error(reason: impl Into<String>) -> Response {
     Json(json!({ "error": reason.into() })).into_response()
 }
 
-/// Peer IP from proxy headers (as FXServer's EndPointIdentityProvider);
-/// the UDP layer (B3) carries the authoritative peer address.
+/// Peer IP from proxy headers (as FXServer's EndPointIdentityProvider).
+///
+/// SECURITY: `x-real-ip` is attacker-controlled unless a trusted reverse proxy
+/// overwrites it, so the `ip:` identifier derived here must NOT be treated as
+/// authoritative for bans/allowlists on a directly-exposed deployment. The
+/// authoritative peer address comes from the UDP/ENet layer (B3); this value is
+/// only the FXServer-compatible identifier. Deploy behind a proxy that pins
+/// `x-real-ip`, or rely on the UDP address for trust decisions.
 fn peer_ip(headers: &HeaderMap) -> String {
     headers
         .get("x-real-ip")
@@ -204,7 +210,18 @@ pub async fn client_connect(
 pub async fn admin_drop_player(
     State(state): State<Arc<AppState>>,
     AxumPath(source): AxumPath<u32>,
+    headers: HeaderMap,
 ) -> Response {
+    // This route lives on the public game port, so it MUST be authenticated —
+    // an unauthenticated drop lets anyone kick any player by (sequential,
+    // guessable) source id. Reuse the admin bearer token; empty token = denied.
+    if !crate::admin::bearer_matches(&state.config.meshing.admin_token, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "invalid admin token" })),
+        )
+            .into_response();
+    }
     let Some(player) = state.players.remove(source) else {
         return StatusCode::NOT_FOUND.into_response();
     };

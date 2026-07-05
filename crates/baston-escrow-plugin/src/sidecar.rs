@@ -1,16 +1,20 @@
-//! Sidecar-subprocess decryptor (DB2b).
+//! Shared FXServer sidecar subprocess — the single channel to the genuine,
+//! **unmodified** CFX component (`svadhesive`) running in its native host.
 //!
-//! `svadhesive.dll` cannot be called via FFI (it exposes only an opaque
-//! CitizenFX component, see the phase D-bis impl notes). Instead we run a
-//! minimal **FXServer subprocess** that loads escrow resources normally —
-//! svadhesive decrypts them via its internal VFS hook — and a small Lua shim
-//! streams the decrypted bytes back over a line-delimited JSON protocol on
-//! stdin/stdout.
+//! `svadhesive.dll` cannot be called over FFI (it exposes only an opaque
+//! CitizenFX component, single `CreateComponent` export — see the phase D-bis
+//! impl notes). Instead we run a minimal **FXServer subprocess** that loads the
+//! component normally, and a small Lua shim answers a line-delimited JSON
+//! protocol on stdin/stdout. One sidecar process backs BOTH capabilities so we
+//! never boot a second FXServer:
+//!   - escrow decryption  — request `{ "op": "decrypt", ... }`
+//!   - licence validation — request `{ "op": "license_status" }`
 //!
-//! The [`ScriptDecryptor::decrypt`] trait method is synchronous, so this module
-//! uses blocking `std::process` pipes driven by a dedicated actor thread. The
-//! caller never deadlocks: every request waits on a bounded `recv_timeout`, and
-//! a frozen or dead child surfaces as a clean `Err`, never a panic.
+//! This module owns only the transport: it ships a request line and returns the
+//! parsed JSON reply. Callers ([`crate::SidecarDecryptor`], [`crate::LicenseOracle`])
+//! build the request and interpret the reply. Every request waits on a bounded
+//! `recv_timeout`, so a frozen or dead child surfaces as a clean `Err`, never a
+//! panic or a deadlock.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -20,27 +24,22 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use base64::engine::general_purpose::STANDARD as B64;
-use base64::Engine;
-use baston_core::script_decryptor::{
-    is_cfx_encrypted, DecryptError, EntitlementContext, ScriptDecryptor,
-};
-
 use crate::error::EscrowPluginError;
 
 /// How long to wait for the sidecar to print `READY` on startup.
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
-/// Per-request decrypt timeout (mission requirement: no deadlock on freeze).
-const DECRYPT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Per-request reply timeout (no deadlock on a frozen sidecar).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// One decrypt job handed to the actor thread.
+/// One request handed to the actor thread.
 struct Job {
     request_line: String,
-    reply: Sender<Result<Vec<u8>, EscrowPluginError>>,
+    reply: Sender<Result<serde_json::Value, EscrowPluginError>>,
 }
 
-/// A decryptor backed by an FXServer sidecar subprocess.
-pub struct SidecarDecryptor {
+/// A running FXServer sidecar. Obtained as an `Arc<Sidecar>` so escrow and
+/// licence can share one process; the child is killed when the last `Arc` drops.
+pub struct Sidecar {
     jobs: Mutex<Sender<Job>>,
     actor: Mutex<Option<JoinHandle<()>>>,
     /// Shared with the actor so `Drop` can kill the child even while the actor
@@ -48,7 +47,7 @@ pub struct SidecarDecryptor {
     child: Arc<Mutex<Child>>,
 }
 
-impl SidecarDecryptor {
+impl Sidecar {
     /// Start a real FXServer sidecar for production use.
     ///
     /// Launches `fxserver_path` with `sv_lan true` / `sv_maxclients 0` and the
@@ -56,7 +55,7 @@ impl SidecarDecryptor {
     pub fn start(
         fxserver_path: &Path,
         resources_dir: &Path,
-    ) -> Result<Self, EscrowPluginError> {
+    ) -> Result<Arc<Self>, EscrowPluginError> {
         let mut cmd = Command::new(fxserver_path);
         cmd.arg("+set")
             .arg("sv_lan")
@@ -73,10 +72,10 @@ impl SidecarDecryptor {
     }
 
     /// Spawn the actor around an arbitrary command implementing the sidecar
-    /// protocol (`READY\n` then one JSON reply per JSON request line). Exposed
+    /// protocol (`READY\n`, then one JSON reply per JSON request line). Exposed
     /// so tests can drive it with a lightweight stub process instead of a full
     /// FXServer install.
-    pub fn spawn_with_command(mut cmd: Command) -> Result<Self, EscrowPluginError> {
+    pub fn spawn_with_command(mut cmd: Command) -> Result<Arc<Self>, EscrowPluginError> {
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -100,40 +99,35 @@ impl SidecarDecryptor {
 
         let actor_child = Arc::clone(&child);
         let actor = std::thread::Builder::new()
-            .name("escrow-sidecar".into())
+            .name("cfx-sidecar".into())
             .spawn(move || actor_loop(actor_child, stdin, stdout, jobs_rx, ready_tx))
             .map_err(|e| EscrowPluginError::SidecarSpawn(e.to_string()))?;
 
         // Wait for the actor to confirm the sidecar printed READY.
         match ready_rx.recv_timeout(READY_TIMEOUT) {
             Ok(Ok(())) => {
-                tracing::info!("baston-escrow sidecar started (FXServer subprocess)");
-                Ok(SidecarDecryptor {
+                tracing::info!("baston CFX sidecar started (FXServer subprocess)");
+                Ok(Arc::new(Sidecar {
                     jobs: Mutex::new(jobs_tx),
                     actor: Mutex::new(Some(actor)),
                     child,
-                })
+                }))
             }
             Ok(Err(e)) => Err(e),
             Err(RecvTimeoutError::Timeout) => Err(EscrowPluginError::SidecarStartTimeout),
-            Err(RecvTimeoutError::Disconnected) => {
-                Err(EscrowPluginError::SidecarIo("actor exited during startup".into()))
-            }
+            Err(RecvTimeoutError::Disconnected) => Err(EscrowPluginError::SidecarIo(
+                "actor exited during startup".into(),
+            )),
         }
     }
 
-    /// Send one decrypt request to the actor and wait (bounded) for the reply.
-    fn request(&self, resource: &str, file: &str, bytes: &[u8]) -> Result<Vec<u8>, EscrowPluginError> {
-        let request_line = serde_json::json!({
-            "resource": resource,
-            "file": file,
-            "data": B64.encode(bytes),
-        })
-        .to_string();
-
+    /// Send one request line and wait (bounded) for the parsed JSON reply.
+    pub fn request(&self, request_line: String) -> Result<serde_json::Value, EscrowPluginError> {
         let (reply_tx, reply_rx) = mpsc::channel();
         {
-            let jobs = self.jobs.lock().expect("jobs sender mutex poisoned");
+            // Recover a poisoned mutex rather than turning one panicking worker
+            // into a cascade that kills every future decrypt request.
+            let jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
             jobs.send(Job {
                 request_line,
                 reply: reply_tx,
@@ -141,7 +135,7 @@ impl SidecarDecryptor {
             .map_err(|_| EscrowPluginError::SidecarDied("actor thread gone".into()))?;
         }
 
-        match reply_rx.recv_timeout(DECRYPT_TIMEOUT) {
+        match reply_rx.recv_timeout(REQUEST_TIMEOUT) {
             Ok(result) => result,
             Err(RecvTimeoutError::Timeout) => Err(EscrowPluginError::SidecarDecryptTimeout),
             Err(RecvTimeoutError::Disconnected) => {
@@ -151,32 +145,7 @@ impl SidecarDecryptor {
     }
 }
 
-impl ScriptDecryptor for SidecarDecryptor {
-    fn decrypt(
-        &self,
-        resource_name: &str,
-        file_path: &str,
-        bytes: &[u8],
-        _entitlement: Option<&EntitlementContext>,
-    ) -> Result<Vec<u8>, DecryptError> {
-        // Plain files never touch the sidecar — zero overhead.
-        if !is_cfx_encrypted(bytes) {
-            return Ok(bytes.to_vec());
-        }
-        self.request(resource_name, file_path, bytes)
-            .map_err(|e| DecryptError::DecryptionFailed {
-                resource: resource_name.to_string(),
-                file: file_path.to_string(),
-                reason: e.to_string(),
-            })
-    }
-
-    fn supports_encrypted(&self) -> bool {
-        true
-    }
-}
-
-impl Drop for SidecarDecryptor {
+impl Drop for Sidecar {
     fn drop(&mut self) {
         // Kill the child FIRST: this closes its stdout, which unblocks the
         // actor if it is parked in a blocking `read_line` (e.g. a frozen
@@ -184,8 +153,8 @@ impl Drop for SidecarDecryptor {
         if let Ok(mut child) = self.child.lock() {
             let _ = child.kill();
         }
-        // Drop the live sender so the actor's `jobs_rx.recv()` also observes
-        // the hang-up if it happens to be idle.
+        // Drop the live sender so the actor's `jobs_rx.recv()` also observes the
+        // hang-up if it happens to be idle.
         if let Ok(mut guard) = self.jobs.lock() {
             let (dead_tx, _) = mpsc::channel();
             *guard = dead_tx;
@@ -245,11 +214,7 @@ fn actor_loop(
     // Service loop.
     while let Ok(job) = jobs_rx.recv() {
         // Detect a dead child before trying to talk to it.
-        if let Ok(Some(status)) = child
-            .lock()
-            .expect("child mutex poisoned")
-            .try_wait()
-        {
+        if let Ok(Some(status)) = child.lock().unwrap_or_else(|e| e.into_inner()).try_wait() {
             let _ = job
                 .reply
                 .send(Err(EscrowPluginError::SidecarDied(status.to_string())));
@@ -269,12 +234,14 @@ fn actor_loop(
     kill_child();
 }
 
-/// Write one request line and read exactly one JSON reply line.
+/// Write one request line and read exactly one JSON reply line. Returns the
+/// parsed JSON value verbatim; the caller interprets `data`/`error`/licence
+/// fields.
 fn round_trip(
     stdin: &mut ChildStdin,
     stdout: &mut BufReader<ChildStdout>,
     request_line: &str,
-) -> Result<Vec<u8>, EscrowPluginError> {
+) -> Result<serde_json::Value, EscrowPluginError> {
     stdin
         .write_all(request_line.as_bytes())
         .and_then(|_| stdin.write_all(b"\n"))
@@ -289,18 +256,6 @@ fn round_trip(
         return Err(EscrowPluginError::SidecarDied("stdout closed".into()));
     }
 
-    let value: serde_json::Value = serde_json::from_str(response.trim())
-        .map_err(|e| EscrowPluginError::SidecarProtocol(e.to_string()))?;
-
-    if let Some(data) = value.get("data").and_then(|d| d.as_str()) {
-        B64.decode(data)
-            .map_err(|e| EscrowPluginError::SidecarProtocol(e.to_string()))
-    } else {
-        let msg = value
-            .get("error")
-            .and_then(|e| e.as_str())
-            .unwrap_or("unknown error")
-            .to_string();
-        Err(EscrowPluginError::SidecarDecryptFailed(msg))
-    }
+    serde_json::from_str(response.trim())
+        .map_err(|e| EscrowPluginError::SidecarProtocol(e.to_string()))
 }

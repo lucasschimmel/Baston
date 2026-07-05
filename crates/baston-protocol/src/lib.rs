@@ -6,6 +6,7 @@ pub mod events;
 pub mod native;
 pub mod player_snapshot;
 pub mod players;
+pub mod rage;
 pub mod spatial;
 pub mod udp;
 
@@ -21,7 +22,12 @@ pub use spatial::Aabb;
 
 impl From<Aabb> for mesh::BoundingBox {
     fn from(a: Aabb) -> Self {
-        Self { x_min: a.x_min, x_max: a.x_max, y_min: a.y_min, y_max: a.y_max }
+        Self {
+            x_min: a.x_min,
+            x_max: a.x_max,
+            y_min: a.y_min,
+            y_max: a.y_max,
+        }
     }
 }
 

@@ -14,17 +14,29 @@ pub struct Aabb {
 
 impl Aabb {
     pub fn new(x_min: f32, y_min: f32, x_max: f32, y_max: f32) -> Self {
-        Self { x_min, y_min, x_max, y_max }
+        Self {
+            x_min,
+            y_min,
+            x_max,
+            y_max,
+        }
     }
 
     /// Parse the `ZONE_BOUNDS` env format: `x_min,y_min,x_max,y_max`.
     pub fn parse(s: &str) -> Result<Self, String> {
         let parts: Vec<f32> = s
             .split(',')
-            .map(|p| p.trim().parse::<f32>().map_err(|e| format!("bad bound {p:?}: {e}")))
+            .map(|p| {
+                p.trim()
+                    .parse::<f32>()
+                    .map_err(|e| format!("bad bound {p:?}: {e}"))
+            })
             .collect::<Result<_, _>>()?;
         if parts.len() != 4 {
-            return Err(format!("expected 4 comma-separated floats, got {}", parts.len()));
+            return Err(format!(
+                "expected 4 comma-separated floats, got {}",
+                parts.len()
+            ));
         }
         let aabb = Self::new(parts[0], parts[1], parts[2], parts[3]);
         if aabb.x_min >= aabb.x_max || aabb.y_min >= aabb.y_max {
@@ -52,7 +64,10 @@ impl Aabb {
     }
 
     pub fn center(&self) -> (f32, f32) {
-        ((self.x_min + self.x_max) / 2.0, (self.y_min + self.y_max) / 2.0)
+        (
+            (self.x_min + self.x_max) / 2.0,
+            (self.y_min + self.y_max) / 2.0,
+        )
     }
 }
 

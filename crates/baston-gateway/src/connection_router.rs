@@ -19,7 +19,10 @@ pub struct ConnectionRouter {
 
 impl ConnectionRouter {
     pub fn new() -> Self {
-        Self { routing_table: Arc::new(DashMap::new()), handoff_lock: Mutex::new(()) }
+        Self {
+            routing_table: Arc::new(DashMap::new()),
+            handoff_lock: Mutex::new(()),
+        }
     }
 
     /// Assign a newly connected player to a zone.
@@ -61,11 +64,17 @@ impl ConnectionRouter {
 
     /// (source, zone) pairs for admin introspection.
     pub fn all(&self) -> Vec<(u32, String)> {
-        self.routing_table.iter().map(|e| (*e.key(), e.value().clone())).collect()
+        self.routing_table
+            .iter()
+            .map(|e| (*e.key(), e.value().clone()))
+            .collect()
     }
 
     pub fn count_in_zone(&self, zone_id: &str) -> usize {
-        self.routing_table.iter().filter(|e| e.value() == zone_id).count()
+        self.routing_table
+            .iter()
+            .filter(|e| e.value() == zone_id)
+            .count()
     }
 }
 

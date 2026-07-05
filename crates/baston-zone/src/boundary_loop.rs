@@ -92,7 +92,9 @@ impl BoundaryLoop {
                             c.target_direction, c.distance_to_edge,
                             c.estimated_crossing_ms as f64 / 1000.0);
                         let snapshot = self.build_snapshot(source, coords, velocity).await;
-                        self.manager.request_handoff(source, c.predicted_coords, snapshot).await;
+                        self.manager
+                            .request_handoff(source, c.predicted_coords, snapshot)
+                            .await;
                     }
                 }
                 Some(HandoffState::ReadyToTransfer { .. }) => {
@@ -117,8 +119,12 @@ impl BoundaryLoop {
     /// migrated over NATS: `baston.handoff.entity.{target_zone}`.
     async fn scan_entities(&self) {
         let Some(nats) = &self.nats else { return };
-        let local_players: std::collections::HashSet<u32> =
-            self.ingest.player_kinematics().iter().map(|(s, _, _)| *s).collect();
+        let local_players: std::collections::HashSet<u32> = self
+            .ingest
+            .player_kinematics()
+            .iter()
+            .map(|(s, _, _)| *s)
+            .collect();
         for entity in self.ingest.entity_manager().snapshot() {
             if entity.entity_type == EntityType::Player {
                 continue; // players ride the gRPC handoff path
@@ -129,7 +135,10 @@ impl BoundaryLoop {
             }
             // Entities owned by a connected local player travel inside that
             // player's snapshot instead.
-            if entity.network_owner.is_some_and(|o| local_players.contains(&o)) {
+            if entity
+                .network_owner
+                .is_some_and(|o| local_players.contains(&o))
+            {
                 continue;
             }
             // Ask the Gateway which zone covers the entity's position.
@@ -140,7 +149,7 @@ impl BoundaryLoop {
                 Ok(reply) if !reply.payload.is_empty() => {
                     String::from_utf8_lossy(&reply.payload).to_string()
                 }
-                Ok(_) => continue,  // no zone covers it — keep it here
+                Ok(_) => continue, // no zone covers it — keep it here
                 Err(e) => {
                     tracing::warn!(target: "zone", error = %e, "zone resolution failed");
                     continue;
@@ -157,8 +166,9 @@ impl BoundaryLoop {
             };
             match bincode::serde::encode_to_vec(&payload, bincode::config::standard()) {
                 Ok(bytes) => {
-                    if let Err(e) =
-                        nats.publish(entity_handoff_subject(&target), bytes.into()).await
+                    if let Err(e) = nats
+                        .publish(entity_handoff_subject(&target), bytes.into())
+                        .await
                     {
                         tracing::error!(target: "zone", error = %e,
                             "entity handoff publish failed — entity kept locally");
@@ -220,8 +230,7 @@ impl BoundaryLoop {
         let started = std::time::Instant::now();
         tracing::info!(target: "zone", zone = %self.mesh.zone_id,
             "player={source} crossing boundary");
-        let Some((target_zone, target_grpc)) = self.manager.confirm_crossing(source).await
-        else {
+        let Some((target_zone, target_grpc)) = self.manager.confirm_crossing(source).await else {
             return; // confirm failed — player stays here, cooldown applies
         };
 

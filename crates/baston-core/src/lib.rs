@@ -7,5 +7,11 @@
 //! no-op ([`script_decryptor::PlainDecryptor`]); the optional
 //! `baston-escrow-plugin` supplies a decrypting one for CFX Asset Escrow
 //! resources. The core never depends on the plugin.
+//!
+//! The [`license`] boundary is the same shape: the core models the CFX
+//! server-licence verdict ([`license::LicenseStatus`]) and the pure, restrictive
+//! enforcement logic; the optional plugin obtains the verdict from the genuine
+//! CFX component via the sidecar. The core never talks to CFX.
 
+pub mod license;
 pub mod script_decryptor;

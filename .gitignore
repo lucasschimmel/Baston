@@ -2,3 +2,10 @@
 **/*.rs.bk
 # Local dev TLS certs (mkcert) — never commit private keys.
 *.pem
+# Machine-local cargo config (e.g. a per-machine target-dir). Committing an
+# absolute path breaks other checkouts and the CI build cache. See
+# .cargo/config.toml.example.
+/.cargo/config.toml
+# Local tooling / REPL state.
+/.claude/
+/.replxx_history

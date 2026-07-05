@@ -8,73 +8,133 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use baston_config::BastonConfig;
+use baston_config::{BastonConfig, LicenseMode};
 use baston_protocol::Aabb;
 use baston_scripting::{DeferralRegistry, ScriptHost};
 use baston_zone::mesh::{ZoneMesh, ZoneMeshHooks};
 use baston_zone::resource_loader::{spawn_hot_reload, ResourceManager};
 
-/// Wire the optional CFX Asset Escrow plugin into the resource manager.
+/// Log the outcome of the cross-platform licence modes (`off`/`gate`). The
+/// `verified` mode is handled by the sidecar in [`wire_cfx_sidecar`]; unknown
+/// modes are already rejected by `LicenseConfig::validate`.
+fn apply_simple_license_modes(config: &BastonConfig) {
+    match config.license.mode {
+        LicenseMode::Off => tracing::warn!(target: "zone",
+            "[license] mode = \"off\" — CFX server-licence verification disabled \
+             (dev/LAN only; not for production)"),
+        LicenseMode::Gate => tracing::info!(target: "zone",
+            "[license] gate: sv_license_key present and well-formed \
+             (shape only — not validated; use mode = \"verified\" for real validation)"),
+        LicenseMode::Verified => {}
+    }
+}
+
+/// Wire the optional CFX component (genuine, unmodified FXServer sidecar) for
+/// **licence verification** and/or **escrow decryption** — sharing ONE process.
 ///
-/// Validates `[escrow]` (fatal on misconfiguration), then installs the plugin
-/// only when enabled, built with the `escrow` feature, and running on Windows.
-/// Every other combination logs a clear warning and continues with plain
-/// resources — escrow never activates implicitly.
-fn install_escrow_plugin(
+/// - `[license] mode = "verified"`: query the sidecar for the CFX verdict and
+///   **fail closed** — refuse to start on an invalid/banned licence; cap
+///   `max_players` to the entitlement (restrictive, never raises it).
+/// - `[escrow] enabled`: install the decryptor backed by the same sidecar.
+///
+/// Returns the sidecar handle so `main` keeps the process alive. On a non-Windows
+/// build, or one without the `escrow` feature, `verified`/escrow degrade to a
+/// clear warning and never silently claim to be verified.
+#[cfg(all(feature = "escrow", windows))]
+fn wire_cfx_sidecar(
     manager: &Arc<ResourceManager>,
-    config: &BastonConfig,
-) -> anyhow::Result<()> {
-    // Fatal, actionable error on misconfiguration; no-op when disabled.
-    config.escrow.validate()?;
-
-    if !config.escrow.enabled {
-        tracing::info!(target: "zone", "escrow disabled (not configured)");
-        return Ok(());
+    config: &mut BastonConfig,
+) -> anyhow::Result<Option<baston_escrow_plugin::SidecarHandle>> {
+    let need_license = config.license.mode == LicenseMode::Verified;
+    let need_escrow = config.escrow.enabled;
+    if !need_license && !need_escrow {
+        tracing::info!(target: "zone",
+            "no CFX sidecar needed (licence mode = {:?}, escrow off)", config.license.mode);
+        return Ok(None);
+    }
+    if need_escrow && config.escrow.backend == baston_config::EscrowBackend::Direct {
+        anyhow::bail!(
+            "[escrow] backend = \"direct\" is unsupported (svadhesive exposes no FFI \
+             decrypt symbol); use backend = \"sidecar\""
+        );
     }
 
-    #[cfg(all(feature = "escrow", windows))]
-    {
-        let e = &config.escrow;
-        let backend = match e.backend.as_str() {
-            "sidecar" => baston_escrow_plugin::EscrowBackend::Sidecar {
-                fxserver_path: e
-                    .fxserver_path
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("[escrow] fxserver_path required"))?,
-                resources_dir: config.resources.path.clone(),
-            },
-            "direct" => baston_escrow_plugin::EscrowBackend::Direct {
-                dll_path: e
-                    .dll_path
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("[escrow] dll_path required"))?,
-            },
-            other => anyhow::bail!("[escrow] unknown backend {other:?}"),
-        };
-        let plugin_cfg = baston_escrow_plugin::EscrowConfig {
-            backend,
-            server_license: e.server_license.clone(),
-        };
-        let decryptor = baston_escrow_plugin::build_decryptor(&plugin_cfg)
-            .map_err(|err| anyhow::anyhow!("escrow plugin initialization failed: {err}"))?;
-        manager.set_script_decryptor(decryptor);
-        tracing::info!(target: "zone", "escrow plugin active");
+    // One genuine FXServer for both capabilities. Prefer the licence path, then
+    // the escrow path (validate() already ensured the relevant one exists).
+    let fxserver_path = config
+        .license
+        .fxserver_path
+        .clone()
+        .or_else(|| config.escrow.fxserver_path.clone())
+        .ok_or_else(|| anyhow::anyhow!("verified licence / escrow needs an fxserver_path"))?;
+    let handle = baston_escrow_plugin::SidecarHandle::start(&fxserver_path, &config.resources.path)
+        .map_err(|e| anyhow::anyhow!("failed to start the FXServer sidecar: {e}"))?;
+
+    if need_license {
+        // Bounded retry to absorb the boot-time validation race; fail closed.
+        let status = handle
+            .oracle()
+            .query(
+                std::time::Duration::from_secs(20),
+                std::time::Duration::from_secs(1),
+            )
+            .map_err(|e| anyhow::anyhow!("licence verification failed: {e}"))?;
+        match baston_core::license::boot_decision(&status) {
+            baston_core::license::BootDecision::Deny(reason) => {
+                anyhow::bail!(
+                    "CFX licence check failed — refusing to start: {reason}\n  \
+                     → create or verify your key at https://portal.cfx.re"
+                );
+            }
+            baston_core::license::BootDecision::Allow => {
+                let (effective, capped) = baston_core::license::effective_max_players(
+                    config.server.max_players,
+                    &status.entitlements,
+                );
+                if capped {
+                    tracing::warn!(target: "zone",
+                        "max_players capped {} -> {} (CFX licence entitlement)",
+                        config.server.max_players, effective);
+                    config.server.max_players = effective;
+                }
+                tracing::info!(target: "zone",
+                    "CFX licence verified by the official component — startup authorised \
+                     (max_players = {})", config.server.max_players);
+            }
+        }
     }
-    #[cfg(all(feature = "escrow", not(windows)))]
-    {
-        let _ = manager;
+
+    if need_escrow {
+        manager.set_script_decryptor(handle.decryptor());
+        tracing::info!(target: "zone", "escrow plugin active (shared CFX sidecar)");
+    }
+
+    Ok(Some(handle))
+}
+
+#[cfg(not(all(feature = "escrow", windows)))]
+fn wire_cfx_sidecar(
+    manager: &Arc<ResourceManager>,
+    config: &mut BastonConfig,
+) -> anyhow::Result<Option<()>> {
+    let _ = manager;
+    if config.license.mode == LicenseMode::Verified {
+        tracing::warn!(target: "zone",
+            "[license] mode = \"verified\" needs a Windows build with --features escrow. \
+             The key is well-formed (gate-level) but was NOT validated by the CFX component \
+             on this build — do not treat this as verified");
+    }
+    if config.escrow.enabled {
+        #[cfg(not(feature = "escrow"))]
+        tracing::warn!(target: "zone",
+            "escrow.enabled = true but this binary was built without the `escrow` feature \
+             — rebuild with `--features escrow`; continuing with plain resources");
+        #[cfg(all(feature = "escrow", not(windows)))]
         tracing::warn!(target: "zone",
             "escrow.enabled = true but this is not a Windows build — svadhesive.dll is \
              Windows-only; continuing with plain resources");
     }
-    #[cfg(not(feature = "escrow"))]
-    {
-        let _ = manager;
-        tracing::warn!(target: "zone",
-            "escrow.enabled = true but this binary was built without the `escrow` feature \
-             — rebuild with `--features escrow`; continuing with plain resources");
-    }
-    Ok(())
+    Ok(None)
 }
 
 #[cfg(windows)]
@@ -93,8 +153,7 @@ fn raise_timer_resolution() {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -102,8 +161,12 @@ async fn main() -> anyhow::Result<()> {
     raise_timer_resolution();
 
     let config_path = std::env::var("BASTON_CONFIG").unwrap_or_else(|_| "baston.toml".into());
-    let config = BastonConfig::load(Path::new(&config_path))?;
+    let mut config = BastonConfig::load(Path::new(&config_path))?;
     let zone_id = config.nats.zone_id.clone();
+
+    // Licence/escrow shape is validated inside `BastonConfig::load`. `verified`
+    // licence is enforced later, once the sidecar runs.
+    apply_simple_license_modes(&config);
 
     let bounds_str = config
         .meshing
@@ -134,7 +197,10 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     let nats = async_nats::connect(&config.nats.url).await.map_err(|e| {
-        anyhow::anyhow!("NATS unreachable at {} — a zone cannot run without it: {e}", config.nats.url)
+        anyhow::anyhow!(
+            "NATS unreachable at {} — a zone cannot run without it: {e}",
+            config.nats.url
+        )
     })?;
     baston_zone::state_sync::setup_nats_stream(&nats).await?;
     let emitter = baston_zone::StateSyncEmitter::new(
@@ -152,7 +218,9 @@ async fn main() -> anyhow::Result<()> {
     let script_host =
         ScriptHost::spawn_with_net(Arc::clone(&deferrals), Arc::clone(&players), net_bridge)?;
     let resource_manager = ResourceManager::new(script_host.clone(), config.resources.path.clone());
-    install_escrow_plugin(&resource_manager, &config)?;
+    // Shared genuine-FXServer sidecar for licence verification and/or escrow.
+    // Kept alive for the whole process; a denied licence bails here (fail-closed).
+    let _cfx_sidecar = wire_cfx_sidecar(&resource_manager, &mut config)?;
     resource_manager.discover().await?;
     resource_manager.start_all().await?;
     let _watcher = if config.dev.hot_reload {
@@ -169,11 +237,18 @@ async fn main() -> anyhow::Result<()> {
         let subject = format!("baston.zone.{zone_id}.outbound");
         tokio::spawn(async move {
             while let Some(msg) = net_rx.recv().await {
-                let baston_scripting::NetOutbound::ClientEvent { source, event, args_json } = msg;
+                let baston_scripting::NetOutbound::ClientEvent {
+                    source,
+                    event,
+                    args_json,
+                } = msg;
                 let payload = serde_json::json!({
                     "source": source, "event": event, "args": args_json,
                 });
-                if let Err(e) = nats.publish(subject.clone(), payload.to_string().into()).await {
+                if let Err(e) = nats
+                    .publish(subject.clone(), payload.to_string().into())
+                    .await
+                {
                     tracing::error!(target: "zone", error = %e,
                         "failed to relay client event to gateway");
                 }
@@ -298,8 +373,7 @@ async fn main() -> anyhow::Result<()> {
                 else {
                     continue;
                 };
-                let fresh: std::collections::HashSet<u32> =
-                    list.iter().map(|p| p.source).collect();
+                let fresh: std::collections::HashSet<u32> = list.iter().map(|p| p.source).collect();
                 for p in list {
                     players.insert(p);
                 }
@@ -328,8 +402,10 @@ async fn main() -> anyhow::Result<()> {
         Some(Arc::new(move |entity_id, new_owner| {
             let host = owner_event_host.clone();
             tokio::spawn(async move {
-                let args =
-                    [serde_json::json!(entity_id.to_string()), serde_json::json!(new_owner)];
+                let args = [
+                    serde_json::json!(entity_id.to_string()),
+                    serde_json::json!(new_owner),
+                ];
                 if let Err(e) = host.trigger_event("onEntityOwnerChanged", &args).await {
                     tracing::warn!(target: "zone", error = %e, "onEntityOwnerChanged dispatch failed");
                 }
@@ -438,8 +514,10 @@ async fn main() -> anyhow::Result<()> {
             // nothing is fired to the network (the client never disconnected).
             let host = cleanup_host.clone();
             tokio::spawn(async move {
-                let args =
-                    [serde_json::json!(source), serde_json::json!("zone handoff (internal)")];
+                let args = [
+                    serde_json::json!(source),
+                    serde_json::json!("zone handoff (internal)"),
+                ];
                 if let Err(e) = host.trigger_event("playerDropped", &args).await {
                     tracing::warn!(target: "zone", error = %e, "internal playerDropped failed");
                 }

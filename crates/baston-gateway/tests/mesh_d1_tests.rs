@@ -11,7 +11,11 @@ use baston_protocol::{Aabb, PlayerStateSnapshot};
 use baston_zone::mesh::{ZoneMesh, ZoneMeshHooks};
 
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn test_hooks() -> ZoneMeshHooks {
@@ -52,7 +56,10 @@ async fn start_gateway() -> TestCluster {
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     mesh.spawn_grpc_server(addr);
     tokio::time::sleep(Duration::from_millis(150)).await;
-    TestCluster { mesh, gateway_addr: format!("127.0.0.1:{port}") }
+    TestCluster {
+        mesh,
+        gateway_addr: format!("127.0.0.1:{port}"),
+    }
 }
 
 async fn start_zone(cluster: &TestCluster, zone_id: &str, bounds: Aabb) -> Arc<ZoneMesh> {
@@ -76,18 +83,27 @@ async fn start_zone(cluster: &TestCluster, zone_id: &str, bounds: Aabb) -> Arc<Z
 #[tokio::test]
 async fn zone_registers_and_players_route_by_coords() {
     let cluster = start_gateway().await;
-    let _zone_a =
-        start_zone(&cluster, "zone-a", Aabb::new(-4000.0, -4000.0, 0.0, 4000.0)).await;
+    let _zone_a = start_zone(&cluster, "zone-a", Aabb::new(-4000.0, -4000.0, 0.0, 4000.0)).await;
     let _zone_b = start_zone(&cluster, "zone-b", Aabb::new(0.0, -4000.0, 4000.0, 4000.0)).await;
 
     assert!(cluster.mesh.registry.contains("zone-a").await);
     assert!(cluster.mesh.registry.contains("zone-b").await);
     assert_eq!(
-        cluster.mesh.registry.find_zone_for_coords(-500.0, 200.0).await.as_deref(),
+        cluster
+            .mesh
+            .registry
+            .find_zone_for_coords(-500.0, 200.0)
+            .await
+            .as_deref(),
         Some("zone-a")
     );
     assert_eq!(
-        cluster.mesh.registry.find_zone_for_coords(1500.0, -300.0).await.as_deref(),
+        cluster
+            .mesh
+            .registry
+            .find_zone_for_coords(1500.0, -300.0)
+            .await
+            .as_deref(),
         Some("zone-b")
     );
 }
@@ -125,8 +141,7 @@ async fn heartbeat_updates_load_and_evicted_zone_is_refused() {
 #[tokio::test]
 async fn new_player_routed_least_loaded_without_coords() {
     let cluster = start_gateway().await;
-    let _zone_a =
-        start_zone(&cluster, "zone-a", Aabb::new(-4000.0, -4000.0, 0.0, 4000.0)).await;
+    let _zone_a = start_zone(&cluster, "zone-a", Aabb::new(-4000.0, -4000.0, 0.0, 4000.0)).await;
     cluster.mesh.registry.heartbeat("zone-a", 10, 0).await;
 
     let assigned = cluster.mesh.route_new_player(1, None).await;
@@ -134,15 +149,17 @@ async fn new_player_routed_least_loaded_without_coords() {
     assert_eq!(cluster.mesh.router.zone_of(1).as_deref(), Some("zone-a"));
 
     // With coords covered by zone-a.
-    let assigned = cluster.mesh.route_new_player(2, Some((-1200.0, 50.0))).await;
+    let assigned = cluster
+        .mesh
+        .route_new_player(2, Some((-1200.0, 50.0)))
+        .await;
     assert_eq!(assigned.as_deref(), Some("zone-a"));
 }
 
 #[tokio::test]
 async fn prepare_handoff_creates_ghost_in_target_zone() {
     let cluster = start_gateway().await;
-    let _zone_a =
-        start_zone(&cluster, "zone-a", Aabb::new(-4000.0, -4000.0, 0.0, 4000.0)).await;
+    let _zone_a = start_zone(&cluster, "zone-a", Aabb::new(-4000.0, -4000.0, 0.0, 4000.0)).await;
     let zone_b = start_zone(&cluster, "zone-b", Aabb::new(0.0, -4000.0, 4000.0, 4000.0)).await;
 
     let mut gw = GatewayServiceClient::connect(format!("http://{}", cluster.gateway_addr))
@@ -168,8 +185,7 @@ async fn prepare_handoff_creates_ghost_in_target_zone() {
 #[tokio::test]
 async fn confirm_handoff_atomically_updates_routing() {
     let cluster = start_gateway().await;
-    let _zone_a =
-        start_zone(&cluster, "zone-a", Aabb::new(-4000.0, -4000.0, 0.0, 4000.0)).await;
+    let _zone_a = start_zone(&cluster, "zone-a", Aabb::new(-4000.0, -4000.0, 0.0, 4000.0)).await;
     let _zone_b = start_zone(&cluster, "zone-b", Aabb::new(0.0, -4000.0, 4000.0, 4000.0)).await;
     cluster.mesh.router.assign(1, "zone-a");
 

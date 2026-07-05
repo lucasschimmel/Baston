@@ -14,11 +14,21 @@ use tower::util::ServiceExt;
 async fn state_with_two_zones() -> AdminState {
     let registry = Arc::new(ZoneRegistry::new(Duration::from_secs(15)));
     registry
-        .register_zone("zone-a", Aabb::new(-4000.0, -4000.0, 0.0, 4000.0), "127.0.0.1:50051", 1500)
+        .register_zone(
+            "zone-a",
+            Aabb::new(-4000.0, -4000.0, 0.0, 4000.0),
+            "127.0.0.1:50051",
+            1500,
+        )
         .await
         .unwrap();
     registry
-        .register_zone("zone-b", Aabb::new(0.0, -4000.0, 4000.0, 4000.0), "127.0.0.1:50052", 1500)
+        .register_zone(
+            "zone-b",
+            Aabb::new(0.0, -4000.0, 4000.0, 4000.0),
+            "127.0.0.1:50052",
+            1500,
+        )
         .await
         .unwrap();
     let router = Arc::new(ConnectionRouter::new());
@@ -44,16 +54,26 @@ fn req(path: &str, method: &str, token: Option<&str>) -> Request<Body> {
 #[tokio::test]
 async fn rejects_missing_or_bad_token() {
     let app = admin_router(state_with_two_zones().await);
-    let resp = app.clone().oneshot(req("/admin/zones", "GET", None)).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(req("/admin/zones", "GET", None))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    let resp = app.oneshot(req("/admin/zones", "GET", Some("wrong"))).await.unwrap();
+    let resp = app
+        .oneshot(req("/admin/zones", "GET", Some("wrong")))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
 async fn lists_zones_with_player_counts() {
     let app = admin_router(state_with_two_zones().await);
-    let resp = app.oneshot(req("/admin/zones", "GET", Some("secret"))).await.unwrap();
+    let resp = app
+        .oneshot(req("/admin/zones", "GET", Some("secret")))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let zones: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -68,17 +88,27 @@ async fn lists_zones_with_player_counts() {
 #[tokio::test]
 async fn zone_detail_and_players() {
     let app = admin_router(state_with_two_zones().await);
-    let resp =
-        app.clone().oneshot(req("/admin/zones/zone-a", "GET", Some("secret"))).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(req("/admin/zones/zone-a", "GET", Some("secret")))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let detail: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let mut players: Vec<u64> =
-        detail["players"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect();
+    let mut players: Vec<u64> = detail["players"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap())
+        .collect();
     players.sort();
     assert_eq!(players, vec![1, 2]);
 
-    let resp = app.oneshot(req("/admin/zones/zone-x", "GET", Some("secret"))).await.unwrap();
+    let resp = app
+        .oneshot(req("/admin/zones/zone-x", "GET", Some("secret")))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -86,8 +116,10 @@ async fn zone_detail_and_players() {
 async fn drain_reroutes_players() {
     let state = state_with_two_zones().await;
     let app = admin_router(state.clone());
-    let resp =
-        app.oneshot(req("/admin/zones/zone-a/drain", "POST", Some("secret"))).await.unwrap();
+    let resp = app
+        .oneshot(req("/admin/zones/zone-a/drain", "POST", Some("secret")))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let result: serde_json::Value = serde_json::from_slice(&body).unwrap();

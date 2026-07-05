@@ -10,13 +10,81 @@
 //! [`OobSocket`] wraps the UDP socket given to `rusty_enet`, answering OOB
 //! datagrams inline and hiding them from the ENet protocol state machine.
 
-use std::net::{SocketAddr, UdpSocket};
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use baston_protocol::PlayerDirectory;
 use rusty_enet as enet;
 
 const OOB_MARKER: [u8; 4] = [0xFF, 0xFF, 0xFF, 0xFF];
+
+// `getinfo` is answerable by any unauthenticated source and the reply is
+// larger than the request, so it's a textbook UDP reflection/amplification
+// vector. A per-source-IP token bucket caps how often we amplify, and the
+// echoed challenge is truncated so an attacker can't inflate the reply size.
+const OOB_RATE_PER_SEC: f32 = 5.0;
+const OOB_BURST: f32 = 5.0;
+const OOB_MAX_TRACKED_IPS: usize = 8192;
+const OOB_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+const OOB_MAX_CHALLENGE_LEN: usize = 64;
+
+struct Bucket {
+    tokens: f32,
+    last: Instant,
+}
+
+/// Per-IP token bucket with a bounded table so spoofed source IPs can't grow
+/// memory without limit.
+struct OobRateLimiter {
+    buckets: HashMap<IpAddr, Bucket>,
+    last_sweep: Instant,
+}
+
+impl OobRateLimiter {
+    fn new() -> Self {
+        Self {
+            buckets: HashMap::new(),
+            last_sweep: Instant::now(),
+        }
+    }
+
+    /// Consume one token for `ip`; returns `true` if a reply is allowed.
+    fn allow(&mut self, ip: IpAddr) -> bool {
+        let now = Instant::now();
+        self.maybe_sweep(now);
+        // Table full and this is a new IP: refuse rather than grow unbounded.
+        if self.buckets.len() >= OOB_MAX_TRACKED_IPS && !self.buckets.contains_key(&ip) {
+            return false;
+        }
+        let bucket = self.buckets.entry(ip).or_insert(Bucket {
+            tokens: OOB_BURST,
+            last: now,
+        });
+        let elapsed = now.saturating_duration_since(bucket.last).as_secs_f32();
+        bucket.tokens = (bucket.tokens + elapsed * OOB_RATE_PER_SEC).min(OOB_BURST);
+        bucket.last = now;
+        if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Periodically drop fully-refilled (idle) buckets to reclaim memory.
+    fn maybe_sweep(&mut self, now: Instant) {
+        if now.saturating_duration_since(self.last_sweep) < OOB_SWEEP_INTERVAL {
+            return;
+        }
+        self.last_sweep = now;
+        self.buckets.retain(|_, b| {
+            let elapsed = now.saturating_duration_since(b.last).as_secs_f32();
+            (b.tokens + elapsed * OOB_RATE_PER_SEC) < OOB_BURST
+        });
+    }
+}
 
 /// Static server descriptors used in the `infoResponse`.
 pub struct OobInfo {
@@ -28,11 +96,16 @@ pub struct OobInfo {
 pub struct OobSocket {
     inner: UdpSocket,
     info: OobInfo,
+    rate: OobRateLimiter,
 }
 
 impl OobSocket {
     pub fn new(inner: UdpSocket, info: OobInfo) -> Self {
-        Self { inner, info }
+        Self {
+            inner,
+            info,
+            rate: OobRateLimiter::new(),
+        }
     }
 
     fn handle_oob(&mut self, from: SocketAddr, data: &[u8]) {
@@ -40,8 +113,20 @@ impl OobSocket {
             return;
         };
         if let Some(rest) = text.strip_prefix("getinfo") {
-            // GetInfoOutOfBand.h: challenge = data up to first space/newline.
-            let challenge = rest.trim_start().split([' ', '\n']).next().unwrap_or("");
+            if !self.rate.allow(from.ip()) {
+                tracing::debug!(target: "udp", %from, "OOB getinfo rate-limited");
+                return;
+            }
+            // GetInfoOutOfBand.h: challenge = data up to first space/newline,
+            // capped so the echo can't be used to inflate the reply size.
+            let challenge: String = rest
+                .trim_start()
+                .split([' ', '\n'])
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(OOB_MAX_CHALLENGE_LEN)
+                .collect();
             let response = format!(
                 "infoResponse\n\\sv_maxclients\\{}\\clients\\{}\\challenge\\{}\\gamename\\CitizenFX\\protocol\\4\\hostname\\{}\\gametype\\Roleplay\\mapname\\Los Santos\\iv\\0",
                 self.info.max_clients,

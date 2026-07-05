@@ -71,8 +71,10 @@ async fn scrape_jitter(metrics_url: &str, http: &reqwest::Client) -> Option<f64>
 /// Fetch a single Prometheus sample by exact line prefix.
 async fn scrape_value(url: &str, http: &reqwest::Client, prefix: &str) -> Option<f64> {
     let body = http.get(url).send().await.ok()?.text().await.ok()?;
-    body.lines()
-        .find_map(|l| l.strip_prefix(prefix).and_then(|v| v.trim().parse::<f64>().ok()))
+    body.lines().find_map(|l| {
+        l.strip_prefix(prefix)
+            .and_then(|v| v.trim().parse::<f64>().ok())
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -86,7 +88,7 @@ pub async fn print_report(
     http: &reqwest::Client,
 ) {
     let mut latencies = stats.latencies_ms.lock().unwrap().clone();
-    latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    latencies.sort_by(|a, b| a.total_cmp(b));
     let p50 = percentile(&latencies, 50.0);
     let p99 = percentile(&latencies, 99.0);
     let bytes = stats.bytes_received.load(Ordering::Relaxed);
@@ -108,7 +110,9 @@ pub async fn print_report(
     println!("latency p50       : {p50:.0}ms (target < 50ms)");
     println!("latency p99       : {p99:.0}ms (target < 100ms)");
     match cpu_pct {
-        Some(cpu) => println!("CPU gateway+zone  : {cpu:.1}% of one core (targets: zone < 40%, gateway < 30%)"),
+        Some(cpu) => println!(
+            "CPU gateway+zone  : {cpu:.1}% of one core (targets: zone < 40%, gateway < 30%)"
+        ),
         None => println!("CPU gateway+zone  : n/a (baston-gateway process not found)"),
     }
     println!("bandwidth (client-observed) : {mbps:.2} Mbps (target < 10 Mbps)");
@@ -129,7 +133,9 @@ pub async fn print_report(
         // NATS throughput: cumulative published bytes across zone processes.
         let mut nats_bytes = 0.0;
         for url in zone_metrics {
-            nats_bytes += scrape_value(url, http, "nats_bytes_published ").await.unwrap_or(0.0);
+            nats_bytes += scrape_value(url, http, "nats_bytes_published ")
+                .await
+                .unwrap_or(0.0);
         }
         if nats_bytes > 0.0 {
             nats_mbps = Some(nats_bytes / duration.as_secs_f64() / 1_000_000.0);
@@ -149,12 +155,8 @@ pub async fn print_report(
         // Handoff latency p99: max across the zone processes' summaries.
         let mut latency_p99: Option<f64> = None;
         for url in zone_metrics {
-            if let Some(v) = scrape_value(
-                url,
-                http,
-                "handoff_total_duration_ms{quantile=\"0.99\"} ",
-            )
-            .await
+            if let Some(v) =
+                scrape_value(url, http, "handoff_total_duration_ms{quantile=\"0.99\"} ").await
             {
                 latency_p99 = Some(latency_p99.map_or(v, |cur: f64| cur.max(v)));
             }
@@ -165,7 +167,7 @@ pub async fn print_report(
         // visible when extrapolation runs long — 500ms (5 missed pushes at
         // the 10fps benchmark cadence) is the threshold.
         let mut gaps = stats.crosser_gaps_ms.lock().unwrap().clone();
-        gaps.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        gaps.sort_by(|a, b| a.total_cmp(b));
         let max_gap = gaps.last().copied().unwrap_or(0.0);
         let gap_p999 = percentile(&gaps, 99.9);
         let freeze_ms = if max_gap > 500.0 { max_gap } else { 0.0 };
@@ -215,10 +217,7 @@ pub async fn print_report(
             && cpu_pct.is_none_or(|c| c < 70.0)
             && jitter.is_none_or(|j| j < 2.0)
     };
-    println!(
-        "exit criterion    : {}",
-        if ok { "PASS" } else { "FAIL" }
-    );
+    println!("exit criterion    : {}", if ok { "PASS" } else { "FAIL" });
     if !ok {
         std::process::exit(1);
     }

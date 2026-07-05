@@ -20,17 +20,22 @@ pub enum NetOutbound {
     },
 }
 
+/// Bounded so a script emitting client events / native calls in a tight loop
+/// applies backpressure (drop + log on overflow) instead of growing the queue
+/// without limit and pushing the process toward OOM.
+const NET_BRIDGE_CAPACITY: usize = 2048;
+
 /// Cloneable bridge handed to every runtime and to the gateway.
 #[derive(Clone)]
 pub struct NetBridge {
-    pub tx: mpsc::UnboundedSender<NetOutbound>,
+    pub tx: mpsc::Sender<NetOutbound>,
     pub pending_natives: Arc<PendingNatives>,
 }
 
 impl NetBridge {
     /// Create a bridge plus the receiving end the gateway drains.
-    pub fn new() -> (Self, mpsc::UnboundedReceiver<NetOutbound>) {
-        let (tx, rx) = mpsc::unbounded_channel();
+    pub fn new() -> (Self, mpsc::Receiver<NetOutbound>) {
+        let (tx, rx) = mpsc::channel(NET_BRIDGE_CAPACITY);
         (
             Self {
                 tx,

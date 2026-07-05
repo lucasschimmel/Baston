@@ -52,8 +52,31 @@ pub enum ConfigError {
          → to disable escrow support: set [escrow] enabled = false"
     )]
     EscrowFxserverNotFound(String),
-    #[error("[escrow] unknown backend \"{0}\" (expected \"sidecar\" or \"direct\")")]
-    EscrowUnknownBackend(String),
+    #[error(
+        "[license] mode = \"{0}\" requires a licence key\n  \
+         → set [license] sv_license_key = \"cfxk_...\" (create one at https://portal.cfx.re)\n  \
+         → for local dev/LAN only: set [license] mode = \"off\""
+    )]
+    LicenseMissingKey(String),
+    #[error(
+        "[license] sv_license_key does not look like a real CFX key (it is empty, a \
+         placeholder, or malformed)\n  \
+         → paste your real key from https://portal.cfx.re\n  \
+         → note: \"gate\" only checks the key's shape, not its validity — use \"verified\" \
+         to have the official CFX component validate it"
+    )]
+    LicenseMalformedKey,
+    #[error(
+        "[license] mode = \"verified\" but fxserver_path is not set\n  \
+         → set [license] fxserver_path = \"C:/FXServer/FXServer.exe\" (an official FXServer \
+         you downloaded from CFX; BASTON never ships it)"
+    )]
+    LicenseMissingFxserverPath,
+    #[error(
+        "[license] fxserver_path \"{0}\" not found\n  \
+         → point it at a real FXServer.exe, or use mode = \"gate\" (no sidecar)"
+    )]
+    LicenseFxserverNotFound(String),
 }
 
 /// `[tls]` section — HTTPS for packfile downloads (required by FiveM canary 31725+).
@@ -87,7 +110,106 @@ pub struct BastonConfig {
     pub meshing: MeshingConfig,
     #[serde(default)]
     pub escrow: EscrowConfig,
+    #[serde(default)]
+    pub license: LicenseConfig,
     pub tls: Option<TlsConfig>,
+}
+
+/// `[license]` section — CFX server-licence integration.
+///
+/// BASTON never validates a licence itself and never talks to CFX. Modes:
+/// - `"off"`: no check (dev/LAN only). Emits a visible warning each boot.
+/// - `"gate"`: require a well-formed `sv_license_key` in config (shape only, no
+///   validation, no sidecar). Cross-platform.
+/// - `"verified"`: run the genuine, unmodified FXServer sidecar which validates
+///   the key against CFX and lets BASTON enforce the verdict + entitlements
+///   locally. Windows + `escrow` feature only.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LicenseConfig {
+    /// `off` | `gate` | `verified`.
+    #[serde(default)]
+    pub mode: LicenseMode,
+    /// CFX server licence key, created at <https://portal.cfx.re>.
+    #[serde(default)]
+    pub sv_license_key: String,
+    /// Path to an official `FXServer.exe` provided by the operator
+    /// (mode = `"verified"`). BASTON never ships this binary.
+    #[serde(default)]
+    pub fxserver_path: Option<PathBuf>,
+}
+
+impl Default for LicenseConfig {
+    fn default() -> Self {
+        Self {
+            mode: LicenseMode::Off,
+            sv_license_key: String::new(),
+            fxserver_path: None,
+        }
+    }
+}
+
+/// Licence enforcement mode (`[license] mode`). Missing → `Off` so existing
+/// dev/LAN configs keep booting; operators opt into `gate`/`verified` (see
+/// `docs/licensing.md`). Unknown values are rejected by serde at parse time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LicenseMode {
+    /// No check (dev/LAN only). Emits a visible warning each boot.
+    #[default]
+    Off,
+    /// Require a well-formed `sv_license_key` (shape only, no sidecar).
+    Gate,
+    /// Run the genuine FXServer sidecar to validate the key against CFX.
+    Verified,
+}
+
+impl LicenseConfig {
+    /// A key is well-formed when it is non-empty, whitespace-free, long enough,
+    /// and not a placeholder. This is a *shape* check only — it never proves the
+    /// key is valid (only the CFX component can, in `"verified"` mode).
+    pub fn is_well_formed_key(&self) -> bool {
+        let key = self.sv_license_key.trim();
+        !key.is_empty()
+            && key.len() >= 20
+            && !key.chars().any(char::is_whitespace)
+            && !key.to_ascii_uppercase().contains("REPLACE_ME")
+    }
+
+    /// Validate the licence section. Fatal, actionable errors on misconfiguration;
+    /// no-op for `"off"`. Platform/feature availability for `"verified"` is
+    /// handled at the composition root, not here.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        match self.mode {
+            LicenseMode::Off => Ok(()),
+            LicenseMode::Gate => {
+                if self.sv_license_key.trim().is_empty() {
+                    return Err(ConfigError::LicenseMissingKey("gate".into()));
+                }
+                if !self.is_well_formed_key() {
+                    return Err(ConfigError::LicenseMalformedKey);
+                }
+                Ok(())
+            }
+            LicenseMode::Verified => {
+                if self.sv_license_key.trim().is_empty() {
+                    return Err(ConfigError::LicenseMissingKey("verified".into()));
+                }
+                if !self.is_well_formed_key() {
+                    return Err(ConfigError::LicenseMalformedKey);
+                }
+                let path = self
+                    .fxserver_path
+                    .as_ref()
+                    .ok_or(ConfigError::LicenseMissingFxserverPath)?;
+                if !path.exists() {
+                    return Err(ConfigError::LicenseFxserverNotFound(
+                        path.display().to_string(),
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 /// `[escrow]` section — CFX Asset Escrow support (Phase D-bis).
@@ -101,9 +223,9 @@ pub struct EscrowConfig {
     /// Enable escrow support. Never activates without this being explicitly true.
     #[serde(default)]
     pub enabled: bool,
-    /// `"sidecar"` (supported) or `"direct"` (unsupported — see crate docs).
-    #[serde(default = "default_escrow_backend")]
-    pub backend: String,
+    /// `sidecar` (supported) or `direct` (unsupported — see crate docs).
+    #[serde(default)]
+    pub backend: EscrowBackend,
     /// CFX server licence (`"license:..."`). Required when `enabled`.
     #[serde(default)]
     pub server_license: String,
@@ -119,7 +241,7 @@ impl Default for EscrowConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            backend: default_escrow_backend(),
+            backend: EscrowBackend::Sidecar,
             server_license: String::new(),
             dll_path: None,
             fxserver_path: None,
@@ -127,8 +249,16 @@ impl Default for EscrowConfig {
     }
 }
 
-fn default_escrow_backend() -> String {
-    "sidecar".to_owned()
+/// Escrow decryption backend (`[escrow] backend`). Unknown values are rejected
+/// by serde at parse time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EscrowBackend {
+    /// Supported: a minimal FXServer subprocess decrypts via svadhesive.
+    #[default]
+    Sidecar,
+    /// Unsupported: `svadhesive.dll` exposes no FFI-callable decrypt symbol.
+    Direct,
 }
 
 impl EscrowConfig {
@@ -142,8 +272,8 @@ impl EscrowConfig {
         if self.server_license.is_empty() {
             return Err(ConfigError::EscrowMissingLicense);
         }
-        match self.backend.as_str() {
-            "sidecar" => {
+        match self.backend {
+            EscrowBackend::Sidecar => {
                 let path = self
                     .fxserver_path
                     .as_ref()
@@ -154,7 +284,7 @@ impl EscrowConfig {
                     ));
                 }
             }
-            "direct" => {
+            EscrowBackend::Direct => {
                 let path = self
                     .dll_path
                     .as_ref()
@@ -163,7 +293,6 @@ impl EscrowConfig {
                     return Err(ConfigError::EscrowDllNotFound(path.display().to_string()));
                 }
             }
-            other => return Err(ConfigError::EscrowUnknownBackend(other.to_owned())),
         }
         Ok(())
     }
@@ -242,6 +371,37 @@ pub struct StateSyncConfig {
     /// Network-ownership reassignment scan interval (s) — anti flip-flop.
     #[serde(default = "default_ownership_interval")]
     pub ownership_interval_secs: u64,
+    /// OneSync mode. `Off` keeps the msgRoute P2P relay (default, battle-tested);
+    /// `On` makes the server parse entity clones authoritatively (OneSync-NG).
+    #[serde(default)]
+    pub onesync: OneSyncMode,
+}
+
+/// Server entity-sync mode advertised to clients and driving the game-state
+/// path. Mirrors FiveM's `onesync` convar (`Off` / `On`); BASTON's `On` maps
+/// to Infinity-style big mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OneSyncMode {
+    /// P2P relay via msgRoute — the GTA netcode syncs entities client-to-client.
+    #[default]
+    Off,
+    /// Server-authoritative clone parsing (OneSync-NG, big mode).
+    On,
+}
+
+impl OneSyncMode {
+    pub fn is_enabled(self) -> bool {
+        matches!(self, OneSyncMode::On)
+    }
+
+    /// The string advertised in the `onesync` replicated convar.
+    pub fn convar_value(self) -> &'static str {
+        match self {
+            OneSyncMode::Off => "off",
+            OneSyncMode::On => "on",
+        }
+    }
 }
 
 /// `[metrics]` section — Prometheus exporter.
@@ -274,6 +434,13 @@ pub struct ServerConfig {
     pub port: u16,
     #[serde(default = "default_max_players")]
     pub max_players: u32,
+    /// Game build advertised as `sv_enforceGameBuild` in `info.json` vars.
+    /// The client build-switches to it pre-connect (NetLibrary.cpp); with
+    /// no enforcement, mixed-build clients end up in the same non-OneSync
+    /// session and the GTA P2P join fails ("Could not connect to session
+    /// provider"). Empty string = no enforcement.
+    #[serde(default = "default_enforce_game_build")]
+    pub enforce_game_build: String,
 }
 
 /// `[auth]` section — CFX ticket validation (Phase B).
@@ -322,6 +489,9 @@ fn default_port() -> u16 {
 }
 fn default_max_players() -> u32 {
     32
+}
+fn default_enforce_game_build() -> String {
+    String::new()
 }
 fn default_resources_path() -> PathBuf {
     PathBuf::from("resources")
@@ -430,6 +600,7 @@ impl Default for StateSyncConfig {
             aoi_radius: default_aoi_radius(),
             max_speed_mps: default_max_speed(),
             ownership_interval_secs: default_ownership_interval(),
+            onesync: OneSyncMode::default(),
         }
     }
 }
@@ -493,7 +664,18 @@ impl BastonConfig {
             source,
         })?;
         config.apply_env_overrides()?;
+        config.validate()?;
         Ok(config)
+    }
+
+    /// Validate cross-section invariants after env overrides. Kept in `load`
+    /// so every entry point fails fast at startup with the section-specific,
+    /// actionable error messages — callers must not have to remember to call
+    /// the per-section validators themselves.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        self.license.validate()?;
+        self.escrow.validate()?;
+        Ok(())
     }
 
     fn apply_env_overrides(&mut self) -> Result<(), ConfigError> {
@@ -587,8 +769,11 @@ mod tests {
     fn escrow_defaults_off_and_validates_trivially() {
         let config: BastonConfig = toml::from_str("[server]\nport = 30120\n").unwrap();
         assert!(!config.escrow.enabled);
-        assert_eq!(config.escrow.backend, "sidecar");
-        config.escrow.validate().expect("disabled escrow is always valid");
+        assert_eq!(config.escrow.backend, EscrowBackend::Sidecar);
+        config
+            .escrow
+            .validate()
+            .expect("disabled escrow is always valid");
     }
 
     #[test]
@@ -607,7 +792,7 @@ mod tests {
     fn escrow_sidecar_missing_fxserver_path_is_rejected() {
         let escrow = EscrowConfig {
             enabled: true,
-            backend: "sidecar".into(),
+            backend: EscrowBackend::Sidecar,
             server_license: "license:abc".into(),
             ..Default::default()
         };
@@ -618,16 +803,74 @@ mod tests {
     }
 
     #[test]
-    fn escrow_unknown_backend_is_rejected() {
-        let escrow = EscrowConfig {
-            enabled: true,
-            backend: "carrier-pigeon".into(),
-            server_license: "license:abc".into(),
+    fn escrow_unknown_backend_is_rejected_at_parse() {
+        // With `backend` typed as an enum, serde rejects unknown values when the
+        // TOML is parsed — no separate validation error variant needed.
+        let parsed: Result<BastonConfig, _> =
+            toml::from_str("[escrow]\nenabled = true\nbackend = \"carrier-pigeon\"\n");
+        assert!(parsed.is_err(), "unknown backend must fail to parse");
+    }
+
+    #[test]
+    fn license_defaults_off_and_validates_trivially() {
+        let config: BastonConfig = toml::from_str("[server]\nport = 30120\n").unwrap();
+        assert_eq!(config.license.mode, LicenseMode::Off);
+        config.license.validate().expect("off is always valid");
+    }
+
+    #[test]
+    fn license_gate_requires_a_key() {
+        let lic = LicenseConfig {
+            mode: LicenseMode::Gate,
             ..Default::default()
         };
         assert!(matches!(
-            escrow.validate(),
-            Err(ConfigError::EscrowUnknownBackend(_))
+            lic.validate(),
+            Err(ConfigError::LicenseMissingKey(_))
         ));
+    }
+
+    #[test]
+    fn license_gate_rejects_placeholder_key() {
+        let lic = LicenseConfig {
+            mode: LicenseMode::Gate,
+            sv_license_key: "cfxk_REPLACE_ME_please".into(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            lic.validate(),
+            Err(ConfigError::LicenseMalformedKey)
+        ));
+    }
+
+    #[test]
+    fn license_gate_accepts_well_formed_key() {
+        let lic = LicenseConfig {
+            mode: LicenseMode::Gate,
+            sv_license_key: "cfxk_1a2b3c4d5e6f7g8h9i0j_realkey".into(),
+            ..Default::default()
+        };
+        lic.validate().expect("well-formed key passes the gate");
+    }
+
+    #[test]
+    fn license_verified_requires_fxserver_path() {
+        let lic = LicenseConfig {
+            mode: LicenseMode::Verified,
+            sv_license_key: "cfxk_1a2b3c4d5e6f7g8h9i0j_realkey".into(),
+            fxserver_path: None,
+        };
+        assert!(matches!(
+            lic.validate(),
+            Err(ConfigError::LicenseMissingFxserverPath)
+        ));
+    }
+
+    #[test]
+    fn license_unknown_mode_is_rejected_at_parse() {
+        // Enum-typed `mode`: serde rejects unknown values at parse time.
+        let parsed: Result<BastonConfig, _> =
+            toml::from_str("[license]\nmode = \"trust-me-bro\"\n");
+        assert!(parsed.is_err(), "unknown licence mode must fail to parse");
     }
 }

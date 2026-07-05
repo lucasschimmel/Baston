@@ -20,7 +20,12 @@ struct Node {
 
 impl Node {
     fn new(bounds: Aabb, depth: usize) -> Self {
-        Self { bounds, items: Vec::new(), children: None, depth }
+        Self {
+            bounds,
+            items: Vec::new(),
+            children: None,
+            depth,
+        }
     }
 
     fn quadrants(&self) -> [Aabb; 4] {
@@ -46,10 +51,17 @@ impl Node {
         if let Some(children) = self.children.as_mut() {
             if let Some(idx) = {
                 let this = &*children;
-                let quads: [Aabb; 4] = [this[0].bounds, this[1].bounds, this[2].bounds, this[3].bounds];
+                let quads: [Aabb; 4] = [
+                    this[0].bounds,
+                    this[1].bounds,
+                    this[2].bounds,
+                    this[3].bounds,
+                ];
                 quads.iter().position(|q| {
-                    bounds.x_min >= q.x_min && bounds.x_max <= q.x_max
-                        && bounds.y_min >= q.y_min && bounds.y_max <= q.y_max
+                    bounds.x_min >= q.x_min
+                        && bounds.x_max <= q.x_max
+                        && bounds.y_min >= q.y_min
+                        && bounds.y_max <= q.y_max
                 })
             } {
                 children[idx].insert(id, bounds);
@@ -114,7 +126,9 @@ impl QuadTree {
     }
 
     pub fn new(bounds: Aabb) -> Self {
-        Self { root: Node::new(bounds, 0) }
+        Self {
+            root: Node::new(bounds, 0),
+        }
     }
 
     pub fn insert(&mut self, zone_id: &str, bounds: Aabb) {

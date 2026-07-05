@@ -18,7 +18,11 @@ use baston_zone::mesh::{ZoneMesh, ZoneMeshHooks};
 use baston_zone::{EntityManager, StateIngest};
 
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 struct Cluster {
@@ -33,7 +37,10 @@ async fn start_gateway() -> Cluster {
     let port = free_port();
     mesh.spawn_grpc_server(format!("127.0.0.1:{port}").parse().unwrap());
     tokio::time::sleep(Duration::from_millis(150)).await;
-    Cluster { mesh, gateway_addr: format!("127.0.0.1:{port}") }
+    Cluster {
+        mesh,
+        gateway_addr: format!("127.0.0.1:{port}"),
+    }
 }
 
 struct ZoneHarness {
@@ -79,7 +86,12 @@ async fn start_zone(cluster: &Cluster, zone_id: &str, bounds: Aabb) -> ZoneHarne
     mesh.spawn_grpc_server(format!("127.0.0.1:{port}").parse().unwrap());
     tokio::time::sleep(Duration::from_millis(100)).await;
     mesh.register_with_gateway().await.unwrap();
-    ZoneHarness { mesh, activated, released, last_script_state }
+    ZoneHarness {
+        mesh,
+        activated,
+        released,
+        last_script_state,
+    }
 }
 
 fn update_at(coords: [f32; 3], velocity: [f32; 3]) -> ClientStateUpdate {
@@ -114,7 +126,10 @@ fn boundary_loop(
         collect_script_state: Arc::new(|_source| {
             Box::pin(async {
                 let mut m = HashMap::new();
-                m.insert("axiom-core".to_string(), r#"{"characterId":42}"#.to_string());
+                m.insert(
+                    "axiom-core".to_string(),
+                    r#"{"characterId":42}"#.to_string(),
+                );
                 m
             })
         }),
@@ -141,34 +156,64 @@ async fn full_handoff_across_boundary() {
         identifiers: vec!["license:test".into()],
     });
     cluster.mesh.router.assign(1, "zone-a");
-    ingest.apply(1, update_at([-200.0, 50.0, 30.0], [50.0, 0.0, 0.0])).unwrap();
+    ingest
+        .apply(1, update_at([-200.0, 50.0, 30.0], [50.0, 0.0, 0.0]))
+        .unwrap();
 
     let manager = HandoffManager::new("zone-a".into(), zone_a.mesh.gateway_client(), 5);
     let released_local = Arc::new(AtomicU32::new(0));
-    let lp = boundary_loop(&zone_a, &manager, &ingest, &players, Arc::clone(&released_local));
+    let lp = boundary_loop(
+        &zone_a,
+        &manager,
+        &ingest,
+        &players,
+        Arc::clone(&released_local),
+    );
 
     // Scan 1: player approaches → prepare → ghost pending in zone-b.
     lp.scan_once().await;
-    assert!(matches!(manager.state_of(1), Some(HandoffState::ReadyToTransfer { .. })));
+    assert!(matches!(
+        manager.state_of(1),
+        Some(HandoffState::ReadyToTransfer { .. })
+    ));
     assert_eq!(zone_b.mesh.ghost_state(1), Some("pending"));
 
     // Player crosses the border (anti-cheat: 50 m/s * ~5s within limits —
     // send intermediate updates).
-    ingest.apply(1, update_at([-50.0, 50.0, 30.0], [50.0, 0.0, 0.0])).unwrap();
+    ingest
+        .apply(1, update_at([-50.0, 50.0, 30.0], [50.0, 0.0, 0.0]))
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(60)).await;
-    ingest.apply(1, update_at([10.0, 50.0, 30.0], [50.0, 0.0, 0.0])).unwrap();
+    ingest
+        .apply(1, update_at([10.0, 50.0, 30.0], [50.0, 0.0, 0.0]))
+        .unwrap();
 
     // Scan 2: crossing detected → ConfirmHandoff → ActivatePlayer → release.
     lp.scan_once().await;
 
     assert_eq!(cluster.mesh.router.zone_of(1).as_deref(), Some("zone-b"));
-    assert_eq!(zone_b.activated.load(Ordering::SeqCst), 1, "ghost must be activated in zone-b");
-    assert_eq!(released_local.load(Ordering::SeqCst), 1, "zone-a must clean up locally");
+    assert_eq!(
+        zone_b.activated.load(Ordering::SeqCst),
+        1,
+        "ghost must be activated in zone-b"
+    );
+    assert_eq!(
+        released_local.load(Ordering::SeqCst),
+        1,
+        "zone-a must clean up locally"
+    );
     assert_eq!(zone_b.mesh.ghost_state(1), Some("active"));
-    assert_eq!(zone_b.released.load(Ordering::SeqCst), 0, "zone-b must not release the player");
+    assert_eq!(
+        zone_b.released.load(Ordering::SeqCst),
+        0,
+        "zone-b must not release the player"
+    );
     // script_state made it across.
     let state = zone_b.last_script_state.lock().unwrap().clone();
-    assert_eq!(state.get("axiom-core").map(String::as_str), Some(r#"{"characterId":42}"#));
+    assert_eq!(
+        state.get("axiom-core").map(String::as_str),
+        Some(r#"{"characterId":42}"#)
+    );
     // Cooldown: no immediate new pending handoff.
     assert!(manager.state_of(1).is_none());
 }
@@ -183,24 +228,45 @@ async fn turnaround_cancels_preparation() {
     let ingest = Arc::new(StateIngest::new(Arc::clone(&em), 10_000.0));
     let players = Arc::new(PlayerDirectory::new());
     cluster.mesh.router.assign(1, "zone-a");
-    ingest.apply(1, update_at([-250.0, 0.0, 30.0], [12.5, 0.0, 0.0])).unwrap();
+    ingest
+        .apply(1, update_at([-250.0, 0.0, 30.0], [12.5, 0.0, 0.0]))
+        .unwrap();
 
     let manager = HandoffManager::new("zone-a".into(), zone_a.mesh.gateway_client(), 5);
-    let lp = boundary_loop(&zone_a, &manager, &ingest, &players, Arc::new(AtomicU32::new(0)));
+    let lp = boundary_loop(
+        &zone_a,
+        &manager,
+        &ingest,
+        &players,
+        Arc::new(AtomicU32::new(0)),
+    );
 
     lp.scan_once().await;
-    assert!(matches!(manager.state_of(1), Some(HandoffState::ReadyToTransfer { .. })));
+    assert!(matches!(
+        manager.state_of(1),
+        Some(HandoffState::ReadyToTransfer { .. })
+    ));
 
     // Player turns around (velocity away from the edge, still in margin).
     tokio::time::sleep(Duration::from_millis(60)).await;
-    ingest.apply(1, update_at([-251.0, 0.0, 30.0], [-12.5, 0.0, 0.0])).unwrap();
+    ingest
+        .apply(1, update_at([-251.0, 0.0, 30.0], [-12.5, 0.0, 0.0]))
+        .unwrap();
     lp.scan_once().await;
-    assert!(manager.state_of(1).is_none(), "preparation must be cancelled");
+    assert!(
+        manager.state_of(1).is_none(),
+        "preparation must be cancelled"
+    );
     assert_eq!(cluster.mesh.router.zone_of(1).as_deref(), Some("zone-a"));
 
     // Anti-oscillation: approaching again immediately is ignored (cooldown 5s).
     tokio::time::sleep(Duration::from_millis(60)).await;
-    ingest.apply(1, update_at([-250.0, 0.0, 30.0], [12.5, 0.0, 0.0])).unwrap();
+    ingest
+        .apply(1, update_at([-250.0, 0.0, 30.0], [12.5, 0.0, 0.0]))
+        .unwrap();
     lp.scan_once().await;
-    assert!(manager.state_of(1).is_none(), "cooldown must block re-preparation");
+    assert!(
+        manager.state_of(1).is_none(),
+        "cooldown must block re-preparation"
+    );
 }

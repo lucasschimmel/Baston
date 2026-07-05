@@ -19,6 +19,11 @@ use crate::zone_registry::ZoneRegistry;
 /// How long updates are buffered around a handoff commit.
 const HANDOFF_HOLD: Duration = Duration::from_millis(50);
 
+/// Bounded so a slow NATS consumer can't let the forward queue grow without
+/// limit. State updates are unreliable (superseded ~50ms later), so overflow
+/// drops them rather than risking OOM.
+const FORWARD_CAPACITY: usize = 8192;
+
 pub fn ingest_subject(zone_id: &str) -> String {
     format!("baston.zone.{zone_id}.ingest")
 }
@@ -28,15 +33,22 @@ pub fn outbound_subject_wildcard() -> &'static str {
 }
 
 enum ForwardMsg {
-    Update { source: u32, update: ClientStateUpdate },
-    BeginHold { source: u32 },
-    FlushHold { source: u32 },
+    Update {
+        source: u32,
+        update: ClientStateUpdate,
+    },
+    BeginHold {
+        source: u32,
+    },
+    FlushHold {
+        source: u32,
+    },
 }
 
 /// Cloneable handle used by the UDP server (sync context).
 #[derive(Clone)]
 pub struct MeshForwarder {
-    tx: mpsc::UnboundedSender<ForwardMsg>,
+    tx: mpsc::Sender<ForwardMsg>,
 }
 
 impl MeshForwarder {
@@ -45,20 +57,30 @@ impl MeshForwarder {
         router: Arc<ConnectionRouter>,
         registry: Arc<ZoneRegistry>,
     ) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(FORWARD_CAPACITY);
         tokio::spawn(run(nats, router, registry, rx, tx.clone()));
         Self { tx }
     }
 
     /// Forward a client state update toward the player's current zone.
+    /// Called from the sync UDP path; on overflow the update is dropped (it's
+    /// unreliable and superseded shortly after).
     pub fn forward(&self, source: u32, update: ClientStateUpdate) {
-        let _ = self.tx.send(ForwardMsg::Update { source, update });
+        if self
+            .tx
+            .try_send(ForwardMsg::Update { source, update })
+            .is_err()
+        {
+            metrics::counter!("mesh_forward_dropped_total").increment(1);
+        }
     }
 
     /// Called from the handoff-committed hook: buffer this player's updates
     /// for 50ms, then flush them to the (new) current zone.
     pub fn begin_handoff_hold(&self, source: u32) {
-        let _ = self.tx.send(ForwardMsg::BeginHold { source });
+        if self.tx.try_send(ForwardMsg::BeginHold { source }).is_err() {
+            tracing::warn!(target: "gateway", source, "handoff hold dropped: forward queue full");
+        }
     }
 }
 
@@ -66,8 +88,8 @@ async fn run(
     nats: async_nats::Client,
     router: Arc<ConnectionRouter>,
     registry: Arc<ZoneRegistry>,
-    mut rx: mpsc::UnboundedReceiver<ForwardMsg>,
-    tx: mpsc::UnboundedSender<ForwardMsg>,
+    mut rx: mpsc::Receiver<ForwardMsg>,
+    tx: mpsc::Sender<ForwardMsg>,
 ) {
     // source → (hold started, buffered updates)
     let mut holds: HashMap<u32, (Instant, Vec<ClientStateUpdate>)> = HashMap::new();
@@ -113,7 +135,9 @@ async fn run(
                 let tx = tx.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(HANDOFF_HOLD + Duration::from_millis(5)).await;
-                    let _ = tx.send(ForwardMsg::FlushHold { source });
+                    // Async context: await backpressure rather than drop, so a
+                    // buffered player's held updates are never stranded.
+                    let _ = tx.send(ForwardMsg::FlushHold { source }).await;
                 });
             }
             ForwardMsg::FlushHold { source } => {
@@ -139,16 +163,14 @@ async fn publish(
         tracing::debug!(target: "gateway", source, "state update dropped: player has no zone");
         return;
     };
-    let payload = match bincode::serde::encode_to_vec(
-        &(source, update),
-        bincode::config::standard(),
-    ) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!(target: "gateway", error = %e, "state update encode failed");
-            return;
-        }
-    };
+    let payload =
+        match bincode::serde::encode_to_vec(&(source, update), bincode::config::standard()) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(target: "gateway", error = %e, "state update encode failed");
+                return;
+            }
+        };
     if let Err(e) = nats.publish(ingest_subject(&zone), payload.into()).await {
         tracing::error!(target: "gateway", error = %e, zone = %zone,
             "state forward to zone failed");

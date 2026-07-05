@@ -35,4 +35,7 @@ pub enum EscrowPluginError {
 
     #[error("sidecar decrypt failed: {0}")]
     SidecarDecryptFailed(String),
+
+    #[error("licence query to the CFX component failed: {0}")]
+    LicenseQueryFailed(String),
 }

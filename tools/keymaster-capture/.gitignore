@@ -1,0 +1,7 @@
+# Contains the license key in cleartext — never commit.
+cfx-capture.jsonl
+# capture.cfg holds the real key once filled in.
+capture.cfg
+# Python bytecode cache and captured server logs — local artifacts.
+__pycache__/
+*.log

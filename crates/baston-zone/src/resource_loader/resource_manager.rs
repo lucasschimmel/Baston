@@ -195,9 +195,8 @@ impl ResourceManager {
                 }
             };
 
-            let code = String::from_utf8(bytes).map_err(|_| ZoneError::ScriptNotUtf8 {
-                path: path.clone(),
-            })?;
+            let code = String::from_utf8(bytes)
+                .map_err(|_| ZoneError::ScriptNotUtf8 { path: path.clone() })?;
             scripts.push(ScriptSource {
                 path: rel.clone(),
                 code,
@@ -294,12 +293,19 @@ impl ResourceManager {
         // (and Windows canonicalize adds a \\?\ prefix) — canonicalize both
         // sides so the prefix comparison is meaningful.
         let path = std::fs::canonicalize(path).ok()?;
-        let resources = self.resources.lock().await;
-        resources
-            .iter()
-            .find(|(_, e)| {
-                std::fs::canonicalize(&e.discovered.root).is_ok_and(|root| path.starts_with(root))
-            })
-            .map(|(n, _)| n.clone())
+        // Snapshot (name, root) under the lock, then run the blocking
+        // `canonicalize` off-lock so a slow filesystem stat can't stall every
+        // other `resources` access (start/stop/status) behind this one call.
+        let roots: Vec<(String, PathBuf)> = {
+            let resources = self.resources.lock().await;
+            resources
+                .iter()
+                .map(|(n, e)| (n.clone(), e.discovered.root.clone()))
+                .collect()
+        };
+        roots.into_iter().find_map(|(name, root)| {
+            let root = std::fs::canonicalize(&root).ok()?;
+            path.starts_with(&root).then_some(name)
+        })
     }
 }

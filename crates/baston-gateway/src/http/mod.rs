@@ -11,12 +11,13 @@ pub use packfile_cache::PackfileCache;
 
 use std::sync::Arc;
 
+use axum::http::Method;
 use axum::routing::{get, post};
 use axum::Router;
 use baston_config::BastonConfig;
 use baston_scripting::ScriptHost;
 use baston_zone::resource_loader::ResourceManager;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::auth::AuthService;
@@ -45,8 +46,15 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/admin/player/{source}/drop",
             post(client::admin_drop_player),
         )
-        // CORS for the FiveM CEF browser.
-        .layer(CorsLayer::permissive())
+        // CORS for the FiveM CEF browser and cross-origin info.json reads.
+        // Any origin, but only the methods we actually serve and no arbitrary
+        // request headers — so a browser can't be tricked into a credentialed
+        // cross-origin call to the authenticated drop route.
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods([Method::GET, Method::POST]),
+        )
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

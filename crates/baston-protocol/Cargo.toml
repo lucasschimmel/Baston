@@ -16,6 +16,7 @@ bitflags = { workspace = true }
 bincode = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
+lz4-sys = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }

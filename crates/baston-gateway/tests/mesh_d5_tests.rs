@@ -9,8 +9,11 @@ use baston_scripting::{DeferralRegistry, ScriptHost, ScriptSource};
 use tokio::sync::mpsc;
 
 fn host() -> ScriptHost {
-    ScriptHost::spawn(Arc::new(DeferralRegistry::new()), Arc::new(PlayerDirectory::new()))
-        .expect("script host")
+    ScriptHost::spawn(
+        Arc::new(DeferralRegistry::new()),
+        Arc::new(PlayerDirectory::new()),
+    )
+    .expect("script host")
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -38,22 +41,35 @@ async fn cross_zone_publish_and_loop_prevention() {
     .unwrap();
 
     // Locally-triggered events are mirrored cross-zone.
-    host.trigger_event("axiom:economy:transaction", &[serde_json::json!({"amount": 500})])
-        .await
-        .unwrap();
+    host.trigger_event(
+        "axiom:economy:transaction",
+        &[serde_json::json!({"amount": 500})],
+    )
+    .await
+    .unwrap();
     let (event, args) = rx.recv().await.unwrap();
     assert_eq!(event, "axiom:economy:transaction");
     assert!(args.contains("500"));
     // ... the handler chain also ran locally: nothing else pending from it.
 
     // Lifecycle events stay local.
-    host.trigger_event("playerDropped", &[serde_json::json!(1)]).await.unwrap();
+    host.trigger_event("playerDropped", &[serde_json::json!(1)])
+        .await
+        .unwrap();
 
     // A REMOTE event is dispatched locally but NOT re-published; the local
     // handler's reaction (axiom:pong) IS published (it's local origin).
-    host.trigger_remote_event("axiom:ping", "[41]".into()).await.unwrap();
+    host.trigger_remote_event("axiom:ping", "[41]".into())
+        .await
+        .unwrap();
     let (event, args) = rx.recv().await.unwrap();
-    assert_eq!(event, "axiom:pong", "only the handler's reaction is published");
+    assert_eq!(
+        event, "axiom:pong",
+        "only the handler's reaction is published"
+    );
     assert!(args.contains("42"));
-    assert!(rx.try_recv().is_err(), "axiom:ping itself must not be re-published");
+    assert!(
+        rx.try_recv().is_err(),
+        "axiom:ping itself must not be re-published"
+    );
 }

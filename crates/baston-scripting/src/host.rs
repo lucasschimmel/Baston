@@ -131,7 +131,7 @@ impl ScriptHost {
 
     /// Install the Phase D cross-zone event publisher (zone processes only).
     pub fn set_cross_zone_publisher(&self, publisher: CrossZonePublisher) {
-        *self.cross_zone.write().expect("cross_zone lock poisoned") = Some(publisher);
+        *self.cross_zone.write().unwrap_or_else(|e| e.into_inner()) = Some(publisher);
     }
 
     /// Dispatch an event that arrived from ANOTHER zone: local fan-out only,
@@ -141,7 +141,8 @@ impl ScriptHost {
         event: &str,
         args_json: String,
     ) -> Result<(), ScriptError> {
-        self.broadcast_chain_inner(event.to_owned(), args_json, false).await;
+        self.broadcast_chain_inner(event.to_owned(), args_json, false)
+            .await;
         Ok(())
     }
 
@@ -197,7 +198,11 @@ impl ScriptHost {
         let runtimes = self.runtimes.read().await;
         for (resource, handle) in runtimes.iter() {
             let (reply, rx) = oneshot::channel();
-            if handle.tx.send(RuntimeCommand::CollectTransferState { source, reply }).await.is_err()
+            if handle
+                .tx
+                .send(RuntimeCommand::CollectTransferState { source, reply })
+                .await
+                .is_err()
             {
                 continue;
             }
@@ -339,8 +344,11 @@ impl ScriptHost {
             // local handlers are local origin and do propagate.
             let is_remote_entry = dispatched == 1 && !publish_entry;
             if !is_remote_entry && !is_zone_local_event(&event) {
-                if let Some(p) =
-                    self.cross_zone.read().expect("cross_zone lock poisoned").as_ref()
+                if let Some(p) = self
+                    .cross_zone
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
                 {
                     p(&event, &args_json);
                 }

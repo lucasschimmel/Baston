@@ -238,7 +238,8 @@ async fn native_dispatch_roundtrip_through_simulated_client() {
         let probe = UdpSocket::bind("127.0.0.1:0").unwrap();
         probe.local_addr().unwrap().port()
     };
-    baston_gateway::udp::spawn_with_net(port, 2, 8, players, script_host, Some(net_rx), None).unwrap();
+    baston_gateway::udp::spawn_with_net(port, 2, 8, players, script_host, Some(net_rx), None)
+        .unwrap();
 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -349,7 +350,8 @@ async fn spawn_sequence_end_to_end() {
         let probe = UdpSocket::bind("127.0.0.1:0").unwrap();
         probe.local_addr().unwrap().port()
     };
-    baston_gateway::udp::spawn_with_net(port, 2, 8, players, script_host, Some(net_rx), None).unwrap();
+    baston_gateway::udp::spawn_with_net(port, 2, 8, players, script_host, Some(net_rx), None)
+        .unwrap();
 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {

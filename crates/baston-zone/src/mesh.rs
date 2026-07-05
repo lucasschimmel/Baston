@@ -20,9 +20,17 @@ use tonic::{Request, Response, Status};
 /// `Pending` state, no `playerJoining` fired yet.
 #[derive(Debug)]
 pub enum GhostState {
-    Pending { snapshot: PlayerStateSnapshot, created_at: Instant },
+    Pending {
+        snapshot: PlayerStateSnapshot,
+        created_at: Instant,
+    },
     Active,
 }
+
+/// Ghost → active transition callback: fire `playerJoining`, restore state.
+type ActivatePlayerFn = Arc<dyn Fn(u32, &PlayerStateSnapshot) + Send + Sync>;
+/// Release callback: internal `playerDropped`, entity release.
+type ReleasePlayerFn = Arc<dyn Fn(u32, &str) + Send + Sync>;
 
 /// Hooks the zone runtime provides to the mesh layer. Wired fully in D4;
 /// D1 only needs the count providers for heartbeats.
@@ -30,9 +38,9 @@ pub struct ZoneMeshHooks {
     pub player_count: Arc<dyn Fn() -> u32 + Send + Sync>,
     pub entity_count: Arc<dyn Fn() -> u32 + Send + Sync>,
     /// Ghost → active transition: fire `playerJoining`, restore script_state.
-    pub on_activate_player: Arc<dyn Fn(u32, &PlayerStateSnapshot) + Send + Sync>,
+    pub on_activate_player: ActivatePlayerFn,
     /// Cleanup on release: internal playerDropped, entity release.
-    pub on_release_player: Arc<dyn Fn(u32, &str) + Send + Sync>,
+    pub on_release_player: ReleasePlayerFn,
 }
 
 pub struct ZoneMesh {
@@ -218,18 +226,24 @@ impl ZoneService for ZoneGrpc {
         request: Request<PlayerStateRequest>,
     ) -> Result<Response<PrepareForPlayerResponse>, Status> {
         let req = request.into_inner();
-        let snapshot = PlayerStateSnapshot::decode(&req.snapshot)
-            .map_err(Status::invalid_argument)?;
+        let snapshot =
+            PlayerStateSnapshot::decode(&req.snapshot).map_err(Status::invalid_argument)?;
         if snapshot.source_id != req.player_id {
             return Err(Status::invalid_argument("snapshot source_id mismatch"));
         }
         self.mesh.ghosts.insert(
             req.player_id,
-            GhostState::Pending { snapshot, created_at: Instant::now() },
+            GhostState::Pending {
+                snapshot,
+                created_at: Instant::now(),
+            },
         );
         tracing::info!(target: "zone", zone = %self.mesh.zone_id,
             "PrepareForPlayer: ghost created for player={}", req.player_id);
-        Ok(Response::new(PrepareForPlayerResponse { ready: true, message: String::new() }))
+        Ok(Response::new(PrepareForPlayerResponse {
+            ready: true,
+            message: String::new(),
+        }))
     }
 
     async fn activate_player(
@@ -253,7 +267,10 @@ impl ZoneService for ZoneGrpc {
         self.mesh.ghosts.insert(req.player_id, GhostState::Active);
         tracing::info!(target: "zone", zone = %self.mesh.zone_id,
             "player={} activated from ghost state", req.player_id);
-        Ok(Response::new(ActivatePlayerResponse { ok: true, message: String::new() }))
+        Ok(Response::new(ActivatePlayerResponse {
+            ok: true,
+            message: String::new(),
+        }))
     }
 
     async fn release_player(

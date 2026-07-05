@@ -176,8 +176,7 @@ async fn main() -> anyhow::Result<()> {
         // Zone failure recovery (D6): reroute orphans to surviving zones.
         // The UDP handle doesn't exist yet at this point — recovery kicks go
         // through a channel drained after the UDP server starts.
-        let (kick_tx, kick_rx) =
-            tokio::sync::mpsc::unbounded_channel::<(u32, String)>();
+        let (kick_tx, kick_rx) = tokio::sync::mpsc::unbounded_channel::<(u32, String)>();
         {
             let mesh = Arc::clone(&mesh);
             registry.spawn_liveness_monitor(Arc::new(move |zone_id| {
@@ -223,9 +222,10 @@ async fn main() -> anyhow::Result<()> {
                     let text = String::from_utf8_lossy(&msg.payload);
                     let zone = match text.split_once(',') {
                         Some((x, y)) => match (x.trim().parse::<f32>(), y.trim().parse::<f32>()) {
-                            (Ok(x), Ok(y)) => {
-                                registry.find_zone_for_coords(x, y).await.unwrap_or_default()
-                            }
+                            (Ok(x), Ok(y)) => registry
+                                .find_zone_for_coords(x, y)
+                                .await
+                                .unwrap_or_default(),
                             _ => String::new(),
                         },
                         None => String::new(),
@@ -263,9 +263,14 @@ async fn main() -> anyhow::Result<()> {
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
                     interval.tick().await;
-                    let list: Vec<baston_protocol::PlayerInfo> =
-                        players.sources().into_iter().filter_map(|s| players.get(s)).collect();
-                    let Ok(payload) = serde_json::to_vec(&list) else { continue };
+                    let list: Vec<baston_protocol::PlayerInfo> = players
+                        .sources()
+                        .into_iter()
+                        .filter_map(|s| players.get(s))
+                        .collect();
+                    let Ok(payload) = serde_json::to_vec(&list) else {
+                        continue;
+                    };
                     if let Err(e) = nats
                         .publish(
                             baston_zone::boundary_loop::GLOBAL_PLAYERS_SUBJECT,
@@ -315,6 +320,7 @@ async fn main() -> anyhow::Result<()> {
         Some(net_rx),
         Some(Arc::clone(&state_ingest)),
         mesh_forward,
+        config.state_sync.onesync,
     )?;
 
     // D6: apply recovery kicks now that the UDP handle exists.
@@ -359,8 +365,7 @@ async fn main() -> anyhow::Result<()> {
                     };
                     match baston_protocol::events::json_args_to_msgpack(args_json) {
                         Ok(args) => {
-                            let packet =
-                                baston_protocol::events::build_net_event(event, &args);
+                            let packet = baston_protocol::events::build_net_event(event, &args);
                             udp.send_to_source(source as u32, 0, packet, true);
                         }
                         Err(e) => tracing::error!(target: "gateway", error = %e,
@@ -397,11 +402,9 @@ async fn main() -> anyhow::Result<()> {
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     if let Some(tls) = state.config.tls.clone() {
-        let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
-            &tls.cert_pem,
-            &tls.key_pem,
-        )
-        .await?;
+        let tls_config =
+            axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert_pem, &tls.key_pem)
+                .await?;
         tracing::info!(%addr, "HTTPS gateway listening");
         axum_server::bind_rustls(addr, tls_config)
             .serve(router(state).into_make_service())

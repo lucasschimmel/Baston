@@ -18,8 +18,14 @@ const PREPARE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub enum HandoffState {
-    PreparationRequested { target_zone: String, requested_at: Instant },
-    ReadyToTransfer { target_zone: String, target_grpc: String },
+    PreparationRequested {
+        target_zone: String,
+        requested_at: Instant,
+    },
+    ReadyToTransfer {
+        target_zone: String,
+        target_grpc: String,
+    },
     Transferring,
 }
 
@@ -143,12 +149,14 @@ impl HandoffManager {
     /// caller then runs ActivatePlayer + local release (D4 sequence).
     pub async fn confirm_crossing(&self, player_id: u32) -> Option<(String, String)> {
         let (target_zone, target_grpc) = match self.state_of(player_id) {
-            Some(HandoffState::ReadyToTransfer { target_zone, target_grpc }) => {
-                (target_zone, target_grpc)
-            }
+            Some(HandoffState::ReadyToTransfer {
+                target_zone,
+                target_grpc,
+            }) => (target_zone, target_grpc),
             _ => return None, // not prepared (or already transferring)
         };
-        self.pending_handoffs.insert(player_id, HandoffState::Transferring);
+        self.pending_handoffs
+            .insert(player_id, HandoffState::Transferring);
         tracing::info!(target: "zone", zone = %self.zone_id,
             "HandoffManager: confirm handoff player={player_id} → {target_zone}");
 

@@ -35,7 +35,10 @@ pub struct BoundaryDetector {
 
 impl BoundaryDetector {
     pub fn new(zone_bounds: Aabb, boundary_margin: f32) -> Self {
-        Self { zone_bounds, boundary_margin }
+        Self {
+            zone_bounds,
+            boundary_margin,
+        }
     }
 
     /// Distance from an in-zone position to the nearest edge.
@@ -105,36 +108,53 @@ mod tests {
     #[test]
     fn far_from_boundary_no_handoff() {
         let d = detector();
-        assert!(d.check_player(1, [-350.0, 0.0, 30.0], [10.0, 0.0, 0.0]).is_none());
+        assert!(d
+            .check_player(1, [-350.0, 0.0, 30.0], [10.0, 0.0, 0.0])
+            .is_none());
     }
 
     #[test]
     fn near_boundary_approaching_triggers() {
         let d = detector();
-        let c = d.check_player(1, [-250.0, 0.0, 30.0], [12.5, 0.0, 0.0]).unwrap();
+        let c = d
+            .check_player(1, [-250.0, 0.0, 30.0], [12.5, 0.0, 0.0])
+            .unwrap();
         assert_eq!(c.target_direction, BoundaryDirection::East);
         // 250m at 12.5 m/s = 20s.
-        assert!((19_000..=21_000).contains(&c.estimated_crossing_ms), "{}", c.estimated_crossing_ms);
-        assert!(c.predicted_coords.0 > 0.0, "prediction must land past the edge");
+        assert!(
+            (19_000..=21_000).contains(&c.estimated_crossing_ms),
+            "{}",
+            c.estimated_crossing_ms
+        );
+        assert!(
+            c.predicted_coords.0 > 0.0,
+            "prediction must land past the edge"
+        );
     }
 
     #[test]
     fn near_boundary_moving_away_no_handoff() {
         let d = detector();
-        assert!(d.check_player(1, [-250.0, 0.0, 30.0], [-12.5, 0.0, 0.0]).is_none());
+        assert!(d
+            .check_player(1, [-250.0, 0.0, 30.0], [-12.5, 0.0, 0.0])
+            .is_none());
     }
 
     #[test]
     fn idle_near_boundary_no_handoff() {
         let d = detector();
-        assert!(d.check_player(1, [-50.0, 0.0, 30.0], [0.0, 0.3, 0.0]).is_none());
+        assert!(d
+            .check_player(1, [-50.0, 0.0, 30.0], [0.0, 0.3, 0.0])
+            .is_none());
     }
 
     #[test]
     fn nearest_edge_wins() {
         let d = detector();
         // Close to the north edge, moving north.
-        let c = d.check_player(1, [-2000.0, 3900.0, 30.0], [0.0, 20.0, 0.0]).unwrap();
+        let c = d
+            .check_player(1, [-2000.0, 3900.0, 30.0], [0.0, 20.0, 0.0])
+            .unwrap();
         assert_eq!(c.target_direction, BoundaryDirection::North);
     }
 }

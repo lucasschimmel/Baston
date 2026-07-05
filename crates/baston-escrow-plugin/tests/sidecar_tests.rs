@@ -27,7 +27,12 @@ fn starts_and_reports_ready() {
 fn decrypts_encrypted_payload() {
     let sidecar = SidecarDecryptor::spawn_with_command(stub_command()).expect("start");
     let out = sidecar
-        .decrypt("escrow-test", "dist/server/index.js", &fxap(b"console.log('ok')"), None)
+        .decrypt(
+            "escrow-test",
+            "dist/server/index.js",
+            &fxap(b"console.log('ok')"),
+            None,
+        )
         .expect("decrypt");
     assert_eq!(out, b"console.log('ok')");
 }

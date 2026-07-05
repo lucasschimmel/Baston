@@ -14,15 +14,19 @@ use std::net::UdpSocket;
 use std::sync::Arc;
 use std::time::Instant;
 
+use baston_config::OneSyncMode;
 use baston_protocol::events;
 use baston_protocol::native::NATIVE_RESULT_EVENT;
+use baston_protocol::rage::object_ids::MSG_REQUEST_OBJECT_IDS;
+use baston_protocol::rage::reliability::{self, GAME_STATE_ACK, GAME_STATE_NACK};
 use baston_protocol::udp::state::{self as state_msg, MSG_BASTON_STATE, STATE_UPDATE_EVENT};
 use baston_protocol::udp::{
-    handshake, host, read_message_type, time_sync, MSG_CONNECT, MSG_I_HOST, MSG_I_QUIT,
-    MSG_ROUTE, MSG_SERVER_EVENT, MSG_TIME_SYNC_REQ,
+    handshake, host, read_message_type, time_sync, MSG_CONNECT, MSG_I_HOST, MSG_I_QUIT, MSG_ROUTE,
+    MSG_SERVER_EVENT, MSG_TIME_SYNC_REQ,
 };
 use baston_protocol::PlayerDirectory;
 use baston_scripting::{NetOutbound, ScriptHost};
+use baston_zone::onesync::ServerGameState;
 use baston_zone::StateIngest;
 use rusty_enet as enet;
 use tokio::sync::mpsc;
@@ -44,6 +48,12 @@ pub enum UdpError {
 
 /// Commands other subsystems (native dispatch, client events) send to the
 /// UDP task.
+///
+/// Bounded so a stalled ENet pump can't let queued commands (mostly outbound
+/// snapshots) grow without limit. Overflow drops unreliable packets silently
+/// and logs reliable/drop commands.
+const CMD_CAPACITY: usize = 8192;
+
 #[derive(Debug)]
 pub enum UdpCommand {
     /// Send a raw message packet to a connected player.
@@ -60,28 +70,46 @@ pub enum UdpCommand {
 /// Cloneable handle to the UDP task.
 #[derive(Clone)]
 pub struct UdpHandle {
-    cmd_tx: mpsc::UnboundedSender<UdpCommand>,
+    cmd_tx: mpsc::Sender<UdpCommand>,
 }
 
 impl UdpHandle {
     /// Handle wired to nothing — sends are dropped. For tests that need a
     /// `StateAggregator` without an ENet host.
-    pub fn disconnected() -> (Self, mpsc::UnboundedReceiver<UdpCommand>) {
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    pub fn disconnected() -> (Self, mpsc::Receiver<UdpCommand>) {
+        let (cmd_tx, cmd_rx) = mpsc::channel(CMD_CAPACITY);
         (Self { cmd_tx }, cmd_rx)
     }
 
     pub fn send_to_source(&self, source: u32, channel: u8, data: Vec<u8>, reliable: bool) {
-        let _ = self.cmd_tx.send(UdpCommand::SendToSource {
+        match self.cmd_tx.try_send(UdpCommand::SendToSource {
             source,
             channel,
             data,
             reliable,
-        });
+        }) {
+            Ok(()) => {}
+            // Unreliable packets are safe to drop under overload; a dropped
+            // reliable packet is a real problem, so surface it.
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                if reliable {
+                    tracing::warn!(target: "udp", source, "reliable send dropped: command queue full");
+                }
+                metrics::counter!("udp_cmd_dropped_total").increment(1);
+            }
+            // Server task gone (shutdown) — stay silent.
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
+        }
     }
 
     pub fn drop_source(&self, source: u32) {
-        let _ = self.cmd_tx.send(UdpCommand::DropSource { source });
+        if self
+            .cmd_tx
+            .try_send(UdpCommand::DropSource { source })
+            .is_err()
+        {
+            tracing::warn!(target: "udp", source, "drop command not delivered: queue full or closed");
+        }
     }
 }
 
@@ -97,10 +125,26 @@ struct UdpServer {
     /// Non-OneSync session host: (netId, baseNum). The first client to send
     /// `msgIHost` becomes host (`IHostPacketHandler.h`).
     session_host: Option<(u32, u32)>,
+    /// Enhanced-host-support arbitration (sessionmanager parity): the client
+    /// currently cleared to host, with its grant deadline. A client that
+    /// fails a P2P join sends `hostingSession` and waits for a
+    /// `sessionHostResult` client event (NetHook.cpp HS_START_HOSTING).
+    current_hosting: Option<(u32, Instant)>,
+    /// Clients answered `wait` — notified `free` when the grant releases.
+    host_release_waiters: Vec<u32>,
     /// Phase C: validated client-state ingestion (None before wiring).
     state_ingest: Option<Arc<StateIngest>>,
     /// Phase D: forward client state to the player's current zone process.
     mesh_forward: Option<crate::mesh_forward::MeshForwarder>,
+    /// OneSync-NG: server-authoritative entity game state. `Some` when
+    /// `state_sync.onesync = "on"`; `None` keeps the msgRoute P2P relay.
+    onesync: Option<ServerGameState>,
+    /// Interest-management tuning for the outbound tick.
+    onesync_cfg: baston_zone::interest_ng::InterestConfig,
+    /// Best-effort per-client focus positions (from the state-report path),
+    /// driving OneSync-NG interest management until sync-node position parsing
+    /// lands.
+    focus_positions: HashMap<u32, [f32; 3]>,
 }
 
 /// Spawn the UDP/ENet server task. Returns a handle for outbound sends.
@@ -136,10 +180,20 @@ pub fn spawn_with_net(
     max_players: u32,
     players: Arc<PlayerDirectory>,
     script_host: ScriptHost,
-    net_rx: Option<mpsc::UnboundedReceiver<NetOutbound>>,
+    net_rx: Option<mpsc::Receiver<NetOutbound>>,
     state_ingest: Option<Arc<StateIngest>>,
 ) -> Result<UdpHandle, UdpError> {
-    spawn_with_mesh(port, poll_interval_ms, max_players, players, script_host, net_rx, state_ingest, None)
+    spawn_with_mesh(
+        port,
+        poll_interval_ms,
+        max_players,
+        players,
+        script_host,
+        net_rx,
+        state_ingest,
+        None,
+        OneSyncMode::Off,
+    )
 }
 
 /// Full-fat spawn: net bridge + local ingest + Phase D mesh forwarder.
@@ -150,9 +204,10 @@ pub fn spawn_with_mesh(
     max_players: u32,
     players: Arc<PlayerDirectory>,
     script_host: ScriptHost,
-    net_rx: Option<mpsc::UnboundedReceiver<NetOutbound>>,
+    net_rx: Option<mpsc::Receiver<NetOutbound>>,
     state_ingest: Option<Arc<StateIngest>>,
     mesh_forward: Option<crate::mesh_forward::MeshForwarder>,
+    onesync_mode: OneSyncMode,
 ) -> Result<UdpHandle, UdpError> {
     let socket =
         UdpSocket::bind(("0.0.0.0", port)).map_err(|source| UdpError::Bind { port, source })?;
@@ -176,7 +231,7 @@ pub fn spawn_with_mesh(
 
     tracing::info!(target: "baston", port, "UDP game transport (ENet) listening");
 
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (cmd_tx, cmd_rx) = mpsc::channel(CMD_CAPACITY);
     let server = UdpServer {
         host,
         players,
@@ -185,27 +240,45 @@ pub fn spawn_with_mesh(
         peer_sources: HashMap::new(),
         source_peers: HashMap::new(),
         session_host: None,
+        current_hosting: None,
+        host_release_waiters: Vec::new(),
         state_ingest,
         mesh_forward,
+        // Big mode is implied by OneSync-on in BASTON (Infinity-style); the
+        // length hack (Beyond, 16-bit ids) stays off until validated live.
+        onesync: onesync_mode
+            .is_enabled()
+            .then(|| ServerGameState::new(true, false)),
+        onesync_cfg: baston_zone::interest_ng::InterestConfig::default(),
+        focus_positions: HashMap::new(),
     };
+    if onesync_mode.is_enabled() {
+        tracing::info!(target: "baston", "OneSync-NG enabled: server-authoritative entity parsing");
+    }
     tokio::spawn(run(server, cmd_rx, net_rx, poll_interval_ms));
     Ok(UdpHandle { cmd_tx })
 }
 
 async fn run(
     mut server: UdpServer,
-    mut cmd_rx: mpsc::UnboundedReceiver<UdpCommand>,
-    net_rx: Option<mpsc::UnboundedReceiver<NetOutbound>>,
+    mut cmd_rx: mpsc::Receiver<UdpCommand>,
+    net_rx: Option<mpsc::Receiver<NetOutbound>>,
     poll_interval_ms: u64,
 ) {
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(poll_interval_ms.max(1)));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // OneSync-NG outbound sync cadence (~20 Hz). Idle when OneSync is off.
+    let mut sync_tick = tokio::time::interval(std::time::Duration::from_millis(50));
+    sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // A closed/absent bridge must not wedge the select loop.
     let mut net_rx = net_rx;
     loop {
         tokio::select! {
             _ = tick.tick() => {
                 server.pump().await;
+            }
+            _ = sync_tick.tick() => {
+                server.onesync_tick();
             }
             cmd = cmd_rx.recv() => {
                 match cmd {
@@ -235,7 +308,7 @@ async fn run(
 }
 
 /// Await the net bridge, pending forever when absent or closed.
-async fn recv_net(rx: &mut Option<mpsc::UnboundedReceiver<NetOutbound>>) -> Option<NetOutbound> {
+async fn recv_net(rx: &mut Option<mpsc::Receiver<NetOutbound>>) -> Option<NetOutbound> {
     match rx {
         Some(receiver) => match receiver.recv().await {
             Some(v) => Some(v),
@@ -248,9 +321,14 @@ async fn recv_net(rx: &mut Option<mpsc::UnboundedReceiver<NetOutbound>>) -> Opti
     }
 }
 
+/// How long a `hostingSession` grant stays reserved before the arbiter gives
+/// up on the client and frees the slot for waiters (sessionmanager: 5s).
+const HOSTING_GRANT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl UdpServer {
     /// Drain all pending ENet events.
     async fn pump(&mut self) {
+        self.expire_hosting_grant();
         loop {
             match self.host.service() {
                 Ok(Some(event)) => {
@@ -322,6 +400,9 @@ impl UdpServer {
             MSG_SERVER_EVENT => self.on_server_event(peer_id, payload).await,
             MSG_BASTON_STATE => self.on_state_update(peer_id, payload),
             MSG_ROUTE => self.on_route(peer_id, payload),
+            MSG_REQUEST_OBJECT_IDS => self.on_request_object_ids(peer_id),
+            GAME_STATE_NACK => self.on_game_state_nack(peer_id, payload),
+            GAME_STATE_ACK => self.on_game_state_ack(peer_id, payload),
             MSG_I_HOST => self.on_i_host(peer_id, payload),
             MSG_I_QUIT => {
                 self.host.peer_mut(peer_id).disconnect(0);
@@ -389,8 +470,17 @@ impl UdpServer {
     /// replicated convars, the `onPlayerJoining` client event, and the
     /// server-side `playerJoining` event.
     fn send_post_connect(&mut self, source: u32, is_baston_client: bool) {
+        let onesync_on = self.onesync.is_some();
+        // Register the connection in the game state so it can lease object ids
+        // and own entities.
+        if let Some(gs) = self.onesync.as_mut() {
+            gs.add_client(source);
+        }
+
         // msgConVars: msgpack map of ConVar_Replicated variables.
-        let convars = std::collections::BTreeMap::from([("onesync".to_owned(), "off".to_owned())]);
+        let onesync_value = if onesync_on { "on" } else { "off" };
+        let convars =
+            std::collections::BTreeMap::from([("onesync".to_owned(), onesync_value.to_owned())]);
         if let Ok(payload) = rmp_serde::to_vec(&convars) {
             let mut packet = baston_protocol::udp::hash_rage_string("msgConVars")
                 .to_le_bytes()
@@ -469,6 +559,17 @@ impl UdpServer {
         let Some(route) = baston_protocol::udp::route::parse_client_route(payload) else {
             return;
         };
+
+        // OneSync-NG: the server parses the clone stream authoritatively and
+        // acks it, instead of relaying opaque sync blobs P2P
+        // (RoutingPacketHandler.h: `if (IsOneSync()) ParseGameStatePacket`).
+        if self.onesync.is_some() {
+            self.on_clone_stream(source, route.data);
+            return;
+        }
+
+        // Non-OneSync relay: forward opaque GTA sync data to the target,
+        // rewriting the leading netId to the sender's.
         // Source can't be target.
         if u32::from(route.target_net_id) == source {
             return;
@@ -484,17 +585,127 @@ impl UdpServer {
         }
     }
 
+    /// OneSync-NG outbound sync tick: advance the frame, recompute each
+    /// client's interest set, and push the resulting `msgPackedClones`. Runs at
+    /// the state-sync cadence (~20 Hz). No-op when OneSync is off.
+    fn onesync_tick(&mut self) {
+        if self.onesync.is_none() {
+            return;
+        }
+        // Phase 1: build every client's packets while borrowing the game state.
+        let cfg = self.onesync_cfg;
+        let focus_positions = &self.focus_positions;
+        let mut outbound: Vec<(u32, Vec<Vec<u8>>)> = Vec::new();
+        {
+            let gs = self.onesync.as_mut().expect("checked above");
+            gs.update_player_positions(focus_positions);
+            gs.tick();
+            for source in gs.client_sources() {
+                let focus = focus_positions.get(&source).copied().unwrap_or([0.0; 3]);
+                let packets = gs.tick_client(source, focus, &cfg);
+                if !packets.is_empty() {
+                    outbound.push((source, packets));
+                }
+            }
+        }
+        // Phase 2: send (borrows self.host / command path).
+        for (source, packets) in outbound {
+            for data in packets {
+                // Clone stream goes unreliable on channel 1; NAKs recover loss.
+                self.handle_command(UdpCommand::SendToSource {
+                    source,
+                    channel: 1,
+                    data,
+                    reliable: false,
+                });
+            }
+        }
+    }
+
+    /// OneSync-NG inbound: ingest the client's clone stream into the server
+    /// game state and send back the resulting `msgPackedAcks`.
+    fn on_clone_stream(&mut self, source: u32, data: &[u8]) {
+        let Some(gs) = self.onesync.as_mut() else {
+            return;
+        };
+        let outcome = gs.ingest_clone_payload(source, data);
+        for packet in outcome.ack_packets {
+            // Acks go reliable on channel 1 (the game-state channel).
+            self.handle_command(UdpCommand::SendToSource {
+                source,
+                channel: 1,
+                data: packet,
+                reliable: true,
+            });
+        }
+    }
+
+    /// `gameStateNAck` (OneSync NAK mode): the client is missing frames or
+    /// couldn't apply some entities. Roll its delta baselines back so the next
+    /// tick re-sends what it missed (NG: no snapshot backlog, no drop).
+    fn on_game_state_nack(&mut self, peer_id: enet::PeerID, payload: &[u8]) {
+        let Some(&source) = self.peer_sources.get(&peer_id) else {
+            return;
+        };
+        let Some(gs) = self.onesync.as_mut() else {
+            return;
+        };
+        if let Some(nack) = reliability::parse_nack(payload) {
+            gs.apply_nack(source, &nack);
+        }
+    }
+
+    /// `gameStateAck` (OneSync ARQ mode): positive frame acknowledgement.
+    fn on_game_state_ack(&mut self, peer_id: enet::PeerID, payload: &[u8]) {
+        let Some(&source) = self.peer_sources.get(&peer_id) else {
+            return;
+        };
+        let Some(gs) = self.onesync.as_mut() else {
+            return;
+        };
+        if let Some(ack) = reliability::parse_ack(payload) {
+            gs.apply_ack(source, &ack);
+        }
+    }
+
+    /// `msgRequestObjectIds` (OneSync): lease a block of free object ids to the
+    /// requesting client and reply with `msgObjectIds`
+    /// (`RequestObjectIdsPacketHandler.cpp`). No-op when OneSync is off.
+    fn on_request_object_ids(&mut self, peer_id: enet::PeerID) {
+        let Some(&source) = self.peer_sources.get(&peer_id) else {
+            return;
+        };
+        let Some(gs) = self.onesync.as_mut() else {
+            return;
+        };
+        let n = gs.ids_per_request();
+        let (_ids, packet) = gs.lease_object_ids(source, n);
+        self.handle_command(UdpCommand::SendToSource {
+            source,
+            channel: 1,
+            data: packet,
+            reliable: true,
+        });
+    }
+
     /// `msgBastonState` (loadtest / binary path): validated state ingestion.
     fn on_state_update(&mut self, peer_id: enet::PeerID, payload: &[u8]) {
         let Some(&source) = self.peer_sources.get(&peer_id) else {
             return;
         };
-        let Some(ingest) = &self.state_ingest else {
-            tracing::debug!(target: "udp", source, "state update ignored: no ingest wired");
-            return;
-        };
         let Some(update) = state_msg::parse_state_update(payload) else {
             tracing::debug!(target: "udp", source, "malformed msgBastonState ignored");
+            return;
+        };
+        // OneSync-NG interest management is position-driven; capture the
+        // client's reported focus (hybrid feed until sync-node parsing lands).
+        if self.onesync.is_some() {
+            self.focus_positions.insert(source, update.coords);
+        }
+        // Clone the Arc so the mutable focus capture above doesn't clash with
+        // the ingest borrow.
+        let Some(ingest) = self.state_ingest.clone() else {
+            tracing::debug!(target: "udp", source, "state update ignored: no ingest wired");
             return;
         };
         // The binary path identifies a BASTON-native client: it consumes
@@ -561,6 +772,81 @@ impl UdpServer {
         self.broadcast_host(source as u16, base_num);
     }
 
+    /// `hostingSession`: a client asks to become the GTA session host after
+    /// a failed P2P join (NetHook.cpp HS_START_HOSTING). Reply mirrors the
+    /// FXServer sessionmanager resource: `conflict` when a live host exists,
+    /// `wait`/`free` when another grant is in flight, else `go`.
+    fn on_hosting_session(&mut self, source: u32) {
+        self.expire_hosting_grant();
+        // A live established host that isn't the asker → conflict.
+        if let Some((host, _)) = self.session_host {
+            if host != source && self.source_peers.contains_key(&host) {
+                tracing::info!(target: "baston", source, host, "hostingSession → conflict (live host)");
+                self.send_session_host_result(source, "conflict");
+                return;
+            }
+        }
+        match self.current_hosting {
+            Some((holder, _)) if holder == source => {
+                self.send_session_host_result(source, "go");
+            }
+            Some((holder, _)) => {
+                tracing::info!(target: "baston", source, holder, "hostingSession → wait");
+                self.host_release_waiters.push(source);
+                self.send_session_host_result(source, "wait");
+            }
+            None => {
+                tracing::info!(target: "baston", source, "hostingSession → go");
+                self.current_hosting = Some((source, Instant::now() + HOSTING_GRANT_TIMEOUT));
+                self.send_session_host_result(source, "go");
+            }
+        }
+    }
+
+    /// `hostedSession`: the granted client finished hosting — release the
+    /// grant and wake the waiters (they re-enter HS_LOADED and join it).
+    fn on_hosted_session(&mut self, source: u32) {
+        if self
+            .current_hosting
+            .is_some_and(|(holder, _)| holder == source)
+        {
+            self.release_hosting_grant();
+        }
+    }
+
+    fn expire_hosting_grant(&mut self) {
+        if self
+            .current_hosting
+            .is_some_and(|(_, deadline)| Instant::now() >= deadline)
+        {
+            tracing::info!(target: "baston", "hostingSession grant expired");
+            self.release_hosting_grant();
+        }
+    }
+
+    fn release_hosting_grant(&mut self) {
+        self.current_hosting = None;
+        let waiters = std::mem::take(&mut self.host_release_waiters);
+        for waiter in waiters {
+            self.send_session_host_result(waiter, "free");
+        }
+    }
+
+    /// `sessionHostResult` client event — single msgpack string argument
+    /// (NetHook.cpp hsInitFunction).
+    fn send_session_host_result(&mut self, to: u32, result: &str) {
+        let args = serde_json::json!([result]);
+        if let Ok(msgpack) = events::json_args_to_msgpack(&args.to_string()) {
+            let packet = events::build_net_event("sessionHostResult", &msgpack);
+            self.handle_command(UdpCommand::SendToSource {
+                source: to,
+                channel: 0,
+                data: packet,
+                reliable: true,
+            });
+        }
+    }
+
     fn broadcast_host(&mut self, net_id: u16, base_num: u32) {
         let packet = host::build_server_i_host(net_id, base_num);
         let peers: Vec<_> = self.peer_sources.keys().copied().collect();
@@ -616,6 +902,17 @@ impl UdpServer {
             }
         };
 
+        // Enhanced-host-support arbitration (sessionmanager parity) — handled
+        // by the gateway itself, not the script runtimes.
+        if event.name == "hostingSession" {
+            self.on_hosting_session(source);
+            return;
+        }
+        if event.name == "hostedSession" {
+            self.on_hosted_session(source);
+            return;
+        }
+
         if event.name == NATIVE_RESULT_EVENT {
             // args: [id, result]
             let (Some(id), result) = (
@@ -666,8 +963,25 @@ impl UdpServer {
             self.session_host = None;
             self.broadcast_host(0xFFFF, 0);
         }
+        // Arbitration bookkeeping: a leaving grant-holder frees the slot;
+        // a leaving waiter must not receive a dangling `free`.
+        self.host_release_waiters.retain(|&w| w != source);
+        if self
+            .current_hosting
+            .is_some_and(|(holder, _)| holder == source)
+        {
+            self.release_hosting_grant();
+        }
         if let Some(ingest) = &self.state_ingest {
             ingest.on_player_dropped(source);
+        }
+        // OneSync-NG: release the client's object-id leases and orphan the
+        // entities it owned (migration to a survivor is task 6/7).
+        if let Some(gs) = self.onesync.as_mut() {
+            let orphaned = gs.remove_client(source);
+            if !orphaned.is_empty() {
+                tracing::debug!(target: "udp", source, count = orphaned.len(), "orphaned entities on drop");
+            }
         }
         let name = self
             .players

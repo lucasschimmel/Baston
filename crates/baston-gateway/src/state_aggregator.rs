@@ -28,7 +28,7 @@ use crate::udp::UdpHandle;
 /// Update cadence per entity distance (jalon C5 variable rates).
 pub fn update_rate_for_distance(dist: f32) -> Duration {
     match dist as u32 {
-        0..=99 => Duration::from_millis(50),    // 20fps
+        0..=99 => Duration::from_millis(50),     // 20fps
         100..=299 => Duration::from_millis(100), // 10fps
         _ => Duration::from_millis(500),         // 2fps
     }
@@ -164,7 +164,10 @@ impl StateAggregator {
         let mut tick: u64 = 0;
         // Parallel fan-out: the per-client AoI work is O(clients × visible)
         // and saturates one core well before 2000 clients on a single task.
-        let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(16);
         loop {
             interval.tick().await;
             tick += 1;
@@ -261,7 +264,10 @@ impl SpatialGrid {
         let mut cells: HashMap<(i32, i32), Vec<EntityState>> = HashMap::new();
         for entry in world.iter() {
             let s = entry.value();
-            let key = ((s.coords[0] / cell).floor() as i32, (s.coords[1] / cell).floor() as i32);
+            let key = (
+                (s.coords[0] / cell).floor() as i32,
+                (s.coords[1] / cell).floor() as i32,
+            );
             cells.entry(key).or_default().push(s.clone());
         }
         Self { cell, cells }
@@ -272,9 +278,7 @@ impl SpatialGrid {
         let cx = (center[0] / self.cell).floor() as i32;
         let cy = (center[1] / self.cell).floor() as i32;
         (-1..=1).flat_map(move |dx| {
-            (-1..=1).flat_map(move |dy| {
-                self.cells.get(&(cx + dx, cy + dy)).into_iter().flatten()
-            })
+            (-1..=1).flat_map(move |dy| self.cells.get(&(cx + dx, cy + dy)).into_iter().flatten())
         })
     }
 }
@@ -427,7 +431,9 @@ mod tests {
         let mut tracker = ClientEntityTracker::default();
         let ops = compute_client_ops(&world, &mut tracker, 1, CENTER, 450.0);
         assert_eq!(ops.len(), 1);
-        assert!(matches!(&ops[0], EntityOp::Upsert(d) if d.dirty_fields.contains(DirtyFlags::CREATED)));
+        assert!(
+            matches!(&ops[0], EntityOp::Upsert(d) if d.dirty_fields.contains(DirtyFlags::CREATED))
+        );
     }
 
     #[test]
@@ -457,7 +463,9 @@ mod tests {
         world.insert(id, entity.clone());
         let ops = compute_client_ops(&world, &mut tracker, 1, CENTER, 450.0);
         assert_eq!(ops.len(), 1);
-        assert!(matches!(&ops[0], EntityOp::Upsert(d) if d.dirty_fields.contains(DirtyFlags::CREATED)));
+        assert!(
+            matches!(&ops[0], EntityOp::Upsert(d) if d.dirty_fields.contains(DirtyFlags::CREATED))
+        );
 
         // Still in range, moved again → field-level delta (coords only).
         std::thread::sleep(update_rate_for_distance(100.0));
@@ -484,7 +492,10 @@ mod tests {
         let id = entity.entity_id;
         let world = world_with(vec![entity.clone()]);
         let mut tracker = ClientEntityTracker::default();
-        assert_eq!(compute_client_ops(&world, &mut tracker, 1, CENTER, 450.0).len(), 1);
+        assert_eq!(
+            compute_client_ops(&world, &mut tracker, 1, CENTER, 450.0).len(),
+            1
+        );
 
         entity.coords = [1000.0, 0.0, 0.0];
         world.insert(id, entity);
@@ -501,7 +512,10 @@ mod tests {
         // 350m away → 500ms cadence: an immediate second tick sends nothing.
         let world = world_with(vec![entity_at([350.0, 0.0, 0.0], Some(2))]);
         let mut tracker = ClientEntityTracker::default();
-        assert_eq!(compute_client_ops(&world, &mut tracker, 1, CENTER, 450.0).len(), 1);
+        assert_eq!(
+            compute_client_ops(&world, &mut tracker, 1, CENTER, 450.0).len(),
+            1
+        );
         assert!(compute_client_ops(&world, &mut tracker, 1, CENTER, 450.0).is_empty());
 
         // 50m away → 50ms cadence.

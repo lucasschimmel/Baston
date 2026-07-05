@@ -180,11 +180,19 @@ impl ZoneRegistry {
 
     /// Clone of a zone's gRPC client (cheap: channels are ref-counted).
     pub async fn zone_client(&self, zone_id: &str) -> Option<ZoneServiceClient<Channel>> {
-        self.zones.read().await.get(zone_id).map(|z| z.grpc_client.clone())
+        self.zones
+            .read()
+            .await
+            .get(zone_id)
+            .map(|z| z.grpc_client.clone())
     }
 
     pub async fn zone_grpc_addr(&self, zone_id: &str) -> Option<String> {
-        self.zones.read().await.get(zone_id).map(|z| z.grpc_addr.clone())
+        self.zones
+            .read()
+            .await
+            .get(zone_id)
+            .map(|z| z.grpc_addr.clone())
     }
 
     pub async fn zone_bounds(&self, zone_id: &str) -> Option<Aabb> {
@@ -253,23 +261,44 @@ mod tests {
     #[tokio::test]
     async fn register_appears_in_registry_and_routes() {
         let reg = registry();
-        reg.register_zone("zone-a", Aabb::new(-4000.0, -4000.0, 0.0, 4000.0), "127.0.0.1:50051", 1500)
-            .await
-            .unwrap();
-        reg.register_zone("zone-b", Aabb::new(0.0, -4000.0, 4000.0, 4000.0), "127.0.0.1:50052", 1500)
-            .await
-            .unwrap();
+        reg.register_zone(
+            "zone-a",
+            Aabb::new(-4000.0, -4000.0, 0.0, 4000.0),
+            "127.0.0.1:50051",
+            1500,
+        )
+        .await
+        .unwrap();
+        reg.register_zone(
+            "zone-b",
+            Aabb::new(0.0, -4000.0, 4000.0, 4000.0),
+            "127.0.0.1:50052",
+            1500,
+        )
+        .await
+        .unwrap();
         assert!(reg.contains("zone-a").await);
-        assert_eq!(reg.find_zone_for_coords(-500.0, 200.0).await.as_deref(), Some("zone-a"));
-        assert_eq!(reg.find_zone_for_coords(1500.0, -300.0).await.as_deref(), Some("zone-b"));
+        assert_eq!(
+            reg.find_zone_for_coords(-500.0, 200.0).await.as_deref(),
+            Some("zone-a")
+        );
+        assert_eq!(
+            reg.find_zone_for_coords(1500.0, -300.0).await.as_deref(),
+            Some("zone-b")
+        );
     }
 
     #[tokio::test]
     async fn silent_zone_is_evicted() {
         let reg = registry();
-        reg.register_zone("zone-a", Aabb::new(-4000.0, -4000.0, 0.0, 4000.0), "127.0.0.1:50051", 1500)
-            .await
-            .unwrap();
+        reg.register_zone(
+            "zone-a",
+            Aabb::new(-4000.0, -4000.0, 0.0, 4000.0),
+            "127.0.0.1:50051",
+            1500,
+        )
+        .await
+        .unwrap();
         tokio::time::sleep(Duration::from_millis(150)).await;
         let evicted = reg.evict_silent_zones().await;
         assert_eq!(evicted, vec!["zone-a".to_string()]);
@@ -282,15 +311,28 @@ mod tests {
     #[tokio::test]
     async fn heartbeat_keeps_zone_alive_and_updates_load() {
         let reg = registry();
-        reg.register_zone("zone-a", Aabb::new(-4000.0, -4000.0, 0.0, 4000.0), "127.0.0.1:50051", 1500)
-            .await
-            .unwrap();
-        reg.register_zone("zone-b", Aabb::new(0.0, -4000.0, 4000.0, 4000.0), "127.0.0.1:50052", 1500)
-            .await
-            .unwrap();
+        reg.register_zone(
+            "zone-a",
+            Aabb::new(-4000.0, -4000.0, 0.0, 4000.0),
+            "127.0.0.1:50051",
+            1500,
+        )
+        .await
+        .unwrap();
+        reg.register_zone(
+            "zone-b",
+            Aabb::new(0.0, -4000.0, 4000.0, 4000.0),
+            "127.0.0.1:50052",
+            1500,
+        )
+        .await
+        .unwrap();
         assert!(reg.heartbeat("zone-a", 40, 100).await);
         assert!(reg.heartbeat("zone-b", 10, 30).await);
-        assert_eq!(reg.find_least_loaded_zone().await.as_deref(), Some("zone-b"));
+        assert_eq!(
+            reg.find_least_loaded_zone().await.as_deref(),
+            Some("zone-b")
+        );
         tokio::time::sleep(Duration::from_millis(60)).await;
         assert!(reg.heartbeat("zone-a", 40, 100).await);
         tokio::time::sleep(Duration::from_millis(60)).await;

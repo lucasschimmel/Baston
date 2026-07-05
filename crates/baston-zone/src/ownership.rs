@@ -21,10 +21,7 @@ pub type OwnerChangedCallback = Arc<dyn Fn(EntityId, Option<u32>) + Send + Sync>
 
 /// Pick the owner for an entity: the nearest player among `players`
 /// (source, coords) pairs. `None` when no player is connected.
-pub fn assign_network_owner(
-    entity: &EntityState,
-    players: &[(u32, [f32; 3])],
-) -> Option<u32> {
+pub fn assign_network_owner(entity: &EntityState, players: &[(u32, [f32; 3])]) -> Option<u32> {
     players
         .iter()
         .min_by(|(_, a), (_, b)| {
@@ -86,7 +83,10 @@ impl OwnershipMonitor {
                 if best == entity.network_owner {
                     continue;
                 }
-                if self.entity_manager.set_network_owner(entity.entity_id, best) {
+                if self
+                    .entity_manager
+                    .set_network_owner(entity.entity_id, best)
+                {
                     tracing::info!(
                         target: "zone",
                         entity_id = %entity.entity_id,

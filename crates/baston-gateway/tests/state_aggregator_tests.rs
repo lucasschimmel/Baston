@@ -58,16 +58,10 @@ async fn zone_to_client_snapshot_end_to_end() {
         });
     }
     let (udp, mut cmd_rx) = UdpHandle::disconnected();
-    let aggregator = StateAggregator::new(
-        client.clone(),
-        players,
-        Arc::clone(&ingest),
-        udp,
-        450.0,
-        20,
-    )
-    .with_consumer_name(format!("test-{}", uuid::Uuid::new_v4().simple()))
-    .spawn();
+    let aggregator =
+        StateAggregator::new(client.clone(), players, Arc::clone(&ingest), udp, 450.0, 20)
+            .with_consumer_name(format!("test-{}", uuid::Uuid::new_v4().simple()))
+            .spawn();
 
     // Give the durable consumer a moment to attach before publishing.
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -105,8 +99,16 @@ async fn zone_to_client_snapshot_end_to_end() {
             })
             .collect()
     };
-    assert_eq!(upserts(&got[&1]), vec![p2_entity], "client 1 sees player 2 only");
-    assert_eq!(upserts(&got[&2]), vec![p1_entity], "client 2 sees player 1 only");
+    assert_eq!(
+        upserts(&got[&1]),
+        vec![p2_entity],
+        "client 1 sees player 2 only"
+    );
+    assert_eq!(
+        upserts(&got[&2]),
+        vec![p1_entity],
+        "client 2 sees player 1 only"
+    );
 
     assert_eq!(aggregator.world_state().len(), 2);
 }

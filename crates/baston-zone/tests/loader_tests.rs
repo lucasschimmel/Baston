@@ -106,7 +106,12 @@ async fn plain_resource_unaffected_by_decryptor_pipeline() {
     // Non-regression: with the default PlainDecryptor, a plain resource loads
     // and starts exactly as before D-bis.
     let dir = tempfile::tempdir().unwrap();
-    write_resource(dir.path(), "axiom-core", &[], "console.log('[axiom-core] up')");
+    write_resource(
+        dir.path(),
+        "axiom-core",
+        &[],
+        "console.log('[axiom-core] up')",
+    );
 
     let manager = manager(dir.path());
     manager.discover().await.expect("discover");

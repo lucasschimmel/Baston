@@ -1,0 +1,12 @@
+# Machine-local cargo config — COPY to `.cargo/config.toml` (git-ignored) and
+# edit for your machine. Do NOT commit `.cargo/config.toml`: an absolute path
+# here breaks every other checkout and the CI build cache (Swatinem/rust-cache
+# expects the default `target/`).
+#
+# When you need it: the `v8` crate's build.rs creates a Windows symlink when the
+# cargo target dir and the cargo registry live on different drives (e.g. target
+# on D: but registry on C:), which fails without Developer Mode. Pinning the
+# target dir to the registry's drive avoids it.
+#
+# [build]
+# target-dir = "C:/Users/<you>/.cache/baston-target"

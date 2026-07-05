@@ -114,9 +114,7 @@ fn parse_args() -> Args {
                 args.clients_per_zone = Some(value().parse().expect("--clients-per-zone N"))
             }
             "--handoffs" => args.handoffs = value().parse().expect("--handoffs true|false"),
-            "--zone-metrics" => {
-                args.zone_metrics = value().split(',').map(str::to_owned).collect()
-            }
+            "--zone-metrics" => args.zone_metrics = value().split(',').map(str::to_owned).collect(),
             other => {
                 eprintln!("unknown flag: {other}");
                 std::process::exit(2);
@@ -136,12 +134,15 @@ fn plan_for(index: usize, args: &Args) -> ClientPlan {
     let y = ((h >> 32) % 3800) as f32 - 1900.0;
     if args.zones <= 1 {
         let x = ((h >> 8) % 4000) as f32 - 2000.0;
-        return ClientPlan { spawn: [x, y, 20.0], crosser: false };
+        return ClientPlan {
+            spawn: [x, y, 20.0],
+            crosser: false,
+        };
     }
     let zone = index % args.zones;
     let band = 8000.0 / args.zones as f32;
     let x_min = -4000.0 + zone as f32 * band;
-    let crosser = args.handoffs && index % 10 == 0 && args.zones == 2;
+    let crosser = args.handoffs && index.is_multiple_of(10) && args.zones == 2;
     if crosser {
         // 350m inside the zone next to the x = 0 boundary, clustered in a
         // ±200m y-band so crossers keep each other inside their AoI: their
@@ -152,7 +153,10 @@ fn plan_for(index: usize, args: &Args) -> ClientPlan {
         // all crossers into one hyper-dense blob.
         let y = ((index / 10 % 34) as f32) * 120.0 - 2000.0;
         let x = if zone == 0 { -350.0 } else { 350.0 };
-        return ClientPlan { spawn: [x, y, 20.0], crosser: true };
+        return ClientPlan {
+            spawn: [x, y, 20.0],
+            crosser: true,
+        };
     }
     let x = {
         // Walkers stay ≥ 500m from any boundary: at 1.5 m/s over 300s they
@@ -160,7 +164,10 @@ fn plan_for(index: usize, args: &Args) -> ClientPlan {
         // the handoff success denominator stays honest.
         x_min + 500.0 + ((h >> 8) as f32 % (band - 1000.0))
     };
-    ClientPlan { spawn: [x, y, 20.0], crosser: false }
+    ClientPlan {
+        spawn: [x, y, 20.0],
+        crosser: false,
+    }
 }
 
 #[tokio::main]
@@ -184,9 +191,7 @@ async fn main() {
     let http = reqwest::Client::new();
     let mut tokens = Vec::with_capacity(args.clients);
     for i in 0..args.clients {
-        let body = format!(
-            "method=initConnect&name=load-{i}&protocol=12&gameName=gta5&guid={i}"
-        );
+        let body = format!("method=initConnect&name=load-{i}&protocol=12&gameName=gta5&guid={i}");
         let response = http
             .post(format!("{http_base}/client"))
             .body(body)
@@ -236,7 +241,9 @@ async fn main() {
                 l.strip_prefix("handoffs_committed_total ")
                     .and_then(|v| v.trim().parse::<f64>().ok())
             }) {
-                stats.handoffs_committed_at_start.store(v as u64, Ordering::Relaxed);
+                stats
+                    .handoffs_committed_at_start
+                    .store(v as u64, Ordering::Relaxed);
             }
         }
     }

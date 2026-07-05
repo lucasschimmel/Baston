@@ -185,11 +185,13 @@ impl StateIngest {
             velocity: update.velocity,
             health: update.health,
             armour: update.armour,
-            extra: update.extra.clone().unwrap_or(EntityExtra::Object {
-                is_static: false,
-            }),
+            extra: update
+                .extra
+                .clone()
+                .unwrap_or(EntityExtra::Object { is_static: false }),
         });
-        self.last_accepted.insert(id, (Instant::now(), update.coords));
+        self.last_accepted
+            .insert(id, (Instant::now(), update.coords));
         tracing::info!(target: "zone", source, entity_id = %id,
             entity_type = ?update.entity_type, "client entity registered");
         id
@@ -321,7 +323,11 @@ mod tests {
         });
         ingest.apply(2, register).unwrap();
         assert_eq!(
-            ingest.entity_manager().get(vehicle_id).unwrap().network_owner,
+            ingest
+                .entity_manager()
+                .get(vehicle_id)
+                .unwrap()
+                .network_owner,
             Some(2)
         );
 
@@ -333,7 +339,11 @@ mod tests {
         });
         ingest.apply(1, mount).unwrap();
         assert_eq!(
-            ingest.entity_manager().get(vehicle_id).unwrap().network_owner,
+            ingest
+                .entity_manager()
+                .get(vehicle_id)
+                .unwrap()
+                .network_owner,
             Some(1)
         );
 

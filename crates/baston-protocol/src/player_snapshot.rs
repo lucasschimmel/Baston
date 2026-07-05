@@ -54,8 +54,10 @@ mod tests {
     #[test]
     fn snapshot_roundtrip() {
         let mut script_state = HashMap::new();
-        script_state
-            .insert("axiom-core".to_string(), r#"{"characterId":42}"#.to_string());
+        script_state.insert(
+            "axiom-core".to_string(),
+            r#"{"characterId":42}"#.to_string(),
+        );
         let snap = PlayerStateSnapshot {
             source_id: 7,
             name: "Lucas".into(),

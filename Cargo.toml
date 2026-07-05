@@ -41,6 +41,12 @@ prost = "0.13"
 sha1 = { version = "0.10", features = ["oid"] }
 base64 = "0.22"
 hex = "0.4"
+# Constant-time byte comparison for admin-token checks (already in the tree via rsa).
+subtle = "2"
+# Raw LZ4 block bindings — needed for the dictionary variants
+# (LZ4_compress_fast_continue / LZ4_decompress_safe_usingDict) that the
+# OneSync clone stream uses. lz4_flex has no external-dictionary support.
+lz4-sys = "1.11"
 
 baston-config = { path = "crates/baston-config" }
 baston-core = { path = "crates/baston-core" }

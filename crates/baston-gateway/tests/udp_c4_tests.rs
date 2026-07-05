@@ -210,7 +210,11 @@ async fn msg_route_is_relayed_between_clients() {
             if let Some((channel, payload)) =
                 b.wait_for_message(MSG_ROUTE, Duration::from_millis(300))
             {
-                return (channel, payload, a.wait_for_message(MSG_ROUTE, Duration::from_millis(200)));
+                return (
+                    channel,
+                    payload,
+                    a.wait_for_message(MSG_ROUTE, Duration::from_millis(200)),
+                );
             }
             assert!(Instant::now() < deadline, "route never relayed to B");
         }
@@ -283,9 +287,15 @@ async fn snapshot_pipeline_between_two_clients() {
         // Phase 1: B must receive A's entity as a CREATED upsert.
         let a_entity;
         loop {
-            a.send(1, &build_state_update(&state_update(offset([0.0, 0.0, 0.0]))));
+            a.send(
+                1,
+                &build_state_update(&state_update(offset([0.0, 0.0, 0.0]))),
+            );
             a.pump();
-            b.send(1, &build_state_update(&state_update(offset([100.0, 0.0, 0.0]))));
+            b.send(
+                1,
+                &build_state_update(&state_update(offset([100.0, 0.0, 0.0]))),
+            );
             if let Some((_, payload)) =
                 b.wait_for_message(MSG_BASTON_SNAPSHOT, Duration::from_millis(300))
             {
@@ -310,15 +320,20 @@ async fn snapshot_pipeline_between_two_clients() {
         // Phase 2: A moves; B sees a non-CREATED update with new coords.
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
-            a.send(1, &build_state_update(&state_update(offset([5.0, 0.0, 0.0]))));
+            a.send(
+                1,
+                &build_state_update(&state_update(offset([5.0, 0.0, 0.0]))),
+            );
             a.pump();
             if let Some((_, payload)) =
                 b.wait_for_message(MSG_BASTON_SNAPSHOT, Duration::from_millis(300))
             {
                 let snapshot = parse_snapshot(&payload).unwrap();
-                let moved = snapshot.ops.iter().any(|op| matches!(op,
+                let moved = snapshot.ops.iter().any(|op| {
+                    matches!(op,
                     EntityOp::Delta(d)
-                        if d.entity_id == a_entity && d.coords == Some(offset([5.0, 0.0, 0.0]))));
+                        if d.entity_id == a_entity && d.coords == Some(offset([5.0, 0.0, 0.0])))
+                });
                 if moved {
                     break;
                 }
@@ -330,7 +345,10 @@ async fn snapshot_pipeline_between_two_clients() {
         drop(a);
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
-            b.send(1, &build_state_update(&state_update(offset([100.0, 0.0, 0.0]))));
+            b.send(
+                1,
+                &build_state_update(&state_update(offset([100.0, 0.0, 0.0]))),
+            );
             if let Some((_, payload)) =
                 b.wait_for_message(MSG_BASTON_SNAPSHOT, Duration::from_millis(300))
             {
@@ -348,7 +366,10 @@ async fn snapshot_pipeline_between_two_clients() {
 
         // Phase 4: B keeps reporting; B must never receive its own entity.
         for _ in 0..10 {
-            b.send(1, &build_state_update(&state_update(offset([100.0, 0.0, 0.0]))));
+            b.send(
+                1,
+                &build_state_update(&state_update(offset([100.0, 0.0, 0.0]))),
+            );
             if let Some((_, payload)) =
                 b.wait_for_message(MSG_BASTON_SNAPSHOT, Duration::from_millis(100))
             {

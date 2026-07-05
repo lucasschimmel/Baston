@@ -9,9 +9,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use baston_protocol::entity::{
-    DirtyEntity, DirtyFlags, EntityId, EntityState, EntityStateUpdate,
-};
+use baston_protocol::entity::{DirtyEntity, DirtyFlags, EntityId, EntityState, EntityStateUpdate};
 use dashmap::DashMap;
 
 #[derive(Default)]
@@ -290,7 +288,10 @@ mod tests {
         );
         let dirty = mgr.flush_dirty();
         assert_eq!(dirty.len(), 1);
-        assert_eq!(dirty[0].dirty_fields, DirtyFlags::COORDS | DirtyFlags::HEALTH);
+        assert_eq!(
+            dirty[0].dirty_fields,
+            DirtyFlags::COORDS | DirtyFlags::HEALTH
+        );
         assert_eq!(dirty[0].state.health, 80.0);
     }
 

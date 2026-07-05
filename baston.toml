@@ -4,6 +4,9 @@
 name = "BASTON Dev"
 port = 30120
 max_players = 32
+# All clients must run the same GTA build for non-OneSync P2P sync; the
+# client auto-switches builds pre-connect when this is advertised.
+enforce_game_build = "3258"
 
 [auth]
 # RSA public key endpoint for offline CFX ticket verification
@@ -27,6 +30,21 @@ deferral_timeout_secs = 10
 hot_reload = true
 # Phase B: real CFX auth. Flip to true only for offline dev without a launcher.
 auth_bypass = false
+
+# CFX server-licence integration. BASTON never validates a licence itself and
+# never talks to CFX — the genuine, unmodified FXServer component does. See
+# docs/licensing.md.
+[license]
+# "off"      : no check (dev/LAN only — warns every boot). Default for this dev cfg.
+# "gate"     : require a well-formed sv_license_key in config (shape only, no sidecar).
+# "verified" : run the official FXServer sidecar to validate the key against CFX and
+#              enforce the verdict + entitlements locally (Windows + --features escrow).
+mode = "off"
+# Your CFX server licence, created at https://portal.cfx.re. Required for gate/verified.
+sv_license_key = ""
+# mode = "verified": path to an official FXServer.exe you downloaded from CFX.
+# BASTON never ships this binary. Shares one sidecar process with [escrow] when both on.
+# fxserver_path = "Artifacts/windows/31623/FXServer.exe"
 
 # CFX Asset Escrow support (Phase D-bis). Off by default. See
 # docs/escrow-support.md. Requires a Windows build with `--features escrow`.

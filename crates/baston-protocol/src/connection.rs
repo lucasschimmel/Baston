@@ -83,7 +83,12 @@ impl InitConnectResponse {
             bit_version: NET_BIT_VERSION,
             pure: 0,
             script_hook_allowed: false,
-            enhanced_host_support: false,
+            // FXServer sends `sv_enhancedHostSupport && !IsOneSync()`; BASTON
+            // is always non-OneSync and the gateway implements the
+            // sessionmanager arbitration (hostingSession/sessionHostResult),
+            // so the client can fall back to hosting when a P2P join fails
+            // instead of failing fast (NetHook.cpp HS_JOIN_FAILURE).
+            enhanced_host_support: true,
             onesync: false,
             onesync_big: false,
             onesync_lh: false,

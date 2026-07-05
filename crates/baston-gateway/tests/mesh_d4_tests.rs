@@ -46,11 +46,12 @@ async fn collect_updates(
     while out.len() < n {
         let msg = tokio::time::timeout_at(deadline, sub.next()).await;
         let Ok(Some(msg)) = msg else { break };
-        let ((source, update), _) = bincode::serde::decode_from_slice::<
-            (u32, ClientStateUpdate),
-            _,
-        >(&msg.payload, bincode::config::standard())
-        .unwrap();
+        let ((source, update), _) =
+            bincode::serde::decode_from_slice::<(u32, ClientStateUpdate), _>(
+                &msg.payload,
+                bincode::config::standard(),
+            )
+            .unwrap();
         out.push((source, update));
     }
     out
@@ -96,13 +97,20 @@ async fn forwarder_routes_to_current_zone_and_holds_during_handoff() {
         fwd.forward(1, update(i as f32));
     }
     let got_b = collect_updates(&mut sub_b, 5, Duration::from_secs(2)).await;
-    assert_eq!(got_b.len(), 5, "all 5 held updates must be flushed to zone B");
+    assert_eq!(
+        got_b.len(),
+        5,
+        "all 5 held updates must be flushed to zone B"
+    );
     // Order preserved.
     let xs: Vec<f32> = got_b.iter().map(|(_, u)| u.coords[0]).collect();
     assert_eq!(xs, vec![0.0, 1.0, 2.0, 3.0, 4.0]);
     // Nothing extra leaked to zone A.
     let extra_a = collect_updates(&mut sub_a, 1, Duration::from_millis(300)).await;
-    assert!(extra_a.is_empty(), "no update may reach the old zone after commit");
+    assert!(
+        extra_a.is_empty(),
+        "no update may reach the old zone after commit"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -126,11 +134,20 @@ async fn entity_handoff_spawns_in_target_zone() {
         velocity: [20.0, 0.0, 0.0],
         health: 1000.0,
         armour: 0.0,
-        extra: EntityExtra::Vehicle { speed: 20.0, engine_health: 1000.0, doors_open: 0 },
+        extra: EntityExtra::Vehicle {
+            speed: 20.0,
+            engine_health: 1000.0,
+            doors_open: 0,
+        },
     };
-    let payload = EntityHandoffPayload { entity: entity.clone(), from_zone: "zone-eho-a".into() };
+    let payload = EntityHandoffPayload {
+        entity: entity.clone(),
+        from_zone: "zone-eho-a".into(),
+    };
     let bytes = bincode::serde::encode_to_vec(&payload, bincode::config::standard()).unwrap();
-    nats.publish(entity_handoff_subject("zone-eho-b"), bytes.into()).await.unwrap();
+    nats.publish(entity_handoff_subject("zone-eho-b"), bytes.into())
+        .await
+        .unwrap();
 
     // Wait for the consumer to apply it.
     for _ in 0..40 {
@@ -139,7 +156,9 @@ async fn entity_handoff_spawns_in_target_zone() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let received = em_b.get(entity.entity_id).expect("entity must exist in zone B");
+    let received = em_b
+        .get(entity.entity_id)
+        .expect("entity must exist in zone B");
     assert_eq!(received.model_hash, 0xABCDEF);
     assert_eq!(received.entity_type, EntityType::Vehicle);
 }

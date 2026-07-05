@@ -31,11 +31,18 @@ pub struct GatewayMesh {
 
 impl GatewayMesh {
     pub fn new(registry: Arc<ZoneRegistry>, router: Arc<ConnectionRouter>) -> Arc<Self> {
-        Arc::new(Self { registry, router, on_handoff_committed: std::sync::RwLock::new(None) })
+        Arc::new(Self {
+            registry,
+            router,
+            on_handoff_committed: std::sync::RwLock::new(None),
+        })
     }
 
     pub fn set_handoff_committed_hook(&self, hook: HandoffCommittedHook) {
-        *self.on_handoff_committed.write().expect("hook lock poisoned") = Some(hook);
+        *self
+            .on_handoff_committed
+            .write()
+            .expect("hook lock poisoned") = Some(hook);
     }
 
     /// Route a newly connected player: quadtree lookup on spawn coords, else
@@ -73,7 +80,11 @@ impl GatewayMesh {
         let total = orphaned.len();
         let (mut rerouted, mut kicked) = (0, 0);
         for source in orphaned {
-            match self.registry.find_least_loaded_zone_excluding(Some(failed_zone)).await {
+            match self
+                .registry
+                .find_least_loaded_zone_excluding(Some(failed_zone))
+                .await
+            {
                 Some(fallback) => {
                     self.router.commit_handoff(source, &fallback).await;
                     rerouted += 1;
@@ -99,8 +110,10 @@ impl GatewayMesh {
         let players = self.router.players_in_zone(zone_id);
         let mut moved = 0;
         for source in players {
-            let Some(fallback) =
-                self.registry.find_least_loaded_zone_excluding(Some(zone_id)).await
+            let Some(fallback) = self
+                .registry
+                .find_least_loaded_zone_excluding(Some(zone_id))
+                .await
             else {
                 tracing::error!(target: "gateway",
                     "drain {zone_id}: no fallback zone available — player={source} left in place");
@@ -150,11 +163,22 @@ impl GatewayService for GatewayGrpc {
         match self
             .mesh
             .registry
-            .register_zone(&req.zone_id, bounds, &req.grpc_addr, req.max_players.max(0) as u32)
+            .register_zone(
+                &req.zone_id,
+                bounds,
+                &req.grpc_addr,
+                req.max_players.max(0) as u32,
+            )
             .await
         {
-            Ok(()) => Ok(Response::new(RegisterZoneResponse { accepted: true, message: String::new() })),
-            Err(e) => Ok(Response::new(RegisterZoneResponse { accepted: false, message: e })),
+            Ok(()) => Ok(Response::new(RegisterZoneResponse {
+                accepted: true,
+                message: String::new(),
+            })),
+            Err(e) => Ok(Response::new(RegisterZoneResponse {
+                accepted: false,
+                message: e,
+            })),
         }
     }
 
@@ -201,8 +225,12 @@ impl GatewayService for GatewayGrpc {
                 target_zone_grpc: String::new(),
             }));
         };
-        let target_zone_grpc =
-            self.mesh.registry.zone_grpc_addr(&target_zone).await.unwrap_or_default();
+        let target_zone_grpc = self
+            .mesh
+            .registry
+            .zone_grpc_addr(&target_zone)
+            .await
+            .unwrap_or_default();
 
         let Some(mut client) = self.mesh.registry.zone_client(&target_zone).await else {
             return Ok(Response::new(PrepareHandoffResponse {
@@ -273,7 +301,10 @@ impl GatewayService for GatewayGrpc {
             }));
         }
         // Atomic commit: lock → update routing table → release. Notify after.
-        self.mesh.router.commit_handoff(req.player_id, &req.to_zone).await;
+        self.mesh
+            .router
+            .commit_handoff(req.player_id, &req.to_zone)
+            .await;
         if let Some(hook) = self
             .mesh
             .on_handoff_committed
@@ -284,6 +315,9 @@ impl GatewayService for GatewayGrpc {
             hook(req.player_id, &req.from_zone, &req.to_zone);
         }
         metrics::counter!("handoffs_committed_total").increment(1);
-        Ok(Response::new(ConfirmHandoffResponse { ok: true, message: String::new() }))
+        Ok(Response::new(ConfirmHandoffResponse {
+            ok: true,
+            message: String::new(),
+        }))
     }
 }

@@ -76,9 +76,9 @@ impl StateSyncEmitter {
             let now = Instant::now();
             // Jitter = deviation of the actual tick period from the target.
             if let Some(prev) = last_tick {
-                let jitter_ms =
-                    (now.duration_since(prev).as_secs_f64() * 1000.0 - self.interval.as_secs_f64() * 1000.0)
-                        .abs();
+                let jitter_ms = (now.duration_since(prev).as_secs_f64() * 1000.0
+                    - self.interval.as_secs_f64() * 1000.0)
+                    .abs();
                 metrics::histogram!("state_sync_tick_jitter_ms").record(jitter_ms);
                 if jitter_ms > 5.0 {
                     tracing::warn!(target: "baston-zone", jitter_ms, "StateSyncEmitter tick jitter above 5ms");

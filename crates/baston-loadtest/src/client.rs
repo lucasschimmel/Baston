@@ -10,10 +10,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use baston_protocol::entity::{EntityId, EntityType};
+use baston_protocol::udp::state::MSG_BASTON_SNAPSHOT;
 use baston_protocol::udp::state::{
     build_state_update, parse_snapshot, ClientStateUpdate, EntityOp,
 };
-use baston_protocol::udp::state::MSG_BASTON_SNAPSHOT;
 use baston_protocol::udp::{read_message_type, MSG_CONNECT};
 use rusty_enet as enet;
 
@@ -30,7 +30,10 @@ const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(60);
 
 /// Cheap deterministic direction change (no rand dependency).
 fn heading_for(index: usize, tick: u64) -> f32 {
-    (((index as u64).wrapping_mul(2654435761).wrapping_add(tick / 40)) % 360) as f32
+    (((index as u64)
+        .wrapping_mul(2654435761)
+        .wrapping_add(tick / 40))
+        % 360) as f32
 }
 
 /// Recover the 32-bit send-time from the health/armour stamp pair.
@@ -38,12 +41,19 @@ fn record_latency(stats: &Stats, health: f32, armour: f32) {
     let sent = (health as u32) & 0xFFFF | ((armour as u32) << 16);
     let now = stats.now_ms();
     if sent > 0 && now >= sent && now - sent < 10_000 {
-        stats.latencies_ms.lock().unwrap().push(f64::from(now - sent));
+        stats
+            .latencies_ms
+            .lock()
+            .unwrap()
+            .push(f64::from(now - sent));
     }
 }
 
 enum Stage {
-    Connecting { deadline: Instant, sent_handshake: bool },
+    Connecting {
+        deadline: Instant,
+        sent_handshake: bool,
+    },
     Active,
     Done,
 }
@@ -151,12 +161,12 @@ impl Client {
             // Only stream gaps overlapping a handoff window (crossing − 1s
             // .. crossing + 2s) measure what the PLAYER would feel from the
             // zone switch; other gaps are shared-machine scheduling noise.
-            let in_handoff_window = self.last_crossing_at.is_some_and(|t| {
-                now.duration_since(t) < Duration::from_secs(2)
-            }) || self.last_snapshot_at.is_some_and(|prev| {
-                self.last_crossing_at
-                    .is_some_and(|t| t > prev && t <= now)
-            });
+            let in_handoff_window = self
+                .last_crossing_at
+                .is_some_and(|t| now.duration_since(t) < Duration::from_secs(2))
+                || self.last_snapshot_at.is_some_and(|prev| {
+                    self.last_crossing_at.is_some_and(|t| t > prev && t <= now)
+                });
             if stats.measure_freeze.load(Ordering::Relaxed) && in_handoff_window {
                 if let Some(prev) = self.last_snapshot_at {
                     let gap = now.duration_since(prev).as_secs_f64() * 1000.0;
@@ -178,7 +188,8 @@ impl Client {
                         continue;
                     }
                     self.known.insert(id);
-                    self.stamps.insert(id, (dirty.state.health, dirty.state.armour));
+                    self.stamps
+                        .insert(id, (dirty.state.health, dirty.state.armour));
                     record_latency(stats, dirty.state.health, dirty.state.armour);
                 }
                 EntityOp::Delta(delta) => {
@@ -215,13 +226,11 @@ impl Client {
 /// ALL clients of the batch share ONE ENet host (one UDP socket) with one
 /// peer per client — 2000 clients as 2000 sockets floods the OS UDP stack
 /// long before the server is the bottleneck.
-pub fn run_batch(
-    batch: Vec<(usize, String, ClientPlan)>,
-    server: SocketAddr,
-    stats: Arc<Stats>,
-) {
+pub fn run_batch(batch: Vec<(usize, String, ClientPlan)>, server: SocketAddr, stats: Arc<Stats>) {
     let Ok(socket) = UdpSocket::bind("0.0.0.0:0") else {
-        stats.dropped_connections.fetch_add(batch.len() as u64, Ordering::Relaxed);
+        stats
+            .dropped_connections
+            .fetch_add(batch.len() as u64, Ordering::Relaxed);
         return;
     };
     let mut host = match enet::Host::new(
@@ -234,7 +243,9 @@ pub fn run_batch(
     ) {
         Ok(h) => h,
         Err(_) => {
-            stats.dropped_connections.fetch_add(batch.len() as u64, Ordering::Relaxed);
+            stats
+                .dropped_connections
+                .fetch_add(batch.len() as u64, Ordering::Relaxed);
             return;
         }
     };
@@ -268,7 +279,11 @@ pub fn run_batch(
                         let pid = peer.id();
                         if let Some(&slot) = peer_slot.get(&pid) {
                             let c = &mut clients[slot];
-                            if let Stage::Connecting { ref mut sent_handshake, .. } = c.stage {
+                            if let Stage::Connecting {
+                                ref mut sent_handshake,
+                                ..
+                            } = c.stage
+                            {
                                 if !*sent_handshake {
                                     let payload = c.handshake.clone();
                                     let _ =
@@ -280,11 +295,17 @@ pub fn run_batch(
                     }
                     enet::Event::Receive { peer, packet, .. } => {
                         let pid = peer.id();
-                        let Some(&slot) = peer_slot.get(&pid) else { continue };
+                        let Some(&slot) = peer_slot.get(&pid) else {
+                            continue;
+                        };
                         let c = &mut clients[slot];
                         let data = packet.data();
-                        stats.bytes_received.fetch_add(data.len() as u64, Ordering::Relaxed);
-                        let Some((ty, payload)) = read_message_type(data) else { continue };
+                        stats
+                            .bytes_received
+                            .fetch_add(data.len() as u64, Ordering::Relaxed);
+                        let Some((ty, payload)) = read_message_type(data) else {
+                            continue;
+                        };
                         match c.stage {
                             Stage::Connecting { .. } if ty == MSG_CONNECT => {
                                 stats.connected.fetch_add(1, Ordering::Relaxed);
