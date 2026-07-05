@@ -1,0 +1,117 @@
+# BASTON — Prometheus alerting rules.
+#
+# Loaded by monitoring/prometheus.yml via `rule_files`. No Alertmanager is wired
+# in the dev compose, so these surface in the Prometheus UI (/alerts, /rules)
+# only — routing to Discord/Telegram is future work (see streaming-api notes).
+#
+# Thresholds are commented with their rationale rather than left as bare numbers:
+# the admin API and handoff paths are low-volume in normal operation, so the
+# limits below are set well above steady-state noise but low enough to catch a
+# real regression before it becomes user-visible.
+groups:
+  - name: baston-availability
+    rules:
+      - alert: ZoneDown
+        # A zone whose /metrics endpoint is unreachable for >2m is almost
+        # certainly crashed or unscheduled (not a transient scrape blip).
+        expr: up{job="baston-zones"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "BASTON zone {{ $labels.zone }} is down"
+          description: >-
+            Prometheus cannot scrape {{ $labels.instance }} for >2m. Check the
+            container (`docker compose ps`), its logs (`docker compose logs
+            {{ $labels.zone }}`), and `GET /api/v1/zones` to confirm the gateway
+            has evicted it. Players on this zone are rerouted to the least-loaded
+            surviving zone; restart the container to re-register it.
+
+      - alert: ZoneEvicted
+        # zone_failures_total only increments when the gateway drops a zone after
+        # 3 missed heartbeats (15s), so any increase is a real eviction event.
+        expr: increase(zone_failures_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gateway evicted zone {{ $labels.zone }} after missed heartbeats"
+          description: >-
+            The gateway removed {{ $labels.zone }} from the registry/quadtree
+            after 3 missed heartbeats and rerouted its players automatically.
+            Fix and restart the container to re-register. See the "Zone crash"
+            section of docs/operations.md.
+
+      - alert: ZoneHeartbeatFailing
+        # Catches the partition case that ZoneDown misses: the zone is up and
+        # still scrapeable, but cannot reach the gateway over gRPC.
+        expr: increase(zone_heartbeat_failures_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A BASTON zone is failing to heartbeat the gateway"
+          description: >-
+            zone_heartbeat_failures_total is increasing: a zone is running but
+            cannot reach the gateway over gRPC (network partition or a gateway
+            restart). If it persists the gateway will evict the zone and reroute
+            its players. Check the gateway container and the zone→gateway gRPC
+            link (port 50050).
+
+  - name: baston-security
+    rules:
+      - alert: ApiAuthFailureSpike
+        # outcome=error bundles denials (bad/insufficient token) and internal
+        # errors. The admin API is low-traffic (human ops + occasional panel),
+        # so >0.2 failed calls/s (~12/min) sustained for 10m is anomalous and
+        # points at a scan/brute-force or a misconfigured integration retrying.
+        expr: sum(rate(baston_api_audit_total{outcome="error"}[5m])) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Elevated BASTON admin-API failure/denial rate"
+          description: >-
+            More than 0.2 failed or denied /api/v1 calls per second for 10m.
+            Likely a compromised or misconfigured token, or a scan against the
+            admin API. Inspect the audit log (the `api.audit_log` JSONL) for the
+            offending key and action, cross-check the "API audit" panels on the
+            Server Overview dashboard, and rotate the token in `[[api.keys]]` if
+            the source is unexpected.
+
+  - name: baston-mesh
+    rules:
+      - alert: HandoffPrepareFailures
+        # Phase D targets >99.9% handoff success. A sustained >0.5 prepare
+        # failures/s is far above that error budget and means cross-zone
+        # movement is degrading for players near a boundary.
+        expr: sum(rate(handoff_prepare_failures_total[5m])) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "BASTON handoff prepare failures elevated"
+          description: >-
+            Handoff prepare failures >0.5/s for 10m — cross-zone player handoffs
+            are failing. Check target-zone health (`GET /api/v1/zones`), the
+            gateway↔zone gRPC link (port 50051) and NATS (`docker compose logs
+            nats`). See the "Prepare failures/timeouts" and "Zone-side handoff
+            errors" panels on the mesh dashboard.
+
+  - name: baston-resources
+    rules:
+      - alert: ResourceLoadErrors
+        # Counter is cumulative, so alert on recent increase (auto-resolves 5m
+        # after the last error) rather than the running total.
+        expr: increase(baston_scripts_loaded_total{status="error"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "BASTON resource script failed to load/decrypt"
+          description: >-
+            A resource script failed to decrypt or load in the last 5m
+            (status=error) and did not start — usually an escrow/licence
+            misconfiguration or a corrupt encrypted asset. Check zone logs
+            (`docker compose logs`, target=resources) and `GET /api/v1/resources`
+            for the failing resource.
