@@ -40,7 +40,7 @@ pub async fn serve_resource_file(
     if path == baston_protocol::connection::DEFAULT_RESOURCE_SET {
         return match state
             .packfiles
-            .get(&state.resource_manager, &resource)
+            .get(&state.resource_manager, &resource, true)
             .await
         {
             Some(pack) => (
@@ -53,13 +53,13 @@ pub async fn serve_resource_file(
         };
     }
 
-    let (Some(resource), Some(rel)) = (sanitize(&resource), sanitize(&path)) else {
+    let (Some(resource_dir), Some(rel)) = (sanitize(&resource), sanitize(&path)) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
     let file_path = state
         .resource_manager
         .resources_dir()
-        .join(resource)
+        .join(resource_dir)
         .join(rel);
 
     match tokio::fs::read(&file_path).await {
@@ -69,7 +69,31 @@ pub async fn serve_resource_file(
             bytes,
         )
             .into_response(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => StatusCode::NOT_FOUND.into_response(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Stream assets are advertised and requested by basename, not by
+            // their stream/<...> relative path — resolve through the scanned
+            // streaming list, exactly like FXServer's FilesHttpHandler falls
+            // back to ResourceStreamComponent when the regular file is absent.
+            let Some(on_disk) = state
+                .streams
+                .resolve(&state.resource_manager, &resource, &path)
+                .await
+            else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            match tokio::fs::read(&on_disk).await {
+                Ok(bytes) => (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "application/octet-stream")],
+                    bytes,
+                )
+                    .into_response(),
+                Err(e) => {
+                    tracing::error!(target: "http", path = %on_disk.display(), error = %e, "stream file read failed");
+                    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                }
+            }
+        }
         Err(e) => {
             tracing::error!(target: "http", path = %file_path.display(), error = %e, "file read failed");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()

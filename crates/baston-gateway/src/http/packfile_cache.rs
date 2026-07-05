@@ -67,15 +67,20 @@ impl PackfileCache {
     }
 
     /// Get (building or rebuilding if stale) the packfile for a started
-    /// resource. `None` when the resource is unknown or has no client files.
+    /// resource. `None` when the resource is unknown, or when it has no
+    /// client files and `manifest_only_fallback` is false. With the fallback
+    /// on, a resource with no client files still gets an RPF containing just
+    /// the generated fxmanifest.lua — needed so stream-only resources (car
+    /// packs, clothing) can be mounted by the client.
     pub async fn get(
         &self,
         resource_manager: &ResourceManager,
         resource: &str,
+        manifest_only_fallback: bool,
     ) -> Option<Arc<CachedPackfile>> {
         let (root, manifest) = resource_manager.started_resource(resource).await?;
         let files = client_file_list(&manifest);
-        if files.is_empty() {
+        if files.is_empty() && !manifest_only_fallback {
             return None;
         }
 

@@ -6,8 +6,10 @@ mod configuration;
 mod files;
 mod info;
 mod packfile_cache;
+mod stream_cache;
 
 pub use packfile_cache::PackfileCache;
+pub use stream_cache::StreamCache;
 
 use std::sync::Arc;
 
@@ -32,6 +34,8 @@ pub struct AppState {
     pub script_host: ScriptHost,
     pub auth: AuthService,
     pub packfiles: PackfileCache,
+    /// Streaming assets scanned from each resource's `stream/` folder.
+    pub streams: StreamCache,
     /// Phase D zone federation (None when `[meshing]` is disabled).
     pub mesh: Option<Arc<crate::mesh::GatewayMesh>>,
 }

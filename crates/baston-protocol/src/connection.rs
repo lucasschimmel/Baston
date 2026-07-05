@@ -102,6 +102,30 @@ impl InitConnectResponse {
     }
 }
 
+/// One streaming asset advertised in `streamFiles`, keyed by basename
+/// (ResourceConfigurationCacheComponent::GetConfiguration). `rscPagesVirtual`,
+/// `rscPagesPhysical` and `e` are only present for RSC-container files
+/// (RSC5/RSC7/RSC8); raw assets carry just hash/flags/version/size.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamFileEntry {
+    /// SHA1 of the file content, lowercase hex.
+    pub hash: String,
+    /// Always the file size at scan time (ResourceStreamComponent.cpp:
+    /// `entry.rscFlags = entry.size`).
+    #[serde(rename = "rscFlags")]
+    pub rsc_flags: u32,
+    /// RSC container version; 0 for raw (non-RSC) files.
+    #[serde(rename = "rscVersion")]
+    pub rsc_version: u32,
+    pub size: u32,
+    #[serde(rename = "rscPagesVirtual", skip_serializing_if = "Option::is_none")]
+    pub rsc_pages_virtual: Option<u32>,
+    #[serde(rename = "rscPagesPhysical", skip_serializing_if = "Option::is_none")]
+    pub rsc_pages_physical: Option<u32>,
+    #[serde(rename = "e", skip_serializing_if = "Option::is_none")]
+    pub encrypted: Option<bool>,
+}
+
 /// One resource entry in the `getConfiguration` response
 /// (ResourceConfigurationCacheComponent::GetConfiguration).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,9 +133,11 @@ pub struct ResourceConfiguration {
     pub name: String,
     /// Downloadable sets: `{ "resource.rpf": "<sha1 hex of the packfile>" }`.
     pub files: BTreeMap<String, String>,
-    /// Streaming assets (empty for BASTON Phase B — no `stream/` support).
+    /// Streaming assets scanned from the resource's `stream/` folder, keyed
+    /// by basename. The client downloads each at
+    /// `<fileServer>/<resource>/<basename>` and validates the SHA1.
     #[serde(rename = "streamFiles")]
-    pub stream_files: BTreeMap<String, serde_json::Value>,
+    pub stream_files: BTreeMap<String, StreamFileEntry>,
 }
 
 /// `getConfiguration` response (GetConfigurationMethod.cpp).

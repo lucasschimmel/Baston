@@ -35,14 +35,31 @@ pub async fn get_configuration(state: &AppState, headers: &HeaderMap, body: &str
         if !filter.is_empty() && !filter.contains(&name) {
             continue;
         }
-        // Resources with no client files are server-only: not sent.
-        let Some(pack) = state.packfiles.get(&state.resource_manager, &name).await else {
+        let stream_files: BTreeMap<_, _> = state
+            .streams
+            .get(&state.resource_manager, &name)
+            .await
+            .map(|set| {
+                set.assets
+                    .iter()
+                    .map(|(basename, asset)| (basename.clone(), asset.entry.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Resources with neither client files nor stream assets are
+        // server-only: not sent. Stream-only resources still need an RPF
+        // (manifest-only) so the client can mount them.
+        let Some(pack) = state
+            .packfiles
+            .get(&state.resource_manager, &name, !stream_files.is_empty())
+            .await
+        else {
             continue;
         };
         resources.push(ResourceConfiguration {
             name: name.clone(),
             files: BTreeMap::from([(DEFAULT_RESOURCE_SET.to_owned(), pack.sha1_hex.clone())]),
-            stream_files: BTreeMap::new(),
+            stream_files,
         });
     }
 

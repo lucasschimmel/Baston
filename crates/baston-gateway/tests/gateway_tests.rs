@@ -71,6 +71,7 @@ async fn app(dir: &Path, script: &str) -> axum::Router {
         script_host,
         auth,
         packfiles: baston_gateway::http::PackfileCache::new(),
+        streams: baston_gateway::http::StreamCache::new(),
         mesh: None,
     }))
 }
