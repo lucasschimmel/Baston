@@ -37,6 +37,72 @@
       "id": 6, "type": "timeseries", "title": "State sync jitter (ms)",
       "gridPos": { "x": 16, "y": 8, "w": 8, "h": 8 },
       "targets": [{ "expr": "state_sync_tick_jitter_ms", "refId": "A" }]
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Players rerouted on zone recovery",
+      "gridPos": { "x": 0, "y": 16, "w": 8, "h": 8 },
+      "targets": [{ "expr": "increase(zone_recovery_players_rerouted_total[5m])", "refId": "A" }]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Mesh forwarding drops/failures /s",
+      "gridPos": { "x": 8, "y": 16, "w": 8, "h": 8 },
+      "targets": [
+        { "expr": "rate(mesh_forward_dropped_total[1m])", "refId": "A", "legendFormat": "dropped" },
+        { "expr": "sum by (zone) (rate(mesh_forward_failures_total[1m]))", "refId": "B", "legendFormat": "failed {{zone}}" }
+      ]
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "Handoff hold-buffer depth p99 (updates)",
+      "gridPos": { "x": 16, "y": 16, "w": 8, "h": 8 },
+      "targets": [{ "expr": "histogram_quantile(0.99, rate(handoff_hold_buffered_updates_bucket[5m]))", "refId": "A" }]
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "Zone-side handoff errors /s",
+      "gridPos": { "x": 0, "y": 24, "w": 8, "h": 8 },
+      "targets": [
+        { "expr": "rate(handoff_prepare_errors_total[5m])", "refId": "A", "legendFormat": "prepare" },
+        { "expr": "rate(handoff_confirm_errors_total[5m])", "refId": "B", "legendFormat": "confirm" },
+        { "expr": "rate(handoff_activate_errors_total[5m])", "refId": "C", "legendFormat": "activate" }
+      ]
+    },
+    {
+      "id": 11, "type": "timeseries", "title": "Entity handoffs /s (ownerless migrations)",
+      "gridPos": { "x": 8, "y": 24, "w": 8, "h": 8 },
+      "targets": [{ "expr": "rate(entity_handoffs_total[1m])", "refId": "A" }]
+    },
+    {
+      "id": 12, "type": "timeseries", "title": "Zone heartbeat failures",
+      "gridPos": { "x": 16, "y": 24, "w": 8, "h": 8 },
+      "targets": [{ "expr": "increase(zone_heartbeat_failures_total[5m])", "refId": "A" }]
+    },
+    {
+      "id": 13, "type": "timeseries", "title": "State updates: accepted vs rejected /s",
+      "gridPos": { "x": 0, "y": 32, "w": 8, "h": 8 },
+      "targets": [
+        { "expr": "rate(state_updates_accepted[1m])", "refId": "A", "legendFormat": "accepted" },
+        { "expr": "sum by (reason) (rate(state_updates_rejected[1m]))", "refId": "B", "legendFormat": "rejected {{reason}}" }
+      ]
+    },
+    {
+      "id": 14, "type": "timeseries", "title": "AoI entities per client (by source)",
+      "gridPos": { "x": 8, "y": 32, "w": 8, "h": 8 },
+      "targets": [{ "expr": "entities_per_client", "refId": "A", "legendFormat": "{{source}}" }]
+    },
+    {
+      "id": 15, "type": "timeseries", "title": "Dirty entities per tick",
+      "gridPos": { "x": 16, "y": 32, "w": 8, "h": 8 },
+      "targets": [{ "expr": "entities_dirty_per_tick", "refId": "A" }]
+    },
+    {
+      "id": 16, "type": "timeseries", "title": "NATS publish latency p99 (ms)",
+      "gridPos": { "x": 0, "y": 40, "w": 8, "h": 8 },
+      "targets": [{ "expr": "histogram_quantile(0.99, rate(nats_publish_duration_ms_bucket[1m]))", "refId": "A" }]
+    },
+    {
+      "id": 17, "type": "timeseries", "title": "NATS throughput (B/s)",
+      "gridPos": { "x": 8, "y": 40, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "targets": [{ "expr": "rate(nats_bytes_published[1m])", "refId": "A" }]
     }
   ]
 }
