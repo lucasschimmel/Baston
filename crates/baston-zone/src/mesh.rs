@@ -8,8 +8,10 @@ use baston_protocol::mesh::gateway_service_client::GatewayServiceClient;
 use baston_protocol::mesh::zone_service_client::ZoneServiceClient;
 use baston_protocol::mesh::zone_service_server::{ZoneService, ZoneServiceServer};
 use baston_protocol::mesh::{
-    ActivatePlayerRequest, ActivatePlayerResponse, HeartbeatRequest, PlayerStateRequest,
-    PrepareForPlayerResponse, RegisterZoneRequest, ReleasePlayerRequest, ReleasePlayerResponse,
+    ActivatePlayerRequest, ActivatePlayerResponse, ControlResourceRequest,
+    ControlResourceResponse, HeartbeatRequest, ListResourcesRequest, ListResourcesResponse,
+    PlayerStateRequest, PrepareForPlayerResponse, RegisterZoneRequest, ReleasePlayerRequest,
+    ReleasePlayerResponse, ResourceStatus,
 };
 use baston_protocol::{Aabb, PlayerStateSnapshot};
 use dashmap::DashMap;
@@ -55,6 +57,10 @@ pub struct ZoneMesh {
     /// after a handoff commit).
     peer_clients: DashMap<String, ZoneServiceClient<Channel>>,
     hooks: ZoneMeshHooks,
+    /// Wired by the composition root so the Gateway's admin API can relay
+    /// resource control to this zone. `None` until set (RPCs answer
+    /// unavailable).
+    resource_manager: std::sync::RwLock<Option<Arc<crate::ResourceManager>>>,
 }
 
 impl ZoneMesh {
@@ -79,7 +85,21 @@ impl ZoneMesh {
             ghosts: DashMap::new(),
             peer_clients: DashMap::new(),
             hooks,
+            resource_manager: std::sync::RwLock::new(None),
         }))
+    }
+
+    /// Give the mesh access to the zone's ResourceManager (resource-control
+    /// RPCs). Call before `spawn_grpc_server`.
+    pub fn set_resource_manager(&self, rm: Arc<crate::ResourceManager>) {
+        *self.resource_manager.write().expect("rm lock poisoned") = Some(rm);
+    }
+
+    fn resource_manager(&self) -> Option<Arc<crate::ResourceManager>> {
+        self.resource_manager
+            .read()
+            .expect("rm lock poisoned")
+            .clone()
     }
 
     /// Register with the Gateway, retrying until accepted (the Gateway may
@@ -284,6 +304,58 @@ impl ZoneService for ZoneGrpc {
             "player={} released ({})", req.player_id,
             if req.reason.is_empty() { "playerDropped internal" } else { &req.reason });
         Ok(Response::new(ReleasePlayerResponse { ok: true }))
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Request<ListResourcesRequest>,
+    ) -> Result<Response<ListResourcesResponse>, Status> {
+        let Some(rm) = self.mesh.resource_manager() else {
+            return Err(Status::unavailable("resource manager not wired"));
+        };
+        let resources = rm
+            .status()
+            .await
+            .into_iter()
+            .map(|(name, state)| ResourceStatus {
+                name,
+                state: format!("{state:?}").to_ascii_lowercase(),
+            })
+            .collect();
+        Ok(Response::new(ListResourcesResponse { resources }))
+    }
+
+    async fn control_resource(
+        &self,
+        request: Request<ControlResourceRequest>,
+    ) -> Result<Response<ControlResourceResponse>, Status> {
+        let Some(rm) = self.mesh.resource_manager() else {
+            return Err(Status::unavailable("resource manager not wired"));
+        };
+        let req = request.into_inner();
+        let result = match req.action.as_str() {
+            "start" => rm.start(&req.name).await,
+            "stop" => rm.stop(&req.name).await,
+            "restart" => rm.restart(&req.name).await,
+            other => {
+                return Err(Status::invalid_argument(format!(
+                    "unknown action {other:?} (start|stop|restart)"
+                )));
+            }
+        };
+        tracing::info!(target: "zone", zone = %self.mesh.zone_id,
+            resource = %req.name, action = %req.action, ok = result.is_ok(),
+            "resource control via gateway");
+        Ok(Response::new(match result {
+            Ok(()) => ControlResourceResponse {
+                ok: true,
+                message: String::new(),
+            },
+            Err(e) => ControlResourceResponse {
+                ok: false,
+                message: e.to_string(),
+            },
+        }))
     }
 }
 

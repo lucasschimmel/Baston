@@ -46,6 +46,16 @@ sv_license_key = ""
 # BASTON never ships this binary. Shares one sidecar process with [escrow] when both on.
 # fxserver_path = "Artifacts/windows/31623/FXServer.exe"
 
+# Monitoring/control HTTP API keys (served on meshing.admin_port, default
+# 8080). Each key is a named bearer token with explicit permissions; control
+# actions are appended to the audit log. See docs/api.md.
+[api]
+audit_log = "baston-audit.jsonl"
+# [[api.keys]]
+# name = "discord-bot"                    # identifies the key in the audit log
+# token = "REPLACE_ME_openssl_rand_hex_32"
+# permissions = ["monitor.read"]          # monitor.read | resource.control | player.kick | zone.drain
+
 # CFX Asset Escrow support (Phase D-bis). Off by default. See
 # docs/escrow-support.md. Requires a Windows build with `--features escrow`.
 [escrow]

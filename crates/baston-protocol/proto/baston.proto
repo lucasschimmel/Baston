@@ -17,6 +17,10 @@ service ZoneService {
   rpc PrepareForPlayer(PlayerStateRequest) returns (PrepareForPlayerResponse);
   rpc ActivatePlayer(ActivatePlayerRequest) returns (ActivatePlayerResponse);
   rpc ReleasePlayer(ReleasePlayerRequest) returns (ReleasePlayerResponse);
+  // Resource control plane (admin API): the Gateway relays start/stop/restart
+  // and status listing to each zone's ResourceManager.
+  rpc ListResources(ListResourcesRequest) returns (ListResourcesResponse);
+  rpc ControlResource(ControlResourceRequest) returns (ControlResourceResponse);
 }
 
 message BoundingBox {
@@ -108,4 +112,27 @@ message ReleasePlayerRequest {
 
 message ReleasePlayerResponse {
   bool ok = 1;
+}
+
+message ListResourcesRequest {}
+
+message ResourceStatus {
+  string name = 1;
+  // "unloaded" | "loading" | "started" | "stopped" | "error"
+  string state = 2;
+}
+
+message ListResourcesResponse {
+  repeated ResourceStatus resources = 1;
+}
+
+message ControlResourceRequest {
+  string name = 1;
+  // "start" | "stop" | "restart"
+  string action = 2;
+}
+
+message ControlResourceResponse {
+  bool ok = 1;
+  string message = 2;
 }

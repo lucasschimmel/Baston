@@ -192,15 +192,8 @@ async fn main() -> anyhow::Result<()> {
         }
         let recovery_kick_rx: Option<tokio::sync::mpsc::UnboundedReceiver<(u32, String)>> =
             Some(kick_rx);
-        // Admin API (jalon D2) — own port, bearer auth.
-        baston_gateway::admin::spawn_admin_api(
-            baston_gateway::admin::AdminState {
-                mesh: Arc::clone(&mesh),
-                players: Arc::clone(&players),
-                token: config.meshing.admin_token.clone(),
-            },
-            config.meshing.admin_port,
-        );
+        // Admin/API listener spawns after the UDP server exists (the kick
+        // route needs the UdpHandle) — see spawn_api below.
         // Zone-resolution request/reply for entity handoffs (D4).
         if let Some(nats) = nats.clone() {
             let registry = Arc::clone(&registry);
@@ -322,6 +315,40 @@ async fn main() -> anyhow::Result<()> {
         mesh_forward,
         config.state_sync.onesync,
     )?;
+
+    // Admin + monitoring/control API on the admin port. Legacy /admin/*
+    // routes need the mesh; /api/v1/* works in single-process mode too.
+    {
+        let keyring = Arc::new(baston_gateway::api::KeyRing::from_config(
+            &config.api,
+            &config.meshing.admin_token,
+        ));
+        let audit = if keyring.is_empty() {
+            baston_gateway::api::AuditLog::disabled()
+        } else {
+            baston_gateway::api::AuditLog::spawn(config.api.audit_log.clone())
+        };
+        let legacy = mesh.as_ref().map(|mesh| baston_gateway::admin::AdminState {
+            mesh: Arc::clone(mesh),
+            players: Arc::clone(&players),
+            token: config.meshing.admin_token.clone(),
+        });
+        baston_gateway::api::spawn_api(
+            baston_gateway::api::ApiState {
+                keyring,
+                audit,
+                players: Arc::clone(&players),
+                resource_manager: Arc::clone(&resource_manager),
+                mesh: mesh.clone(),
+                udp: Some(udp.clone()),
+                server_name: config.server.name.clone(),
+                max_players: config.server.max_players,
+                started_at: std::time::Instant::now(),
+            },
+            legacy,
+            config.meshing.admin_port,
+        );
+    }
 
     // D6: apply recovery kicks now that the UDP handle exists.
     if let Some(mut rx) = recovery_kick_rx.take() {

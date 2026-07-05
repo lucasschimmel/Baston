@@ -29,6 +29,13 @@ the script runtimes, entity state and boundary detection, and speak gRPC
 Registration is idempotent and retried (2s × 30); a zone can start before
 the gateway.
 
+## Monitoring & control API
+
+The admin port also serves `/api/v1/*`: read-only monitoring (status,
+players, zones, resources) and audited control routes (kick, resource
+start/stop/restart, drain) with per-key permissions declared in
+`[[api.keys]]`. See [api.md](api.md).
+
 ## Draining a zone
 
 ```bash

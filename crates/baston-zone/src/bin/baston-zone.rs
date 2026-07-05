@@ -477,6 +477,8 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     let grpc_addr: std::net::SocketAddr = config.meshing.zone_grpc_addr.parse()?;
+    // Resource-control RPCs (gateway admin API) need the ResourceManager.
+    mesh.set_resource_manager(Arc::clone(&resource_manager));
     let grpc_task = mesh.spawn_grpc_server(grpc_addr);
     mesh.register_with_gateway().await?;
     mesh.spawn_heartbeat_loop(config.meshing.heartbeat_interval_secs);

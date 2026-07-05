@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Errors produced while loading or parsing the configuration.
 #[derive(Debug, thiserror::Error)]
@@ -67,6 +67,34 @@ pub enum ConfigError {
     )]
     LicenseMalformedKey,
     #[error(
+        "[[api.keys]] entry without a name\n  \
+         → give every key a name, e.g. [[api.keys]] name = \"discord-bot\" — it \
+         identifies the key in the audit log"
+    )]
+    ApiKeyMissingName,
+    #[error(
+        "[[api.keys]] duplicate key name \"{0}\"\n  \
+         → key names must be unique; rename one of the entries"
+    )]
+    ApiKeyDuplicateName(String),
+    #[error(
+        "[[api.keys]] key \"{0}\" has a weak or placeholder token\n  \
+         → tokens must be at least 32 characters, without whitespace\n  \
+         → generate one: openssl rand -hex 32"
+    )]
+    ApiKeyWeakToken(String),
+    #[error(
+        "[[api.keys]] key \"{0}\" reuses another key's token\n  \
+         → every key needs its own token, or the audit log can't tell them apart"
+    )]
+    ApiKeyDuplicateToken(String),
+    #[error(
+        "[[api.keys]] key \"{0}\" has no permissions\n  \
+         → grant at least one of: \"monitor.read\", \"resource.control\", \
+         \"player.kick\", \"zone.drain\""
+    )]
+    ApiKeyNoPermissions(String),
+    #[error(
         "[license] mode = \"verified\" but fxserver_path is not set\n  \
          → set [license] fxserver_path = \"C:/FXServer/FXServer.exe\" (an official FXServer \
          you downloaded from CFX; BASTON never ships it)"
@@ -112,7 +140,97 @@ pub struct BastonConfig {
     pub escrow: EscrowConfig,
     #[serde(default)]
     pub license: LicenseConfig,
+    #[serde(default)]
+    pub api: ApiConfig,
     pub tls: Option<TlsConfig>,
+}
+
+/// `[api]` section — keys for the monitoring/control HTTP API (served on the
+/// admin port alongside the legacy `/admin/*` routes).
+///
+/// Each `[[api.keys]]` entry grants a set of permissions to one bearer token.
+/// A key can only call routes covered by its permissions — a monitoring key
+/// gets 403 on every control route. The legacy `meshing.admin_token` keeps
+/// working as an implicit full-permission key.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiConfig {
+    #[serde(default)]
+    pub keys: Vec<ApiKey>,
+    /// Append-only JSONL audit log for control actions. Every kick, resource
+    /// start/stop and zone drain is recorded with the key name that did it.
+    #[serde(default = "default_audit_log")]
+    pub audit_log: PathBuf,
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            keys: Vec::new(),
+            audit_log: default_audit_log(),
+        }
+    }
+}
+
+fn default_audit_log() -> PathBuf {
+    PathBuf::from("baston-audit.jsonl")
+}
+
+/// One API key: a named bearer token with explicit permissions.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiKey {
+    /// Identifies the key in the audit log (e.g. `"discord-bot"`, `"panel"`).
+    pub name: String,
+    pub token: String,
+    pub permissions: Vec<ApiPermission>,
+}
+
+/// Granular API permissions. Unknown strings are rejected at parse time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub enum ApiPermission {
+    /// Read-only monitoring: status, players, zones, resources.
+    #[serde(rename = "monitor.read")]
+    MonitorRead,
+    /// Start / stop / restart resources.
+    #[serde(rename = "resource.control")]
+    ResourceControl,
+    /// Kick players.
+    #[serde(rename = "player.kick")]
+    PlayerKick,
+    /// Drain zones (reroute their players).
+    #[serde(rename = "zone.drain")]
+    ZoneDrain,
+}
+
+impl ApiConfig {
+    /// Validate the key list: named, well-formed tokens, no duplicates, at
+    /// least one permission each. Tokens are secrets — errors mention the key
+    /// *name*, never the token value.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let mut names = std::collections::HashSet::new();
+        let mut tokens = std::collections::HashSet::new();
+        for key in &self.keys {
+            if key.name.trim().is_empty() {
+                return Err(ConfigError::ApiKeyMissingName);
+            }
+            if !names.insert(key.name.as_str()) {
+                return Err(ConfigError::ApiKeyDuplicateName(key.name.clone()));
+            }
+            let token = key.token.trim();
+            if token.len() < 32
+                || token.chars().any(char::is_whitespace)
+                || token.to_ascii_uppercase().contains("REPLACE_ME")
+            {
+                return Err(ConfigError::ApiKeyWeakToken(key.name.clone()));
+            }
+            if !tokens.insert(token) {
+                return Err(ConfigError::ApiKeyDuplicateToken(key.name.clone()));
+            }
+            if key.permissions.is_empty() {
+                return Err(ConfigError::ApiKeyNoPermissions(key.name.clone()));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// `[license]` section — CFX server-licence integration.
@@ -675,6 +793,7 @@ impl BastonConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.license.validate()?;
         self.escrow.validate()?;
+        self.api.validate()?;
         Ok(())
     }
 
@@ -872,5 +991,97 @@ mod tests {
         let parsed: Result<BastonConfig, _> =
             toml::from_str("[license]\nmode = \"trust-me-bro\"\n");
         assert!(parsed.is_err(), "unknown licence mode must fail to parse");
+    }
+
+    const STRONG_TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    fn api_key(name: &str, token: &str) -> ApiKey {
+        ApiKey {
+            name: name.into(),
+            token: token.into(),
+            permissions: vec![ApiPermission::MonitorRead],
+        }
+    }
+
+    #[test]
+    fn api_defaults_to_no_keys_and_validates() {
+        let config: BastonConfig = toml::from_str("[server]\nport = 30120\n").unwrap();
+        assert!(config.api.keys.is_empty());
+        assert_eq!(config.api.audit_log, PathBuf::from("baston-audit.jsonl"));
+        config.api.validate().expect("empty key list is valid");
+    }
+
+    #[test]
+    fn api_keys_parse_from_toml_with_dotted_permissions() {
+        let config: BastonConfig = toml::from_str(
+            "[server]\nport = 30120\n\
+             [[api.keys]]\n\
+             name = \"discord-bot\"\n\
+             token = \"0123456789abcdef0123456789abcdef\"\n\
+             permissions = [\"monitor.read\", \"player.kick\"]\n",
+        )
+        .unwrap();
+        assert_eq!(config.api.keys.len(), 1);
+        assert_eq!(
+            config.api.keys[0].permissions,
+            vec![ApiPermission::MonitorRead, ApiPermission::PlayerKick]
+        );
+        config.api.validate().expect("well-formed key");
+    }
+
+    #[test]
+    fn api_unknown_permission_is_rejected_at_parse() {
+        let parsed: Result<BastonConfig, _> = toml::from_str(
+            "[[api.keys]]\nname = \"x\"\ntoken = \"0123456789abcdef0123456789abcdef\"\n\
+             permissions = [\"root.everything\"]\n",
+        );
+        assert!(parsed.is_err(), "unknown permission must fail to parse");
+    }
+
+    #[test]
+    fn api_weak_token_is_rejected() {
+        let api = ApiConfig {
+            keys: vec![api_key("bot", "short")],
+            ..Default::default()
+        };
+        assert!(matches!(
+            api.validate(),
+            Err(ConfigError::ApiKeyWeakToken(name)) if name == "bot"
+        ));
+    }
+
+    #[test]
+    fn api_duplicate_names_and_tokens_are_rejected() {
+        let api = ApiConfig {
+            keys: vec![api_key("bot", STRONG_TOKEN), api_key("bot", STRONG_TOKEN)],
+            ..Default::default()
+        };
+        assert!(matches!(
+            api.validate(),
+            Err(ConfigError::ApiKeyDuplicateName(_))
+        ));
+
+        let api = ApiConfig {
+            keys: vec![api_key("bot", STRONG_TOKEN), api_key("panel", STRONG_TOKEN)],
+            ..Default::default()
+        };
+        assert!(matches!(
+            api.validate(),
+            Err(ConfigError::ApiKeyDuplicateToken(name)) if name == "panel"
+        ));
+    }
+
+    #[test]
+    fn api_key_without_permissions_is_rejected() {
+        let mut key = api_key("bot", STRONG_TOKEN);
+        key.permissions.clear();
+        let api = ApiConfig {
+            keys: vec![key],
+            ..Default::default()
+        };
+        assert!(matches!(
+            api.validate(),
+            Err(ConfigError::ApiKeyNoPermissions(name)) if name == "bot"
+        ));
     }
 }

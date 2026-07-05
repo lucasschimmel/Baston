@@ -2,6 +2,7 @@
 //! `playerConnecting` connection pipeline.
 
 pub mod admin;
+pub mod api;
 pub mod auth;
 pub mod connection_router;
 pub mod http;
