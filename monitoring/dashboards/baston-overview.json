@@ -1,0 +1,77 @@
+{
+  "title": "BASTON — Server Overview",
+  "uid": "baston-overview",
+  "schemaVersion": 39,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Players online",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 6 },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "targets": [{ "expr": "baston_players_online", "refId": "A" }]
+    },
+    {
+      "id": 2, "type": "stat", "title": "World-state entities (aggregated)",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 6 },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "targets": [{ "expr": "sum(world_state_entities)", "refId": "A" }]
+    },
+    {
+      "id": 3, "type": "stat", "title": "Resource scripts loaded (ok)",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 6 },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "targets": [{ "expr": "sum(baston_scripts_loaded_total{status=~\"decrypted|plain\"})", "refId": "A" }]
+    },
+    {
+      "id": 4, "type": "stat", "title": "Resource load errors",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 6 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "red", "value": 1 }
+          ] }
+        }
+      },
+      "targets": [{ "expr": "sum(baston_scripts_loaded_total{status=\"error\"})", "refId": "A" }]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Escrow decrypt duration (s)",
+      "gridPos": { "x": 0, "y": 6, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(baston_decrypt_duration_seconds_bucket[5m])))", "refId": "A", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(baston_decrypt_duration_seconds_bucket[5m])))", "refId": "B", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "API audit rate /s (by action + outcome)",
+      "gridPos": { "x": 12, "y": 6, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        { "expr": "sum by (action, outcome) (rate(baston_api_audit_total[5m]))", "refId": "A", "legendFormat": "{{action}} · {{outcome}}" }
+      ]
+    },
+    {
+      "id": 7, "type": "table", "title": "API audit totals (action × outcome) — watch for outcome=error spikes",
+      "gridPos": { "x": 0, "y": 14, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum by (action, outcome) (baston_api_audit_total)", "refId": "A", "format": "table", "instant": true }
+      ]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "UDP commands dropped /s",
+      "gridPos": { "x": 12, "y": 14, "w": 6, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "cps" } },
+      "targets": [{ "expr": "rate(udp_cmd_dropped_total[1m])", "refId": "A" }]
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "Snapshot bandwidth (B/s)",
+      "gridPos": { "x": 18, "y": 14, "w": 6, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "Bps" } },
+      "targets": [{ "expr": "rate(snapshot_bytes_sent[1m])", "refId": "A" }]
+    }
+  ]
+}

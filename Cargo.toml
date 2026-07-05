@@ -31,6 +31,8 @@ bitflags = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 metrics = "0.23"
 metrics-exporter-prometheus = "0.15"
+# Snapshot recorder for unit-testing emitted metrics (dev-only).
+metrics-util = { version = "0.17", features = ["debugging"] }
 futures = "0.3"
 rusty_enet = "0.4"
 rmp-serde = "1"

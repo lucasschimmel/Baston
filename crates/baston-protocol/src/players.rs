@@ -23,6 +23,9 @@ pub struct PlayerDirectory {
 
 impl PlayerDirectory {
     pub fn new() -> Self {
+        // Register the gauge at 0 up front so Grafana shows an empty server as
+        // "0 players" instead of "No data" until the first connection.
+        metrics::gauge!("baston_players_online").set(0.0);
         Self {
             players: DashMap::new(),
             session_tokens: DashMap::new(),
@@ -48,11 +51,21 @@ impl PlayerDirectory {
 
     pub fn insert(&self, player: PlayerInfo) {
         self.players.insert(player.source, player);
+        self.publish_online_gauge();
     }
 
     pub fn remove(&self, source: u32) -> Option<PlayerInfo> {
         self.session_tokens.retain(|_, s| *s != source);
-        self.players.remove(&source).map(|(_, p)| p)
+        let removed = self.players.remove(&source).map(|(_, p)| p);
+        self.publish_online_gauge();
+        removed
+    }
+
+    /// Mirror the live player count into the `baston_players_online` gauge.
+    /// Called after every insert/remove so the value tracks `count()` exactly
+    /// without a separate counter that could drift.
+    fn publish_online_gauge(&self) {
+        metrics::gauge!("baston_players_online").set(self.players.len() as f64);
     }
 
     pub fn get(&self, source: u32) -> Option<PlayerInfo> {
@@ -107,5 +120,47 @@ mod tests {
         );
         assert_eq!(dir.identifier_by_type(source, "discord"), None);
         assert_eq!(dir.identifier_by_type(999, "license"), None);
+    }
+
+    #[test]
+    fn players_online_gauge_tracks_insert_and_remove() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshot};
+
+        fn online(snapshot: Snapshot) -> Option<f64> {
+            snapshot.into_vec().into_iter().find_map(|(ck, _, _, v)| {
+                if ck.key().name() == "baston_players_online" {
+                    if let DebugValue::Gauge(g) = v {
+                        return Some(g.0);
+                    }
+                }
+                None
+            })
+        }
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        let dir = PlayerDirectory::new();
+        metrics::with_local_recorder(&recorder, || {
+            let mk = |source| PlayerInfo {
+                source,
+                name: format!("p{source}"),
+                identifiers: vec![],
+            };
+            let a = dir.allocate_source();
+            dir.insert(mk(a));
+            let b = dir.allocate_source();
+            dir.insert(mk(b));
+            // Two connected → gauge is 2.
+            assert_eq!(online(snapshotter.snapshot()), Some(2.0));
+
+            dir.remove(a);
+            // One left → gauge drops to 1.
+            assert_eq!(online(snapshotter.snapshot()), Some(1.0));
+
+            // Removing an unknown source must not move the gauge.
+            dir.remove(9999);
+            assert_eq!(online(snapshotter.snapshot()), Some(1.0));
+        });
     }
 }

@@ -17,6 +17,10 @@ bincode = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
 lz4-sys = { workspace = true }
+metrics = { workspace = true }
+
+[dev-dependencies]
+metrics-util = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }
