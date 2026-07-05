@@ -60,12 +60,57 @@ Players are NOT moved back automatically; new connections rebalance.
 
 ## Monitoring
 
-- Prometheus: `http://localhost:9091` — scrapes gateway + zones (5s).
-- Grafana: `http://localhost:3001` — "BASTON — Zone Mesh" dashboard:
-  handoffs/s, routing-lock hold time, handoff latency p99, prepare
-  failures/timeouts, zone failures, state-sync jitter.
-- Watch: `handoff_latency_p99 > 500ms`, `zone_failures_total` increases,
-  `handoff_prepare_timeouts_total` increases, `NATS > 500 MB/s`.
+### Three ports — don't conflate them
+
+| Port | What | Notes |
+|---|---|---|
+| `9090` | `/metrics` of a BASTON **process** | The gateway **and every zone** each expose their own Prometheus endpoint on 9090 (inside their container, or on the host in dev). This is where the numbers come from. |
+| `9091` | **Prometheus** UI/API | Host port only. The Prometheus container listens on 9090 internally — the mapping is `9091:9090`. Browse `http://localhost:9091` (`/targets`, `/rules`, `/alerts`). |
+| `3001` | **Grafana** | Host port (`3001:3000`). Anonymous admin is enabled for dev. |
+
+Prometheus scrapes gateway + zones every 5s (`monitoring/prometheus.yml`).
+
+### Dashboards (Grafana folder "BASTON", auto-provisioned)
+
+- **BASTON — Zone Mesh** (`baston-mesh`) — the cross-zone data plane. Handoffs/s,
+  routing-lock hold time, handoff latency p99, prepare failures/timeouts, zone
+  failures, state-sync jitter, zone-recovery reroutes, mesh forwarding
+  drops/failures, hold-buffer depth, zone-side handoff errors
+  (prepare/confirm/activate), entity handoffs, heartbeat failures, state-update
+  accept/reject by reason, AoI entities per client, dirty entities per tick,
+  NATS publish latency/throughput. Use it to **diagnose meshing**.
+- **BASTON — Server Overview** (`baston-overview`) — whole-server health at a
+  glance. Players online, aggregated world-state entities, resource scripts
+  loaded/errors, escrow decrypt duration p95/p99, admin-API audit (rate + totals
+  by action/outcome), UDP dropped commands, snapshot bandwidth. Use it as the
+  first-glance **"is the server healthy"** board.
+
+### Alerts (`monitoring/alerts.yml`)
+
+Loaded by Prometheus via `rule_files`; visible at `http://localhost:9091/rules`
+and `/alerts`. There is **no Alertmanager** in the dev compose, so alerts do not
+page anywhere yet — you watch them in the Prometheus UI. Rules (all `warning`
+severity; thresholds and their rationale are commented in the file):
+`ZoneDown`, `ZoneEvicted`, `ZoneHeartbeatFailing`, `ApiAuthFailureSpike`,
+`HandoffPrepareFailures`, `ResourceLoadErrors`.
+
+**Reading a triggered alert.** Each alert's `description` already names what to
+check; in general:
+
+- **Zone\* / Handoff\* alerts** → `GET /api/v1/status` and `/api/v1/zones` to see
+  which zones the gateway still holds; `docker compose logs <zone>` /
+  `docker compose logs gateway` (structured `tracing`); the mesh-dashboard panel
+  named in the alert.
+- **ApiAuthFailureSpike** → the audit log (`api.audit_log` JSONL — one record per
+  attempt with key/action/outcome) to find the offending key; the "API audit"
+  panels on the overview dashboard; rotate the key in `[[api.keys]]` if the
+  source is unexpected. The integration tests `admin_api_tests` / `api_v1_tests`
+  document the exact 401/403 behaviour if you need to reproduce.
+- **ResourceLoadErrors** → `GET /api/v1/resources`; zone logs filtered on
+  `target=resources`.
+
+Watch informally too: `handoff latency p99 > 500ms`, `zone_failures_total`
+climbing, `handoff_prepare_timeouts_total` climbing, `NATS > 500 MB/s`.
 
 ## Key subjects / ports
 
