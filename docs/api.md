@@ -22,15 +22,24 @@ permissions = ["monitor.read"]
 [[api.keys]]
 name = "panel"
 token = "e7a91b0f3d5c8e2a4f6b1d..."
-permissions = ["monitor.read", "resource.control", "player.kick", "zone.drain"]
+permissions = [
+  "monitor.read",
+  "resource.control",
+  "player.kick",
+  "zone.drain",
+  "profiler.control",
+  "profiler.read",
+]
 ```
 
 | Permission | Grants |
 |---|---|
-| `monitor.read` | All `GET /api/v1/*` routes |
+| `monitor.read` | Read-only monitoring: status, players, zones, resources, ResMon and profiler status |
 | `resource.control` | `POST /api/v1/resources/{name}/{start\|stop\|restart}` |
 | `player.kick` | `POST /api/v1/players/{source}/kick` |
 | `zone.drain` | `POST /api/v1/zones/{id}/drain` |
+| `profiler.control` | `POST /api/v1/profiler/record`, `POST /api/v1/profiler/stop` |
+| `profiler.read` | `GET /api/v1/profiler/latest`, `GET /api/v1/profiler/latest/trace` |
 
 Rules enforced at boot (`ApiConfig::validate`): unique names, unique tokens,
 tokens ≥ 32 chars without whitespace, at least one permission per key.
@@ -47,10 +56,17 @@ GET /api/v1/players              → [ { source, name, identifiers, zone } ]
 GET /api/v1/zones                → [ { id, bounds, players, entities, max_players, heartbeat_age_ms, status } ]
 GET /api/v1/zones/{id}           → zone detail (404 when unknown / meshing off)
 GET /api/v1/resources            → [ { name, state, zone } ]   # zone = "gateway" or zone id
+GET /api/v1/resmon               → { uptime_secs, scope, resources }
+GET /api/v1/resmon/resources/{name}
+GET /api/v1/resmon/events
+GET /api/v1/profiler/status      → current bounded recording status
 ```
 
-`zone` fields are `null`/empty in single-process mode. Prometheus metrics stay
-on their own port (`metrics.port`, default 9090) — Grafana provisioning is in
+`/api/v1/resmon` currently reports `scope: "gateway"`: it includes the local
+gateway process runtime. Zone aggregation over gRPC is the next step; zones
+already expose the Prometheus series on their own metrics endpoint. `zone`
+fields are `null`/empty in single-process mode. Prometheus metrics stay on
+their own port (`metrics.port`, default 9090) — Grafana provisioning is in
 `monitoring/`.
 
 ```bash
@@ -65,6 +81,8 @@ POST /api/v1/resources/{name}/start         # perm resource.control
 POST /api/v1/resources/{name}/stop
 POST /api/v1/resources/{name}/restart
 POST /api/v1/zones/{id}/drain               # perm zone.drain
+POST /api/v1/profiler/record                # perm profiler.control
+POST /api/v1/profiler/stop                  # perm profiler.control
 ```
 
 - **Kick** drops the ENet peer; the normal disconnect path fires
@@ -76,6 +94,41 @@ POST /api/v1/zones/{id}/drain               # perm zone.drain
   `{ "resource": "...", "ok": true, "zones": { "zone-a": "ok" } }`.
 - Denied attempts (401 unknown token / 403 missing permission) on control
   routes are audited too.
+- **Profiler control** starts/stops a bounded Chrome Trace recording. `record`
+  accepts `{"frames":500,"seconds":null,"scope":"server","include_native_calls":true}`.
+  Captures are in-memory, bounded, disabled by default, and never include admin
+  tokens, identifiers, IPs or event payloads.
+
+## Profiler capture routes (`profiler.read`)
+
+```
+GET /api/v1/profiler/latest       → metadata about the latest stopped capture
+GET /api/v1/profiler/latest/trace → Chrome Trace / Perfetto JSON
+```
+
+The trace payload shape is:
+
+```json
+{
+  "traceEvents": [
+    {
+      "name": "playerConnecting",
+      "cat": "script",
+      "ph": "X",
+      "ts": 1751840000000000,
+      "dur": 1200,
+      "pid": 1,
+      "tid": 42,
+      "args": {
+        "resource": "axiom-core",
+        "kind": "PlayerConnecting",
+        "source": 7,
+        "status": "ok"
+      }
+    }
+  ]
+}
+```
 
 ## Audit log
 
@@ -85,8 +138,9 @@ Append-only JSONL at `api.audit_log`, one record per control action:
 {"ts_ms":1751742000000,"key":"panel","action":"player.kick","target":"source:7 reason:spam","outcome":"ok"}
 ```
 
-`outcome` is `ok`, `denied`, `not_found`, or an error summary. Writes happen
-on a dedicated task — the request path never blocks on disk. The counter
+`outcome` is `ok`, `denied`, `not_found`, or an error summary. Profiler
+`record`/`stop` actions are audited the same way. Writes happen on a dedicated
+task — the request path never blocks on disk. The counter
 `baston_api_audit_total{action,outcome}` tracks the same events in Prometheus.
 
 ## Legacy routes

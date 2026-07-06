@@ -32,9 +32,14 @@ the gateway.
 ## Monitoring & control API
 
 The admin port also serves `/api/v1/*`: read-only monitoring (status,
-players, zones, resources) and audited control routes (kick, resource
-start/stop/restart, drain) with per-key permissions declared in
-`[[api.keys]]`. See [api.md](api.md).
+players, zones, resources, ResMon, profiler status), profiler trace capture
+and audited control routes (kick, resource start/stop/restart, drain,
+profiler record/stop) with per-key permissions declared in `[[api.keys]]`.
+See [api.md](api.md).
+
+Console commands (`resmon 1`, `profiler record 500`, `profiler stop/status/view`)
+are not implemented yet. Use the `/api/v1/resmon` and `/api/v1/profiler/*`
+routes as the authoritative control surface until a command registry lands.
 
 ## Draining a zone
 
@@ -82,8 +87,10 @@ Prometheus scrapes gateway + zones every 5s (`monitoring/prometheus.yml`).
 - **BASTON — Server Overview** (`baston-overview`) — whole-server health at a
   glance. Players online, aggregated world-state entities, resource scripts
   loaded/errors, escrow decrypt duration p95/p99, admin-API audit (rate + totals
-  by action/outcome), UDP dropped commands, snapshot bandwidth. Use it as the
-  first-glance **"is the server healthy"** board.
+  by action/outcome), UDP dropped commands, snapshot bandwidth, script dispatch
+  p95/p99 by resource, dispatch rate, watchdog terminations, native roundtrip
+  p95/p99, native timeouts and profiler active state. Use it as the first-glance
+  **"is the server healthy"** board.
 
 ### Alerts (`monitoring/alerts.yml`)
 
@@ -92,7 +99,8 @@ and `/alerts`. There is **no Alertmanager** in the dev compose, so alerts do not
 page anywhere yet — you watch them in the Prometheus UI. Rules (all `warning`
 severity; thresholds and their rationale are commented in the file):
 `ZoneDown`, `ZoneEvicted`, `ZoneHeartbeatFailing`, `ApiAuthFailureSpike`,
-`HandoffPrepareFailures`, `ResourceLoadErrors`.
+`HandoffPrepareFailures`, `ResourceLoadErrors`, `ScriptWatchdogTerminations`,
+`NativeRoundtripTimeouts`, `ScriptDispatchP99High`.
 
 **Reading a triggered alert.** Each alert's `description` already names what to
 check; in general:
@@ -108,6 +116,13 @@ check; in general:
   document the exact 401/403 behaviour if you need to reproduce.
 - **ResourceLoadErrors** → `GET /api/v1/resources`; zone logs filtered on
   `target=resources`.
+- **ScriptWatchdogTerminations / ScriptDispatchP99High** →
+  `GET /api/v1/resmon/resources/{name}` to find the slow event/handler, then
+  `POST /api/v1/profiler/record` and `GET /api/v1/profiler/latest/trace` to
+  export a Perfetto/Chrome Trace capture.
+- **NativeRoundtripTimeouts** → the Native roundtrip panels on Server Overview
+  and `GET /api/v1/resmon/events`; look for `NativeRoundtrip` rows by resource
+  and native hash.
 
 Watch informally too: `handoff latency p99 > 500ms`, `zone_failures_total`
 climbing, `handoff_prepare_timeouts_total` climbing, `NATS > 500 MB/s`.
