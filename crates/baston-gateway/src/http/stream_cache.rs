@@ -324,7 +324,9 @@ mod tests {
     async fn stream_raw_companion_supplies_header_and_is_not_an_entry() {
         let dir = tempfile::tempdir().unwrap();
         let main = dir.path().join("big.ydr");
-        tokio::fs::write(&main, b"raw page data without header").await.unwrap();
+        tokio::fs::write(&main, b"raw page data without header")
+            .await
+            .unwrap();
         tokio::fs::write(dir.path().join("big.ydr.stream_raw"), rsc7_bytes())
             .await
             .unwrap();
@@ -351,7 +353,9 @@ mod tests {
         tokio::fs::create_dir_all(dir.path().join("sub/deep"))
             .await
             .unwrap();
-        tokio::fs::write(dir.path().join("b.ytd"), b"b").await.unwrap();
+        tokio::fs::write(dir.path().join("b.ytd"), b"b")
+            .await
+            .unwrap();
         tokio::fs::write(dir.path().join("sub/deep/a.yft"), b"a")
             .await
             .unwrap();

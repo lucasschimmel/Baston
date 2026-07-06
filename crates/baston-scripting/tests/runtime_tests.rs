@@ -155,3 +155,27 @@ async fn trigger_event_round_trips_between_resources() {
         .await
         .expect("trigger");
 }
+
+#[tokio::test]
+async fn handler_errors_are_reported_to_resmon() {
+    let (host, _) = host();
+    host.load_resource(
+        "broken",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: "AddEventHandler('boom', () => { throw new Error('nope') });".into(),
+        }],
+    )
+    .await
+    .expect("load");
+
+    host.trigger_event("boom", &[]).await.expect("trigger");
+
+    let snapshot = host.observability().snapshot();
+    let handler = snapshot
+        .handlers
+        .iter()
+        .find(|handler| handler.resource == "broken" && handler.name == "boom")
+        .expect("boom handler stats");
+    assert_eq!(handler.errors, 1);
+}

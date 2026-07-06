@@ -181,10 +181,7 @@ async fn stream_only_resource_is_sent_with_manifest_only_rpf() {
 
     let config = get_configuration(&app).await;
     let carpack = resource(&config, "carpack");
-    assert_eq!(
-        carpack["files"]["resource.rpf"].as_str().unwrap().len(),
-        40
-    );
+    assert_eq!(carpack["files"]["resource.rpf"].as_str().unwrap().len(), 40);
     assert!(carpack["streamFiles"]["sultan3.yft"].is_object());
 
     // Its RPF (fxmanifest.lua only) downloads fine.

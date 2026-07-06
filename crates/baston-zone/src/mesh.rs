@@ -8,10 +8,10 @@ use baston_protocol::mesh::gateway_service_client::GatewayServiceClient;
 use baston_protocol::mesh::zone_service_client::ZoneServiceClient;
 use baston_protocol::mesh::zone_service_server::{ZoneService, ZoneServiceServer};
 use baston_protocol::mesh::{
-    ActivatePlayerRequest, ActivatePlayerResponse, ControlResourceRequest,
-    ControlResourceResponse, HeartbeatRequest, ListResourcesRequest, ListResourcesResponse,
-    PlayerStateRequest, PrepareForPlayerResponse, RegisterZoneRequest, ReleasePlayerRequest,
-    ReleasePlayerResponse, ResourceStatus,
+    ActivatePlayerRequest, ActivatePlayerResponse, ControlResourceRequest, ControlResourceResponse,
+    HeartbeatRequest, ListResourcesRequest, ListResourcesResponse, PlayerStateRequest,
+    PrepareForPlayerResponse, RegisterZoneRequest, ReleasePlayerRequest, ReleasePlayerResponse,
+    ResourceStatus,
 };
 use baston_protocol::{Aabb, PlayerStateSnapshot};
 use dashmap::DashMap;

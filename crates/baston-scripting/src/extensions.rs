@@ -16,6 +16,7 @@ use std::time::Instant;
 use deno_core::{op2, OpState};
 
 use crate::deferrals::DeferralRegistry;
+use crate::observability::Observability;
 
 /// Per-runtime context stored in the isolate's `OpState`.
 pub struct RuntimeContext {
@@ -34,6 +35,8 @@ pub struct RuntimeContext {
     /// JSON collected by `op_report_zone_transfer_state` during the last
     /// `collectZoneTransferState` dispatch (jalon D4 handoff).
     pub collected_transfer_state: Option<String>,
+    /// Handler exceptions caught by bootstrap.js during the current dispatch.
+    pub handler_errors: u64,
 }
 
 /// Shared deferral registry handle stored in `OpState` (one per process,
@@ -46,6 +49,9 @@ pub struct SharedPlayers(pub Arc<baston_protocol::PlayerDirectory>);
 
 /// Net bridge handle stored in `OpState` (client events + native dispatch).
 pub struct SharedNet(pub crate::net_bridge::NetBridge);
+
+/// Shared runtime observability collector stored in `OpState`.
+pub struct SharedObservability(pub Arc<Observability>);
 
 /// How long a server → client native call may wait for its result.
 ///
@@ -110,6 +116,11 @@ fn op_trigger_client_event(
     }
 }
 
+#[op2(fast)]
+fn op_report_handler_error(state: &mut OpState) {
+    state.borrow_mut::<RuntimeContext>().handler_errors += 1;
+}
+
 /// Dispatch a GTA native to `source`'s client via the BASTON shim and await
 /// the result. Returns a JSON string; errors are `{"__error": "..."}` so the
 /// polyfill can throw without deno_core error plumbing.
@@ -146,7 +157,15 @@ async fn op_invoke_native_on_client(
         return err(e);
     }
 
-    let net = state.borrow().borrow::<SharedNet>().0.clone();
+    let (net, observability, resource) = {
+        let state_ref = state.borrow();
+        (
+            state_ref.borrow::<SharedNet>().0.clone(),
+            state_ref.borrow::<SharedObservability>().0.clone(),
+            state_ref.borrow::<RuntimeContext>().resource_name.clone(),
+        )
+    };
+    let started = Instant::now();
     let (id, rx) = net.pending_natives.register();
     let call = NativeCall {
         id,
@@ -164,23 +183,65 @@ async fn op_invoke_native_on_client(
         .is_err()
     {
         net.pending_natives.cancel(id);
+        observability.record_native_roundtrip(
+            &resource,
+            hash,
+            source,
+            started.elapsed().as_micros() as u64,
+            false,
+            true,
+        );
         return err("net bridge full or closed");
     }
 
     if !expects_return {
         // Fire-and-forget: the shim still replies, but nobody waits.
         net.pending_natives.cancel(id);
+        observability.record_native_roundtrip(
+            &resource,
+            hash,
+            source,
+            started.elapsed().as_micros() as u64,
+            false,
+            false,
+        );
         return "null".to_owned();
     }
 
     match tokio::time::timeout(NATIVE_CALL_TIMEOUT, rx).await {
-        Ok(Ok(value)) => value.to_string(),
+        Ok(Ok(value)) => {
+            observability.record_native_roundtrip(
+                &resource,
+                hash,
+                source,
+                started.elapsed().as_micros() as u64,
+                false,
+                false,
+            );
+            value.to_string()
+        }
         Ok(Err(_)) => {
             net.pending_natives.cancel(id);
+            observability.record_native_roundtrip(
+                &resource,
+                hash,
+                source,
+                started.elapsed().as_micros() as u64,
+                false,
+                true,
+            );
             err("native result channel closed")
         }
         Err(_) => {
             net.pending_natives.cancel(id);
+            observability.record_native_roundtrip(
+                &resource,
+                hash,
+                source,
+                started.elapsed().as_micros() as u64,
+                true,
+                true,
+            );
             err(format!("native call 0x{hash:016X} timed out"))
         }
     }
@@ -193,6 +254,7 @@ deno_core::extension!(
         op_trigger_event,
         op_trigger_client_event,
         op_invoke_native_on_client,
+        op_report_handler_error,
     ]
 );
 

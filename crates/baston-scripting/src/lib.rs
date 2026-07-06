@@ -11,10 +11,15 @@ mod error;
 mod extensions;
 mod host;
 pub mod net_bridge;
+pub mod observability;
 mod runtime;
 
 pub use deferrals::{DeferralOutcome, DeferralRegistry};
 pub use error::ScriptError;
 pub use host::{ScriptHost, ScriptSource};
 pub use net_bridge::{NetBridge, NetOutbound};
+pub use observability::{
+    DispatchKind, HandlerPerfStats, Observability, ProfilerRecordOptions, ProfilerStatus,
+    ResMonSnapshot, ResourcePerfStats,
+};
 pub use runtime::ScriptRuntime;

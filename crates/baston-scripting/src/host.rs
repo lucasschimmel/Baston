@@ -14,6 +14,7 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 
 use crate::deferrals::DeferralRegistry;
 use crate::error::ScriptError;
+use crate::observability::Observability;
 use crate::runtime::ScriptRuntime;
 
 /// A script file to load into a resource's isolate.
@@ -85,6 +86,7 @@ pub struct ScriptHost {
     deferrals: Arc<DeferralRegistry>,
     players: Arc<PlayerDirectory>,
     net: crate::net_bridge::NetBridge,
+    observability: Arc<Observability>,
     started_at: Instant,
     cross_zone: Arc<std::sync::RwLock<Option<CrossZonePublisher>>>,
 }
@@ -124,9 +126,14 @@ impl ScriptHost {
             deferrals,
             players,
             net,
+            observability: Observability::shared(),
             started_at: Instant::now(),
             cross_zone: Arc::new(std::sync::RwLock::new(None)),
         })
+    }
+
+    pub fn observability(&self) -> Arc<Observability> {
+        Arc::clone(&self.observability)
     }
 
     /// Install the Phase D cross-zone event publisher (zone processes only).
@@ -243,6 +250,7 @@ impl ScriptHost {
             Arc::clone(&self.deferrals),
             Arc::clone(&self.players),
             self.net.clone(),
+            Arc::clone(&self.observability),
         )?;
         let queued = handle
             .send(|reply| RuntimeCommand::ExecuteScripts { scripts, reply })
@@ -386,6 +394,7 @@ fn spawn_runtime_thread(
     deferrals: Arc<DeferralRegistry>,
     players: Arc<PlayerDirectory>,
     net: crate::net_bridge::NetBridge,
+    observability: Arc<Observability>,
 ) -> Result<ResourceRuntimeHandle, ScriptError> {
     let (tx, mut rx) = mpsc::channel::<RuntimeCommand>(64);
     let name = resource_name.to_owned();
@@ -406,13 +415,15 @@ fn spawn_runtime_thread(
                     return;
                 }
             };
-            let mut runtime = match ScriptRuntime::new(&name, started_at, deferrals, players, net) {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ = init_tx.send(Err(e));
-                    return;
-                }
-            };
+            let mut runtime =
+                match ScriptRuntime::new(&name, started_at, deferrals, players, net, observability)
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let _ = init_tx.send(Err(e));
+                        return;
+                    }
+                };
             let _ = init_tx.send(Ok(()));
 
             let local = tokio::task::LocalSet::new();

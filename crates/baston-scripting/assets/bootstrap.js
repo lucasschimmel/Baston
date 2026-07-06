@@ -124,6 +124,7 @@
       try {
         fn(...args);
       } catch (e) {
+        ops.op_report_handler_error();
         console.error(`[baston] error in '${name}' handler: ${stringify(e)}`);
       }
     }
@@ -159,6 +160,7 @@
       try {
         fn(playerName, setKickReason, deferrals);
       } catch (e) {
+        ops.op_report_handler_error();
         console.error(
           `[baston] error in playerConnecting handler: ${stringify(e)}`
         );
@@ -184,6 +186,7 @@
       try {
         Object.assign(merged, cb(source) || {});
       } catch (e) {
+        ops.op_report_handler_error();
         console.error(`[baston] error in zone transfer state callback: ${stringify(e)}`);
       }
     }

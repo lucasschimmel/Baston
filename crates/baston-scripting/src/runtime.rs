@@ -13,9 +13,10 @@ use baston_protocol::PlayerDirectory;
 use crate::deferrals::DeferralRegistry;
 use crate::error::ScriptError;
 use crate::extensions::{
-    all_extensions, RuntimeContext, SharedDeferrals, SharedNet, SharedPlayers,
+    all_extensions, RuntimeContext, SharedDeferrals, SharedNet, SharedObservability, SharedPlayers,
 };
 use crate::net_bridge::NetBridge;
+use crate::observability::{DispatchKind, DispatchMeasurement, Observability, V8MemoryStats};
 
 const BOOTSTRAP_JS: &str = include_str!("../assets/bootstrap.js");
 
@@ -165,6 +166,7 @@ pub struct ScriptRuntime {
     watchdog: Watchdog,
     js: JsRuntime,
     resource_name: String,
+    observability: Arc<Observability>,
 }
 
 impl ScriptRuntime {
@@ -176,6 +178,7 @@ impl ScriptRuntime {
         deferrals: Arc<DeferralRegistry>,
         players: Arc<PlayerDirectory>,
         net: NetBridge,
+        observability: Arc<Observability>,
     ) -> Result<Self, ScriptError> {
         Self::new_with_budget(
             resource_name,
@@ -183,6 +186,7 @@ impl ScriptRuntime {
             deferrals,
             players,
             net,
+            observability,
             DISPATCH_BUDGET,
         )
     }
@@ -193,6 +197,7 @@ impl ScriptRuntime {
         deferrals: Arc<DeferralRegistry>,
         players: Arc<PlayerDirectory>,
         net: NetBridge,
+        observability: Arc<Observability>,
         budget: Duration,
     ) -> Result<Self, ScriptError> {
         let mut js = JsRuntime::new(RuntimeOptions {
@@ -214,10 +219,12 @@ impl ScriptRuntime {
                 exports: Default::default(),
                 has_zone_transfer_state: false,
                 collected_transfer_state: None,
+                handler_errors: 0,
             });
             op_state.put(SharedDeferrals(deferrals));
             op_state.put(SharedPlayers(players));
             op_state.put(SharedNet(net));
+            op_state.put(SharedObservability(observability.clone()));
         }
 
         js.execute_script("baston:bootstrap.js", BOOTSTRAP_JS)
@@ -230,6 +237,7 @@ impl ScriptRuntime {
             watchdog: Watchdog::new(isolate_handle, host_started_at, budget),
             js,
             resource_name: resource_name.to_owned(),
+            observability,
         })
     }
 
@@ -246,7 +254,15 @@ impl ScriptRuntime {
         // deno_core requires a 'static specifier; intern so reloading a
         // resource doesn't leak a fresh copy of the name each time.
         let name = intern_script_name(format!("baston:{}/{}", self.resource_name, script_path));
-        self.run_guarded(name, code, script_path.to_owned()).await
+        self.run_guarded(
+            name,
+            code,
+            script_path.to_owned(),
+            DispatchKind::LoadScript,
+            script_path.to_owned(),
+            None,
+        )
+        .await
     }
 
     /// Dispatch an event into this isolate's JS handler registry.
@@ -260,7 +276,8 @@ impl ScriptRuntime {
             serde_json::to_string(event).unwrap_or_else(|_| "\"\"".into()),
             serde_json::to_string(args_json).unwrap_or_else(|_| "\"[]\"".into()),
         );
-        self.run_dispatch(event, code).await
+        self.run_dispatch(event, code, DispatchKind::Event, None)
+            .await
     }
 
     /// Dispatch a net event (from a client) with `globalThis.source` bound.
@@ -276,7 +293,8 @@ impl ScriptRuntime {
             source,
             serde_json::to_string(args_json).unwrap_or_else(|_| "\"[]\"".into()),
         );
-        self.run_dispatch(event, code).await
+        self.run_dispatch(event, code, DispatchKind::NetEvent, Some(source))
+            .await
     }
 
     /// Dispatch `playerConnecting` with the (name, setKickReason, deferrals)
@@ -291,12 +309,31 @@ impl ScriptRuntime {
             source,
             serde_json::to_string(player_name).unwrap_or_else(|_| "\"\"".into()),
         );
-        self.run_dispatch("playerConnecting", code).await
+        self.run_dispatch(
+            "playerConnecting",
+            code,
+            DispatchKind::PlayerConnecting,
+            Some(source),
+        )
+        .await
     }
 
-    async fn run_dispatch(&mut self, event: &str, code: String) -> Result<(), ScriptError> {
-        self.run_guarded("baston:dispatch", code, format!("dispatch:{event}"))
-            .await
+    async fn run_dispatch(
+        &mut self,
+        event: &str,
+        code: String,
+        kind: DispatchKind,
+        source: Option<u32>,
+    ) -> Result<(), ScriptError> {
+        self.run_guarded(
+            "baston:dispatch",
+            code,
+            format!("dispatch:{event}"),
+            kind,
+            event.to_owned(),
+            source,
+        )
+        .await
     }
 
     /// Run one script under the watchdog, then flush the event loop. Shared by
@@ -307,20 +344,30 @@ impl ScriptRuntime {
         name: &'static str,
         code: String,
         ctx: String,
+        kind: DispatchKind,
+        event_name: String,
+        source: Option<u32>,
     ) -> Result<(), ScriptError> {
         let guard = self.watchdog.arm();
+        let total_started = Instant::now();
+        let execute_started = Instant::now();
         let exec = self.js.execute_script(name, code);
+        let execute_us = execute_started.elapsed().as_micros() as u64;
+        let mut event_loop_us = 0;
         let loop_res = if exec.is_ok() {
-            Some(
-                self.js
-                    .run_event_loop(PollEventLoopOptions::default())
-                    .await,
-            )
+            let loop_started = Instant::now();
+            let result = self
+                .js
+                .run_event_loop(PollEventLoopOptions::default())
+                .await;
+            event_loop_us = loop_started.elapsed().as_micros() as u64;
+            Some(result)
         } else {
             None
         };
         drop(guard);
-        if self.watchdog.took_fired() {
+        let watchdog_fired = self.watchdog.took_fired();
+        if watchdog_fired {
             tracing::warn!(
                 target: "scripting",
                 resource = %self.resource_name,
@@ -332,18 +379,52 @@ impl ScriptRuntime {
             // future dispatches instead of throwing on every later script.
             self.js.v8_isolate().cancel_terminate_execution();
         }
+        let loop_errored = loop_res.as_ref().is_some_and(Result::is_err);
+        let handler_errors = {
+            let op_state = self.js.op_state();
+            let mut op_state = op_state.borrow_mut();
+            let ctx = op_state.borrow_mut::<RuntimeContext>();
+            let errors = ctx.handler_errors;
+            ctx.handler_errors = 0;
+            errors
+        };
+        let memory = Some(self.v8_memory_stats());
+        self.observability.record_dispatch(DispatchMeasurement {
+            resource: self.resource_name.clone(),
+            kind,
+            name: event_name,
+            execute_us,
+            event_loop_us,
+            total_us: total_started.elapsed().as_micros() as u64,
+            errored: exec.is_err() || loop_errored || watchdog_fired || handler_errors > 0,
+            watchdog_fired,
+            memory,
+            source,
+            zone: None,
+        });
         exec.map_err(|e| ScriptError::Execute {
             resource: self.resource_name.clone(),
             script: ctx,
             message: e.to_string(),
         })?;
-        loop_res
-            .expect("event loop runs whenever execute_script succeeded")
-            .map_err(|e| ScriptError::Execute {
+        if let Some(loop_res) = loop_res {
+            loop_res.map_err(|e| ScriptError::Execute {
                 resource: self.resource_name.clone(),
                 script: "<event loop>".to_owned(),
                 message: e.to_string(),
             })
+        } else {
+            Ok(())
+        }
+    }
+
+    fn v8_memory_stats(&mut self) -> V8MemoryStats {
+        let stats = self.js.v8_isolate().get_heap_statistics();
+        V8MemoryStats {
+            used_bytes: stats.used_heap_size() as u64,
+            total_bytes: stats.total_heap_size() as u64,
+            external_bytes: stats.external_memory() as u64,
+        }
     }
 
     /// Run the resource's `RegisterZoneTransferState` callbacks and return
@@ -367,7 +448,13 @@ impl ScriptRuntime {
                 .collected_transfer_state = None;
         }
         let code = format!("globalThis.__baston.collectZoneTransferState({source});");
-        self.run_dispatch("collectZoneTransferState", code).await?;
+        self.run_dispatch(
+            "collectZoneTransferState",
+            code,
+            DispatchKind::ZoneTransferState,
+            Some(source),
+        )
+        .await?;
         let op_state = self.js.op_state();
         let mut op_state = op_state.borrow_mut();
         Ok(op_state
@@ -409,6 +496,7 @@ mod tests {
             Arc::new(DeferralRegistry::new()),
             Arc::new(PlayerDirectory::new()),
             net,
+            Observability::shared(),
             budget,
         )
         .expect("runtime builds")
