@@ -48,9 +48,10 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     sorted[rank.min(sorted.len() - 1)]
 }
 
-/// Parse the emitter jitter histogram from the Prometheus text exposition:
-/// average = sum / count of `state_sync_tick_jitter_ms`.
-async fn scrape_jitter(metrics_url: &str, http: &reqwest::Client) -> Option<f64> {
+/// Parse the emitter jitter histogram's `(sum, count)` from one Prometheus
+/// endpoint's text exposition. Returns `None` if the histogram is absent (the
+/// process runs no emitter — e.g. the gateway in mesh mode).
+async fn scrape_jitter_parts(metrics_url: &str, http: &reqwest::Client) -> Option<(f64, f64)> {
     let body = http.get(metrics_url).send().await.ok()?.text().await.ok()?;
     let mut sum = None;
     let mut count = None;
@@ -62,10 +63,29 @@ async fn scrape_jitter(metrics_url: &str, http: &reqwest::Client) -> Option<f64>
             count = v.trim().parse::<f64>().ok();
         }
     }
-    match (sum, count) {
-        (Some(s), Some(c)) if c > 0.0 => Some(s / c),
-        _ => None,
+    Some((sum?, count?))
+}
+
+/// Average emitter jitter across every endpoint that runs a StateSyncEmitter.
+/// Single-process mode: the emitter lives on the gateway (`metrics_url`). Mesh
+/// mode: each zone process owns its emitter, so the histogram is exposed on the
+/// `zone_metrics` endpoints instead. Pooling `(Σ sums) / (Σ counts)` gives the
+/// exact count-weighted mean of the per-endpoint averages.
+async fn scrape_jitter(
+    metrics_url: &str,
+    zone_metrics: &[String],
+    http: &reqwest::Client,
+) -> Option<f64> {
+    let mut total_sum = 0.0;
+    let mut total_count = 0.0;
+    let endpoints = std::iter::once(metrics_url).chain(zone_metrics.iter().map(String::as_str));
+    for url in endpoints {
+        if let Some((s, c)) = scrape_jitter_parts(url, http).await {
+            total_sum += s;
+            total_count += c;
+        }
     }
+    (total_count > 0.0).then(|| total_sum / total_count)
 }
 
 /// Fetch a single Prometheus sample by exact line prefix.
@@ -93,7 +113,7 @@ pub async fn print_report(
     let p99 = percentile(&latencies, 99.0);
     let bytes = stats.bytes_received.load(Ordering::Relaxed);
     let mbps = (bytes as f64 * 8.0) / duration.as_secs_f64() / 1_000_000.0;
-    let jitter = scrape_jitter(metrics_url, http).await;
+    let jitter = scrape_jitter(metrics_url, zone_metrics, http).await;
 
     println!();
     println!("=== baston-loadtest report ===");
@@ -118,7 +138,7 @@ pub async fn print_report(
     println!("bandwidth (client-observed) : {mbps:.2} Mbps (target < 10 Mbps)");
     match jitter {
         Some(j) => println!("StateSyncEmitter jitter avg : {j:.2}ms (target < 2ms)"),
-        None => println!("StateSyncEmitter jitter     : n/a (metrics endpoint unreachable)"),
+        None => println!("StateSyncEmitter jitter     : n/a (no emitter histogram exposed)"),
     }
     println!(
         "dropped connections: {}, entity desyncs: {}",
