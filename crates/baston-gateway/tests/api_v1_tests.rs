@@ -38,6 +38,8 @@ fn keyring() -> Arc<KeyRing> {
                         ApiPermission::ResourceControl,
                         ApiPermission::PlayerKick,
                         ApiPermission::ZoneDrain,
+                        ApiPermission::ProfilerControl,
+                        ApiPermission::ProfilerRead,
                     ],
                 },
             ],
@@ -74,6 +76,7 @@ async fn fixture(audit: AuditLog, with_mesh: bool) -> Fixture {
     let deferrals = Arc::new(DeferralRegistry::new());
     let players = Arc::new(baston_gateway::PlayerRegistry::new());
     let script_host = ScriptHost::spawn(deferrals, Arc::clone(&players)).unwrap();
+    let observability = script_host.observability();
     let resource_manager = ResourceManager::new(script_host, dir.path().to_owned());
     resource_manager.discover().await.unwrap();
     resource_manager.start_all().await.unwrap();
@@ -109,6 +112,7 @@ async fn fixture(audit: AuditLog, with_mesh: bool) -> Fixture {
             audit,
             players,
             resource_manager,
+            observability,
             mesh,
             udp: Some(udp),
             server_name: "BASTON Test".into(),
@@ -204,13 +208,82 @@ async fn status_and_players_report_real_data() {
     assert_eq!(players[0]["zone"], "zone-a");
 
     let resources = body_json(
-        app.oneshot(req("/api/v1/resources", "GET", Some(MONITOR_TOKEN)))
+        app.clone()
+            .oneshot(req("/api/v1/resources", "GET", Some(MONITOR_TOKEN)))
             .await
             .unwrap(),
     )
     .await;
     assert_eq!(resources[0]["name"], "axiom-core");
     assert_eq!(resources[0]["state"], "started");
+
+    let resmon = body_json(
+        app.oneshot(req("/api/v1/resmon", "GET", Some(MONITOR_TOKEN)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(resmon["scope"], "gateway");
+    assert_eq!(resmon["resources"][0]["name"], "axiom-core");
+}
+
+#[tokio::test]
+async fn profiler_permissions_and_trace_flow() {
+    let fx = fixture(AuditLog::disabled(), false).await;
+    let app = api_router(fx.state);
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            "/api/v1/profiler/latest/trace",
+            "GET",
+            Some(MONITOR_TOKEN),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let request = Request::builder()
+        .uri("/api/v1/profiler/record")
+        .method("POST")
+        .header("Authorization", format!("Bearer {CONTROL_TOKEN}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            r#"{"frames":4,"scope":"server","include_native_calls":true}"#,
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            "/api/v1/resources/axiom-core/restart",
+            "POST",
+            Some(CONTROL_TOKEN),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app
+        .clone()
+        .oneshot(req("/api/v1/profiler/stop", "POST", Some(CONTROL_TOKEN)))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let trace = body_json(
+        app.oneshot(req(
+            "/api/v1/profiler/latest/trace",
+            "GET",
+            Some(CONTROL_TOKEN),
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert!(trace["traceEvents"].as_array().unwrap().len() > 0);
 }
 
 #[tokio::test]
@@ -319,7 +392,11 @@ async fn legacy_admin_token_has_full_api_access() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     let resp = app
-        .oneshot(req("/api/v1/zones/zone-a/drain", "POST", Some(LEGACY_TOKEN)))
+        .oneshot(req(
+            "/api/v1/zones/zone-a/drain",
+            "POST",
+            Some(LEGACY_TOKEN),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
@@ -340,7 +417,11 @@ async fn zones_empty_without_mesh_and_drain_404s() {
     assert_eq!(zones, serde_json::json!([]));
 
     let resp = app
-        .oneshot(req("/api/v1/zones/zone-a/drain", "POST", Some(CONTROL_TOKEN)))
+        .oneshot(req(
+            "/api/v1/zones/zone-a/drain",
+            "POST",
+            Some(CONTROL_TOKEN),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);

@@ -91,7 +91,7 @@ pub enum ConfigError {
     #[error(
         "[[api.keys]] key \"{0}\" has no permissions\n  \
          → grant at least one of: \"monitor.read\", \"resource.control\", \
-         \"player.kick\", \"zone.drain\""
+         \"player.kick\", \"zone.drain\", \"profiler.control\", \"profiler.read\""
     )]
     ApiKeyNoPermissions(String),
     #[error(
@@ -199,6 +199,12 @@ pub enum ApiPermission {
     /// Drain zones (reroute their players).
     #[serde(rename = "zone.drain")]
     ZoneDrain,
+    /// Start/stop profiler recordings.
+    #[serde(rename = "profiler.control")]
+    ProfilerControl,
+    /// Read profiler captures.
+    #[serde(rename = "profiler.read")]
+    ProfilerRead,
 }
 
 impl ApiConfig {

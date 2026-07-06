@@ -339,6 +339,7 @@ async fn main() -> anyhow::Result<()> {
                 audit,
                 players: Arc::clone(&players),
                 resource_manager: Arc::clone(&resource_manager),
+                observability: script_host.observability(),
                 mesh: mesh.clone(),
                 udp: Some(udp.clone()),
                 server_name: config.server.name.clone(),

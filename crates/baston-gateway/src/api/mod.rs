@@ -18,6 +18,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use baston_config::ApiPermission;
+use baston_scripting::{Observability, ProfilerRecordOptions};
 use baston_zone::resource_loader::ResourceState;
 use baston_zone::ResourceManager;
 use serde_json::json;
@@ -34,6 +35,7 @@ pub struct ApiState {
     pub audit: AuditLog,
     pub players: Arc<PlayerRegistry>,
     pub resource_manager: Arc<ResourceManager>,
+    pub observability: Arc<Observability>,
     /// Zone federation; `None` in single-process mode.
     pub mesh: Option<Arc<GatewayMesh>>,
     /// Game transport; `None` until the UDP server is up.
@@ -50,11 +52,16 @@ pub fn api_router(state: ApiState) -> Router {
         .route("/api/v1/zones", get(list_zones))
         .route("/api/v1/zones/{id}", get(zone_detail))
         .route("/api/v1/resources", get(list_resources))
+        .route("/api/v1/resmon", get(resmon))
+        .route("/api/v1/resmon/resources/{name}", get(resmon_resource))
+        .route("/api/v1/resmon/events", get(resmon_events))
+        .route("/api/v1/profiler/record", post(profiler_record))
+        .route("/api/v1/profiler/stop", post(profiler_stop))
+        .route("/api/v1/profiler/status", get(profiler_status))
+        .route("/api/v1/profiler/latest", get(profiler_latest))
+        .route("/api/v1/profiler/latest/trace", get(profiler_latest_trace))
         .route("/api/v1/players/{source}/kick", post(kick_player))
-        .route(
-            "/api/v1/resources/{name}/{action}",
-            post(control_resource),
-        )
+        .route("/api/v1/resources/{name}/{action}", post(control_resource))
         .route("/api/v1/zones/{id}/drain", post(drain_zone))
         .with_state(state)
 }
@@ -163,10 +170,7 @@ async fn list_players(State(state): State<ApiState>, headers: HeaderMap) -> Resp
         .into_iter()
         .filter_map(|source| {
             let info = state.players.get(source)?;
-            let zone = state
-                .mesh
-                .as_ref()
-                .and_then(|m| m.router.zone_of(source));
+            let zone = state.mesh.as_ref().and_then(|m| m.router.zone_of(source));
             Some(json!({
                 "source": source,
                 "name": info.name,
@@ -280,6 +284,175 @@ async fn list_resources(State(state): State<ApiState>, headers: HeaderMap) -> Re
     Json(json!(resources)).into_response()
 }
 
+async fn resmon(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    if let Err(resp) = guard(&state, &headers, ApiPermission::MonitorRead, None) {
+        return *resp;
+    }
+    let snapshot = state.observability.snapshot();
+    let resources: Vec<_> = snapshot
+        .resources
+        .iter()
+        .map(|r| {
+            let avg_ms = if r.dispatch_count == 0 {
+                0.0
+            } else {
+                r.dispatch_cpu_total_us as f64 / r.dispatch_count as f64 / 1000.0
+            };
+            json!({
+                "name": r.resource,
+                "cpu_ms_1m": r.dispatch_cpu_total_us as f64 / 1000.0,
+                "cpu_ms_avg": avg_ms,
+                "dispatch_count": r.dispatch_count,
+                "p50_ms": r.dispatch_cpu_p50_us as f64 / 1000.0,
+                "p95_ms": r.dispatch_cpu_p95_us as f64 / 1000.0,
+                "p99_ms": r.dispatch_cpu_p99_us as f64 / 1000.0,
+                "watchdogs": r.watchdog_terminations,
+                "native_p95_ms": r.native_p95_us as f64 / 1000.0,
+                "native_timeouts": r.native_timeout_count,
+                "memory_mb": r.memory_used_bytes.map(|b| b as f64 / 1024.0 / 1024.0),
+                "memory": {
+                    "used_bytes": r.memory_used_bytes,
+                    "total_bytes": r.memory_total_bytes,
+                    "external_bytes": r.memory_external_bytes,
+                }
+            })
+        })
+        .collect();
+    Json(json!({
+        "uptime_secs": snapshot.uptime_secs,
+        "scope": snapshot.scope,
+        "resources": resources,
+    }))
+    .into_response()
+}
+
+async fn resmon_resource(
+    State(state): State<ApiState>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(resp) = guard(&state, &headers, ApiPermission::MonitorRead, None) {
+        return *resp;
+    }
+    let Some(resource) = state.observability.resource_snapshot(&name) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "unknown resource"})),
+        )
+            .into_response();
+    };
+    let handlers: Vec<_> = state
+        .observability
+        .snapshot()
+        .handlers
+        .into_iter()
+        .filter(|handler| handler.resource == name)
+        .collect();
+    Json(json!({
+        "scope": "gateway",
+        "resource": resource,
+        "handlers": handlers,
+    }))
+    .into_response()
+}
+
+async fn resmon_events(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    if let Err(resp) = guard(&state, &headers, ApiPermission::MonitorRead, None) {
+        return *resp;
+    }
+    Json(json!({
+        "scope": "gateway",
+        "events": state.observability.snapshot().handlers,
+    }))
+    .into_response()
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ProfilerRecordRequest {
+    frames: Option<usize>,
+    seconds: Option<u64>,
+    scope: Option<String>,
+    include_native_calls: Option<bool>,
+}
+
+async fn profiler_record(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Option<Json<ProfilerRecordRequest>>,
+) -> Response {
+    let key = match guard(
+        &state,
+        &headers,
+        ApiPermission::ProfilerControl,
+        Some(("profiler.record", "scope:gateway")),
+    ) {
+        Ok(k) => k,
+        Err(resp) => return *resp,
+    };
+    let request = body.map(|Json(body)| body);
+    let status = state.observability.start_profiler(ProfilerRecordOptions {
+        frames: request.as_ref().and_then(|r| r.frames),
+        seconds: request.as_ref().and_then(|r| r.seconds),
+        scope: request
+            .as_ref()
+            .and_then(|r| r.scope.clone())
+            .unwrap_or_else(|| "server".to_owned()),
+        include_native_calls: request
+            .as_ref()
+            .and_then(|r| r.include_native_calls)
+            .unwrap_or(true),
+    });
+    state
+        .audit
+        .record(&key, "profiler.record", "scope:gateway", "ok");
+    Json(json!(status)).into_response()
+}
+
+async fn profiler_stop(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    let key = match guard(
+        &state,
+        &headers,
+        ApiPermission::ProfilerControl,
+        Some(("profiler.stop", "scope:gateway")),
+    ) {
+        Ok(k) => k,
+        Err(resp) => return *resp,
+    };
+    let status = state.observability.stop_profiler();
+    state
+        .audit
+        .record(&key, "profiler.stop", "scope:gateway", "ok");
+    Json(json!(status)).into_response()
+}
+
+async fn profiler_status(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    if let Err(resp) = guard(&state, &headers, ApiPermission::MonitorRead, None) {
+        return *resp;
+    }
+    Json(json!(state.observability.profiler_status())).into_response()
+}
+
+async fn profiler_latest(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    if let Err(resp) = guard(&state, &headers, ApiPermission::ProfilerRead, None) {
+        return *resp;
+    }
+    Json(json!({
+        "scope": "gateway",
+        "status": state.observability.profiler_status(),
+        "trace_events": state.observability.latest_trace_json()["traceEvents"]
+            .as_array()
+            .map_or(0, Vec::len),
+    }))
+    .into_response()
+}
+
+async fn profiler_latest_trace(State(state): State<ApiState>, headers: HeaderMap) -> Response {
+    if let Err(resp) = guard(&state, &headers, ApiPermission::ProfilerRead, None) {
+        return *resp;
+    }
+    Json(state.observability.latest_trace_json()).into_response()
+}
+
 async fn kick_player(
     State(state): State<ApiState>,
     Path(source): Path<u32>,
@@ -297,7 +470,9 @@ async fn kick_player(
         Err(resp) => return *resp,
     };
     if state.players.get(source).is_none() {
-        state.audit.record(&key, "player.kick", &target, "not_found");
+        state
+            .audit
+            .record(&key, "player.kick", &target, "not_found");
         return (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "unknown player"})),
@@ -319,9 +494,12 @@ async fn kick_player(
     // ENet disconnect fires the normal drop path (playerDropped + directory
     // purge); the reason is recorded server-side.
     udp.drop_source(source);
-    state
-        .audit
-        .record(&key, "player.kick", &format!("{target} reason:{reason}"), "ok");
+    state.audit.record(
+        &key,
+        "player.kick",
+        &format!("{target} reason:{reason}"),
+        "ok",
+    );
     (
         StatusCode::ACCEPTED,
         Json(json!({ "source": source, "kicked": true })),
@@ -425,7 +603,9 @@ async fn drain_zone(
         Err(resp) => return *resp,
     };
     let Some(mesh) = &state.mesh else {
-        state.audit.record(&key, "zone.drain", &target, "meshing_disabled");
+        state
+            .audit
+            .record(&key, "zone.drain", &target, "meshing_disabled");
         return (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "meshing disabled"})),
