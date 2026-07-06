@@ -33,6 +33,7 @@
   let nextCallbackId = 1;
   // event name -> Map<callbackId, fn>
   const eventHandlers = new Map();
+  const commandHandlers = new Map();
 
   function AddEventHandler(name, cb) {
     if (typeof cb !== "function") {
@@ -59,6 +60,16 @@
 
   function TriggerClientEvent(name, source, ...args) {
     ops.op_trigger_client_event(String(name), source >>> 0, JSON.stringify(args));
+  }
+
+  function RegisterCommand(name, cb, restricted = false) {
+    if (typeof cb !== "function") {
+      throw new TypeError("RegisterCommand: callback must be a function");
+    }
+    const command = String(name);
+    const id = nextCallbackId++;
+    commandHandlers.set(command, { id, cb, restricted: !!restricted });
+    ops.op_register_command(command, !!restricted, id);
   }
 
   // Server → client native dispatch through the BASTON shim (see
@@ -169,6 +180,22 @@
     }
   }
 
+  function dispatchCommand(name, source, argsJson, raw) {
+    const entry = commandHandlers.get(name);
+    if (!entry) return;
+    const args = JSON.parse(argsJson);
+    const prev = globalThis.source;
+    globalThis.source = source;
+    try {
+      entry.cb(source, args, raw);
+    } catch (e) {
+      ops.op_report_handler_error();
+      console.error(`[baston] error in command '${name}': ${stringify(e)}`);
+    } finally {
+      globalThis.source = prev;
+    }
+  }
+
   // --- Zone transfer state (Phase D handoffs) ---
   // Resources register callbacks returning the state BASTON must carry to the
   // next zone. Collection merges all callbacks of this resource into one
@@ -197,6 +224,7 @@
     dispatch,
     dispatchWithSource,
     dispatchPlayerConnecting,
+    dispatchCommand,
     collectZoneTransferState,
   };
   globalThis.RegisterZoneTransferState = RegisterZoneTransferState;
@@ -211,6 +239,7 @@
   globalThis.emit = TriggerEvent;
   globalThis.TriggerClientEvent = TriggerClientEvent;
   globalThis.emitNet = TriggerClientEvent;
+  globalThis.RegisterCommand = RegisterCommand;
   globalThis.InvokeNativeOnClient = InvokeNativeOnClient;
   // GetPlayerPed(source): round trip to the player's client (Phase B).
   globalThis.GetPlayerPed = (source) =>

@@ -40,6 +40,7 @@ fn keyring() -> Arc<KeyRing> {
                         ApiPermission::ZoneDrain,
                         ApiPermission::ProfilerControl,
                         ApiPermission::ProfilerRead,
+                        ApiPermission::ConsoleExecute,
                     ],
                 },
             ],
@@ -132,6 +133,17 @@ fn req(path: &str, method: &str, token: Option<&str>) -> Request<Body> {
     b.body(Body::empty()).unwrap()
 }
 
+fn json_req(path: &str, token: Option<&str>, body: &str) -> Request<Body> {
+    let mut b = Request::builder()
+        .uri(path)
+        .method("POST")
+        .header("content-type", "application/json");
+    if let Some(t) = token {
+        b = b.header("Authorization", format!("Bearer {t}"));
+    }
+    b.body(Body::from(body.to_owned())).unwrap()
+}
+
 async fn body_json(response: axum::response::Response) -> serde_json::Value {
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&bytes).unwrap()
@@ -162,12 +174,14 @@ async fn monitoring_key_reads_but_cannot_control() {
         ("/api/v1/players/7/kick", "POST"),
         ("/api/v1/resources/axiom-core/stop", "POST"),
         ("/api/v1/zones/zone-a/drain", "POST"),
+        ("/api/v1/commands/execute", "POST"),
     ] {
-        let resp = app
-            .clone()
-            .oneshot(req(path, method, Some(MONITOR_TOKEN)))
-            .await
-            .unwrap();
+        let request = if path == "/api/v1/commands/execute" {
+            json_req(path, Some(MONITOR_TOKEN), r#"{"command":"resmon 1"}"#)
+        } else {
+            req(path, method, Some(MONITOR_TOKEN))
+        };
+        let resp = app.clone().oneshot(request).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{method} {path}");
     }
 
@@ -223,7 +237,7 @@ async fn status_and_players_report_real_data() {
             .unwrap(),
     )
     .await;
-    assert_eq!(resmon["scope"], "gateway");
+    assert_eq!(resmon["scope"], "mesh");
     assert_eq!(resmon["resources"][0]["name"], "axiom-core");
 }
 
@@ -284,6 +298,88 @@ async fn profiler_permissions_and_trace_flow() {
     )
     .await;
     assert!(trace["traceEvents"].as_array().unwrap().len() > 0);
+}
+
+#[tokio::test]
+async fn command_executor_controls_resmon_and_profiler() {
+    let fx = fixture(AuditLog::disabled(), false).await;
+    let app = api_router(fx.state);
+
+    let resp = app
+        .clone()
+        .oneshot(json_req(
+            "/api/v1/commands/execute",
+            Some(MONITOR_TOKEN),
+            r#"{"command":"resmon 1"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    let resmon = body_json(
+        app.clone()
+            .oneshot(json_req(
+                "/api/v1/commands/execute",
+                Some(CONTROL_TOKEN),
+                r#"{"command":"resmon 1"}"#,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(resmon["command"], "resmon");
+    assert_eq!(resmon["active"], true);
+
+    let record = body_json(
+        app.clone()
+            .oneshot(json_req(
+                "/api/v1/commands/execute",
+                Some(CONTROL_TOKEN),
+                r#"{"command":"profiler record 4"}"#,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(record["status"]["active"], true);
+
+    let resp = app
+        .clone()
+        .oneshot(req(
+            "/api/v1/resources/axiom-core/restart",
+            "POST",
+            Some(CONTROL_TOKEN),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let stop = body_json(
+        app.clone()
+            .oneshot(json_req(
+                "/api/v1/commands/execute",
+                Some(CONTROL_TOKEN),
+                r#"{"command":"profiler stop"}"#,
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(stop["status"]["active"], false);
+    assert!(stop["status"]["latest_events"].as_u64().unwrap() > 0);
+
+    let view = body_json(
+        app.oneshot(json_req(
+            "/api/v1/commands/execute",
+            Some(CONTROL_TOKEN),
+            r#"{"command":"profiler view"}"#,
+        ))
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(view["trace_url"], "/api/v1/profiler/latest/trace");
+    assert!(view["trace_events"].as_u64().unwrap() > 0);
 }
 
 #[tokio::test]

@@ -7,7 +7,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use baston_core::script_decryptor::{PlainDecryptor, ScriptDecryptor};
-use baston_scripting::{ScriptHost, ScriptSource};
+use baston_scripting::{Observability, ScriptHost, ScriptSource};
 use tokio::sync::Mutex;
 
 use super::manifest::{discover, DiscoveredResource};
@@ -53,6 +53,10 @@ impl ResourceManager {
 
     pub fn resources_dir(&self) -> &Path {
         &self.resources_dir
+    }
+
+    pub fn observability(&self) -> Arc<Observability> {
+        self.script_host.observability()
     }
 
     /// Install an external script decryptor (called by `baston-escrow-plugin`).
@@ -223,6 +227,18 @@ impl ResourceManager {
             entry.state = ResourceState::Stopped;
         }
         Ok(())
+    }
+
+    pub async fn execute_command(
+        &self,
+        command: &str,
+        source: u32,
+        args: Vec<String>,
+        raw: String,
+    ) -> Result<(), baston_scripting::ScriptError> {
+        self.script_host
+            .execute_command(command, source, args, raw)
+            .await
     }
 
     /// Stop (if started) then start — idempotent "make it run".

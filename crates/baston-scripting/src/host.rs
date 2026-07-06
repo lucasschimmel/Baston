@@ -49,6 +49,13 @@ enum RuntimeCommand {
         args_json: String,
         reply: oneshot::Sender<Result<QueuedEvents, ScriptError>>,
     },
+    DispatchCommand {
+        command: String,
+        source: u32,
+        args: Vec<String>,
+        raw: String,
+        reply: oneshot::Sender<Result<QueuedEvents, ScriptError>>,
+    },
     CollectTransferState {
         source: u32,
         reply: oneshot::Sender<Result<Option<String>, ScriptError>>,
@@ -329,6 +336,38 @@ impl ScriptHost {
         Ok(())
     }
 
+    pub async fn execute_command(
+        &self,
+        command: &str,
+        source: u32,
+        args: Vec<String>,
+        raw: String,
+    ) -> Result<(), ScriptError> {
+        let mut queued = Vec::new();
+        {
+            let runtimes = self.runtimes.read().await;
+            for (resource, handle) in runtimes.iter() {
+                match handle
+                    .send(|reply| RuntimeCommand::DispatchCommand {
+                        command: command.to_owned(),
+                        source,
+                        args: args.clone(),
+                        raw: raw.clone(),
+                        reply,
+                    })
+                    .await
+                {
+                    Ok(mut q) => queued.append(&mut q),
+                    Err(e) => {
+                        tracing::error!(target: "scripting", %resource, error = %e, "command dispatch failed");
+                    }
+                }
+            }
+        }
+        self.rebroadcast(queued).await;
+        Ok(())
+    }
+
     async fn rebroadcast(&self, queued: QueuedEvents) {
         for (event, args_json) in queued {
             self.broadcast_chain(event, args_json).await;
@@ -469,6 +508,18 @@ fn spawn_runtime_thread(
                         } => {
                             let result =
                                 runtime.dispatch_net_event(&event, source, &args_json).await;
+                            let _ = reply.send(result.map(|()| runtime.drain_queued_events()));
+                        }
+                        RuntimeCommand::DispatchCommand {
+                            command,
+                            source,
+                            args,
+                            raw,
+                            reply,
+                        } => {
+                            let result = runtime
+                                .dispatch_command(&command, source, &args, &raw)
+                                .await;
                             let _ = reply.send(result.map(|()| runtime.drain_queued_events()));
                         }
                         RuntimeCommand::CollectTransferState { source, reply } => {

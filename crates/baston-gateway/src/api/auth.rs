@@ -8,13 +8,14 @@ use axum::http::HeaderMap;
 use baston_config::{ApiConfig, ApiPermission};
 use subtle::ConstantTimeEq;
 
-const ALL_PERMISSIONS: [ApiPermission; 6] = [
+const ALL_PERMISSIONS: [ApiPermission; 7] = [
     ApiPermission::MonitorRead,
     ApiPermission::ResourceControl,
     ApiPermission::PlayerKick,
     ApiPermission::ZoneDrain,
     ApiPermission::ProfilerControl,
     ApiPermission::ProfilerRead,
+    ApiPermission::ConsoleExecute,
 ];
 
 /// Why a request was rejected. Distinguished so handlers can answer 401

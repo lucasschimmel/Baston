@@ -18,7 +18,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use baston_config::ApiPermission;
-use baston_scripting::{Observability, ProfilerRecordOptions};
+use baston_scripting::{
+    HandlerPerfStats, Observability, ProfilerRecordOptions, ResMonSnapshot, ResourcePerfStats,
+};
 use baston_zone::resource_loader::ResourceState;
 use baston_zone::ResourceManager;
 use serde_json::json;
@@ -60,6 +62,7 @@ pub fn api_router(state: ApiState) -> Router {
         .route("/api/v1/profiler/status", get(profiler_status))
         .route("/api/v1/profiler/latest", get(profiler_latest))
         .route("/api/v1/profiler/latest/trace", get(profiler_latest_trace))
+        .route("/api/v1/commands/execute", post(execute_command))
         .route("/api/v1/players/{source}/kick", post(kick_player))
         .route("/api/v1/resources/{name}/{action}", post(control_resource))
         .route("/api/v1/zones/{id}/drain", post(drain_zone))
@@ -288,40 +291,23 @@ async fn resmon(State(state): State<ApiState>, headers: HeaderMap) -> Response {
     if let Err(resp) = guard(&state, &headers, ApiPermission::MonitorRead, None) {
         return *resp;
     }
-    let snapshot = state.observability.snapshot();
-    let resources: Vec<_> = snapshot
-        .resources
+    let aggregate = collect_resmon(&state).await;
+    let resources: Vec<_> = aggregate
+        .snapshots
         .iter()
-        .map(|r| {
-            let avg_ms = if r.dispatch_count == 0 {
-                0.0
-            } else {
-                r.dispatch_cpu_total_us as f64 / r.dispatch_count as f64 / 1000.0
-            };
-            json!({
-                "name": r.resource,
-                "cpu_ms_1m": r.dispatch_cpu_total_us as f64 / 1000.0,
-                "cpu_ms_avg": avg_ms,
-                "dispatch_count": r.dispatch_count,
-                "p50_ms": r.dispatch_cpu_p50_us as f64 / 1000.0,
-                "p95_ms": r.dispatch_cpu_p95_us as f64 / 1000.0,
-                "p99_ms": r.dispatch_cpu_p99_us as f64 / 1000.0,
-                "watchdogs": r.watchdog_terminations,
-                "native_p95_ms": r.native_p95_us as f64 / 1000.0,
-                "native_timeouts": r.native_timeout_count,
-                "memory_mb": r.memory_used_bytes.map(|b| b as f64 / 1024.0 / 1024.0),
-                "memory": {
-                    "used_bytes": r.memory_used_bytes,
-                    "total_bytes": r.memory_total_bytes,
-                    "external_bytes": r.memory_external_bytes,
-                }
-            })
+        .flat_map(|(zone, snapshot)| {
+            snapshot
+                .resources
+                .iter()
+                .map(|resource| resource_json(zone, resource))
         })
         .collect();
     Json(json!({
-        "uptime_secs": snapshot.uptime_secs,
-        "scope": snapshot.scope,
+        "uptime_secs": aggregate.uptime_secs,
+        "scope": aggregate.scope,
+        "resmon_active": state.observability.resmon_enabled(),
         "resources": resources,
+        "zones": aggregate.zone_errors,
     }))
     .into_response()
 }
@@ -334,24 +320,36 @@ async fn resmon_resource(
     if let Err(resp) = guard(&state, &headers, ApiPermission::MonitorRead, None) {
         return *resp;
     }
-    let Some(resource) = state.observability.resource_snapshot(&name) else {
+    let aggregate = collect_resmon(&state).await;
+    let mut matches = Vec::new();
+    for (zone, snapshot) in &aggregate.snapshots {
+        for resource in &snapshot.resources {
+            if resource.resource != name {
+                continue;
+            }
+            let handlers: Vec<&HandlerPerfStats> = snapshot
+                .handlers
+                .iter()
+                .filter(|handler| handler.resource == name)
+                .collect();
+            matches.push(json!({
+                "zone": zone,
+                "resource": resource,
+                "handlers": handlers,
+            }));
+        }
+    }
+    if matches.is_empty() {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "unknown resource"})),
         )
             .into_response();
-    };
-    let handlers: Vec<_> = state
-        .observability
-        .snapshot()
-        .handlers
-        .into_iter()
-        .filter(|handler| handler.resource == name)
-        .collect();
+    }
     Json(json!({
-        "scope": "gateway",
-        "resource": resource,
-        "handlers": handlers,
+        "scope": aggregate.scope,
+        "resources": matches,
+        "zones": aggregate.zone_errors,
     }))
     .into_response()
 }
@@ -360,11 +358,116 @@ async fn resmon_events(State(state): State<ApiState>, headers: HeaderMap) -> Res
     if let Err(resp) = guard(&state, &headers, ApiPermission::MonitorRead, None) {
         return *resp;
     }
+    let aggregate = collect_resmon(&state).await;
+    let mut events = Vec::new();
+    for (zone, snapshot) in &aggregate.snapshots {
+        for handler in &snapshot.handlers {
+            events.push(json!({
+                "zone": zone,
+                "resource": handler.resource,
+                "kind": handler.kind,
+                "name": handler.name,
+                "count": handler.count,
+                "total_us": handler.total_us,
+                "p95_us": handler.p95_us,
+                "p99_us": handler.p99_us,
+                "errors": handler.errors,
+            }));
+        }
+    }
     Json(json!({
-        "scope": "gateway",
-        "events": state.observability.snapshot().handlers,
+        "scope": aggregate.scope,
+        "events": events,
+        "zones": aggregate.zone_errors,
     }))
     .into_response()
+}
+
+struct ResmonAggregate {
+    scope: &'static str,
+    uptime_secs: u64,
+    snapshots: Vec<(String, ResMonSnapshot)>,
+    zone_errors: Vec<serde_json::Value>,
+}
+
+async fn collect_resmon(state: &ApiState) -> ResmonAggregate {
+    let gateway = state.observability.snapshot();
+    let mut aggregate = ResmonAggregate {
+        scope: if state.mesh.is_some() {
+            "mesh"
+        } else {
+            "gateway"
+        },
+        uptime_secs: gateway.uptime_secs,
+        snapshots: vec![("gateway".to_owned(), gateway)],
+        zone_errors: Vec::new(),
+    };
+    let Some(mesh) = &state.mesh else {
+        return aggregate;
+    };
+    for zone in mesh.registry.stats().await {
+        let Some(mut client) = mesh.registry.zone_client(&zone.zone_id).await else {
+            aggregate.zone_errors.push(json!({
+                "zone": zone.zone_id,
+                "error": "missing zone client",
+            }));
+            continue;
+        };
+        match client
+            .get_resmon_snapshot(baston_protocol::mesh::ResmonSnapshotRequest {})
+            .await
+        {
+            Ok(resp) => {
+                let resp = resp.into_inner();
+                if !resp.ok {
+                    aggregate.zone_errors.push(json!({
+                        "zone": zone.zone_id,
+                        "error": resp.message,
+                    }));
+                    continue;
+                }
+                match serde_json::from_str::<ResMonSnapshot>(&resp.snapshot_json) {
+                    Ok(snapshot) => aggregate.snapshots.push((zone.zone_id, snapshot)),
+                    Err(e) => aggregate.zone_errors.push(json!({
+                        "zone": zone.zone_id,
+                        "error": format!("invalid resmon snapshot: {e}"),
+                    })),
+                }
+            }
+            Err(status) => aggregate.zone_errors.push(json!({
+                "zone": zone.zone_id,
+                "error": status.message(),
+            })),
+        }
+    }
+    aggregate
+}
+
+fn resource_json(zone: &str, r: &ResourcePerfStats) -> serde_json::Value {
+    let avg_ms = if r.dispatch_count == 0 {
+        0.0
+    } else {
+        r.dispatch_cpu_total_us as f64 / r.dispatch_count as f64 / 1000.0
+    };
+    json!({
+        "name": r.resource,
+        "zone": zone,
+        "cpu_ms_1m": r.dispatch_cpu_total_us as f64 / 1000.0,
+        "cpu_ms_avg": avg_ms,
+        "dispatch_count": r.dispatch_count,
+        "p50_ms": r.dispatch_cpu_p50_us as f64 / 1000.0,
+        "p95_ms": r.dispatch_cpu_p95_us as f64 / 1000.0,
+        "p99_ms": r.dispatch_cpu_p99_us as f64 / 1000.0,
+        "watchdogs": r.watchdog_terminations,
+        "native_p95_ms": r.native_p95_us as f64 / 1000.0,
+        "native_timeouts": r.native_timeout_count,
+        "memory_mb": r.memory_used_bytes.map(|b| b as f64 / 1024.0 / 1024.0),
+        "memory": {
+            "used_bytes": r.memory_used_bytes,
+            "total_bytes": r.memory_total_bytes,
+            "external_bytes": r.memory_external_bytes,
+        }
+    })
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -451,6 +554,192 @@ async fn profiler_latest_trace(State(state): State<ApiState>, headers: HeaderMap
         return *resp;
     }
     Json(state.observability.latest_trace_json()).into_response()
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ExecuteCommandRequest {
+    command: String,
+    source: Option<u32>,
+}
+
+async fn execute_command(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(body): Json<ExecuteCommandRequest>,
+) -> Response {
+    let raw = body.command.trim();
+    let parts: Vec<&str> = raw.split_whitespace().collect();
+    let command_name = parts.first().copied().unwrap_or("");
+    let target = if command_name.is_empty() {
+        "command:<empty>".to_owned()
+    } else {
+        format!("command:{command_name}")
+    };
+    let key = match guard(
+        &state,
+        &headers,
+        ApiPermission::ConsoleExecute,
+        Some(("command.execute", &target)),
+    ) {
+        Ok(k) => k,
+        Err(resp) => return *resp,
+    };
+    if command_name.is_empty() {
+        state
+            .audit
+            .record(&key, "command.execute", &target, "invalid");
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "command must not be empty"})),
+        )
+            .into_response();
+    }
+
+    match command_name {
+        "resmon" => execute_resmon_command(&state, &key, &target, &parts[1..]).await,
+        "profiler" => execute_profiler_command(&state, &key, &target, &parts[1..]),
+        other => {
+            let args = parts[1..].iter().map(|part| (*part).to_owned()).collect();
+            match state
+                .resource_manager
+                .execute_command(other, body.source.unwrap_or(0), args, raw.to_owned())
+                .await
+            {
+                Ok(()) => {
+                    state.audit.record(&key, "command.execute", &target, "ok");
+                    (
+                        StatusCode::ACCEPTED,
+                        Json(json!({
+                            "command": other,
+                            "accepted": true,
+                            "source": body.source.unwrap_or(0),
+                        })),
+                    )
+                        .into_response()
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    state.audit.record(&key, "command.execute", &target, &msg);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"command": other, "error": msg})),
+                    )
+                        .into_response()
+                }
+            }
+        }
+    }
+}
+
+async fn execute_resmon_command(
+    state: &ApiState,
+    key: &str,
+    target: &str,
+    args: &[&str],
+) -> Response {
+    match args.first().copied() {
+        None => {}
+        Some("1" | "true" | "on" | "start") => state.observability.set_resmon_enabled(true),
+        Some("0" | "false" | "off" | "stop") => state.observability.set_resmon_enabled(false),
+        Some(_) => {
+            state
+                .audit
+                .record(key, "command.execute", target, "invalid");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "usage: resmon [1|0|on|off]"})),
+            )
+                .into_response();
+        }
+    }
+    let aggregate = collect_resmon(state).await;
+    let resources: Vec<_> = aggregate
+        .snapshots
+        .iter()
+        .flat_map(|(zone, snapshot)| {
+            snapshot
+                .resources
+                .iter()
+                .map(|resource| resource_json(zone, resource))
+        })
+        .collect();
+    state.audit.record(key, "command.execute", target, "ok");
+    Json(json!({
+        "command": "resmon",
+        "active": state.observability.resmon_enabled(),
+        "scope": aggregate.scope,
+        "uptime_secs": aggregate.uptime_secs,
+        "resources": resources,
+        "zones": aggregate.zone_errors,
+    }))
+    .into_response()
+}
+
+fn execute_profiler_command(state: &ApiState, key: &str, target: &str, args: &[&str]) -> Response {
+    match args.first().copied() {
+        Some("record") => {
+            let frames = match args.get(1) {
+                Some(raw) => match raw.parse::<usize>() {
+                    Ok(frames) if frames > 0 => Some(frames),
+                    _ => {
+                        state
+                            .audit
+                            .record(key, "command.execute", target, "invalid");
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({"error": "usage: profiler record [frames]"})),
+                        )
+                            .into_response();
+                    }
+                },
+                None => None,
+            };
+            let status = state.observability.start_profiler(ProfilerRecordOptions {
+                frames,
+                seconds: None,
+                scope: "server".to_owned(),
+                include_native_calls: true,
+            });
+            state.audit.record(key, "command.execute", target, "ok");
+            Json(json!({"command": "profiler", "action": "record", "status": status}))
+                .into_response()
+        }
+        Some("stop") => {
+            let status = state.observability.stop_profiler();
+            state.audit.record(key, "command.execute", target, "ok");
+            Json(json!({"command": "profiler", "action": "stop", "status": status})).into_response()
+        }
+        Some("status") => {
+            let status = state.observability.profiler_status();
+            state.audit.record(key, "command.execute", target, "ok");
+            Json(json!({"command": "profiler", "action": "status", "status": status}))
+                .into_response()
+        }
+        Some("view") => {
+            let trace_events = state.observability.latest_trace_json()["traceEvents"]
+                .as_array()
+                .map_or(0, Vec::len);
+            state.audit.record(key, "command.execute", target, "ok");
+            Json(json!({
+                "command": "profiler",
+                "action": "view",
+                "status": state.observability.profiler_status(),
+                "trace_url": "/api/v1/profiler/latest/trace",
+                "trace_events": trace_events,
+            }))
+            .into_response()
+        }
+        _ => {
+            state
+                .audit
+                .record(key, "command.execute", target, "invalid");
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "usage: profiler record [frames]|stop|status|view"})),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn kick_player(

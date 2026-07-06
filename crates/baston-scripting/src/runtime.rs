@@ -217,6 +217,7 @@ impl ScriptRuntime {
                 queued_events: VecDeque::new(),
                 handled_events: Default::default(),
                 exports: Default::default(),
+                commands: Default::default(),
                 has_zone_transfer_state: false,
                 collected_transfer_state: None,
                 handler_errors: 0,
@@ -316,6 +317,29 @@ impl ScriptRuntime {
             Some(source),
         )
         .await
+    }
+
+    /// Dispatch a server command into this isolate's `RegisterCommand` registry.
+    pub async fn dispatch_command(
+        &mut self,
+        command: &str,
+        source: u32,
+        args: &[String],
+        raw: &str,
+    ) -> Result<(), ScriptError> {
+        if !self.has_command(command) {
+            return Ok(());
+        }
+        let args_json = serde_json::to_string(args).unwrap_or_else(|_| "[]".into());
+        let code = format!(
+            "globalThis.__baston.dispatchCommand({}, {}, {}, {});",
+            serde_json::to_string(command).unwrap_or_else(|_| "\"\"".into()),
+            source,
+            serde_json::to_string(&args_json).unwrap_or_else(|_| "\"[]\"".into()),
+            serde_json::to_string(raw).unwrap_or_else(|_| "\"\"".into()),
+        );
+        self.run_dispatch(command, code, DispatchKind::Command, Some(source))
+            .await
     }
 
     async fn run_dispatch(
@@ -479,6 +503,15 @@ impl ScriptRuntime {
             .borrow::<RuntimeContext>()
             .handled_events
             .contains(event)
+    }
+
+    pub fn has_command(&mut self, command: &str) -> bool {
+        let op_state = self.js.op_state();
+        let op_state = op_state.borrow();
+        op_state
+            .borrow::<RuntimeContext>()
+            .commands
+            .contains_key(command)
     }
 }
 

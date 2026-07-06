@@ -91,7 +91,8 @@ pub enum ConfigError {
     #[error(
         "[[api.keys]] key \"{0}\" has no permissions\n  \
          → grant at least one of: \"monitor.read\", \"resource.control\", \
-         \"player.kick\", \"zone.drain\", \"profiler.control\", \"profiler.read\""
+         \"player.kick\", \"zone.drain\", \"profiler.control\", \"profiler.read\", \
+         \"console.execute\""
     )]
     ApiKeyNoPermissions(String),
     #[error(
@@ -205,6 +206,9 @@ pub enum ApiPermission {
     /// Read profiler captures.
     #[serde(rename = "profiler.read")]
     ProfilerRead,
+    /// Execute bounded admin console commands.
+    #[serde(rename = "console.execute")]
+    ConsoleExecute,
 }
 
 impl ApiConfig {
@@ -1024,13 +1028,17 @@ mod tests {
              [[api.keys]]\n\
              name = \"discord-bot\"\n\
              token = \"0123456789abcdef0123456789abcdef\"\n\
-             permissions = [\"monitor.read\", \"player.kick\"]\n",
+             permissions = [\"monitor.read\", \"player.kick\", \"console.execute\"]\n",
         )
         .unwrap();
         assert_eq!(config.api.keys.len(), 1);
         assert_eq!(
             config.api.keys[0].permissions,
-            vec![ApiPermission::MonitorRead, ApiPermission::PlayerKick]
+            vec![
+                ApiPermission::MonitorRead,
+                ApiPermission::PlayerKick,
+                ApiPermission::ConsoleExecute
+            ]
         );
         config.api.validate().expect("well-formed key");
     }

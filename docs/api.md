@@ -29,6 +29,7 @@ permissions = [
   "zone.drain",
   "profiler.control",
   "profiler.read",
+  "console.execute",
 ]
 ```
 
@@ -40,6 +41,7 @@ permissions = [
 | `zone.drain` | `POST /api/v1/zones/{id}/drain` |
 | `profiler.control` | `POST /api/v1/profiler/record`, `POST /api/v1/profiler/stop` |
 | `profiler.read` | `GET /api/v1/profiler/latest`, `GET /api/v1/profiler/latest/trace` |
+| `console.execute` | `POST /api/v1/commands/execute` for bounded admin console commands |
 
 Rules enforced at boot (`ApiConfig::validate`): unique names, unique tokens,
 tokens ≥ 32 chars without whitespace, at least one permission per key.
@@ -56,17 +58,18 @@ GET /api/v1/players              → [ { source, name, identifiers, zone } ]
 GET /api/v1/zones                → [ { id, bounds, players, entities, max_players, heartbeat_age_ms, status } ]
 GET /api/v1/zones/{id}           → zone detail (404 when unknown / meshing off)
 GET /api/v1/resources            → [ { name, state, zone } ]   # zone = "gateway" or zone id
-GET /api/v1/resmon               → { uptime_secs, scope, resources }
+GET /api/v1/resmon               → { uptime_secs, scope, resmon_active, resources, zones }
 GET /api/v1/resmon/resources/{name}
 GET /api/v1/resmon/events
 GET /api/v1/profiler/status      → current bounded recording status
 ```
 
-`/api/v1/resmon` currently reports `scope: "gateway"`: it includes the local
-gateway process runtime. Zone aggregation over gRPC is the next step; zones
-already expose the Prometheus series on their own metrics endpoint. `zone`
-fields are `null`/empty in single-process mode. Prometheus metrics stay on
-their own port (`metrics.port`, default 9090) — Grafana provisioning is in
+`/api/v1/resmon` reports `scope: "gateway"` in single-process mode and
+`scope: "mesh"` when meshing is enabled. In mesh mode it aggregates the local
+gateway snapshot plus every registered zone via `ZoneService.GetResmonSnapshot`;
+zone RPC errors are returned in the `zones` array while available snapshots are
+still shown. Each resource/event row includes `zone`. Prometheus metrics stay
+on their own port (`metrics.port`, default 9090) — Grafana provisioning is in
 `monitoring/`.
 
 ```bash
@@ -83,6 +86,7 @@ POST /api/v1/resources/{name}/restart
 POST /api/v1/zones/{id}/drain               # perm zone.drain
 POST /api/v1/profiler/record                # perm profiler.control
 POST /api/v1/profiler/stop                  # perm profiler.control
+POST /api/v1/commands/execute               # perm console.execute
 ```
 
 - **Kick** drops the ENet peer; the normal disconnect path fires
@@ -98,6 +102,11 @@ POST /api/v1/profiler/stop                  # perm profiler.control
   accepts `{"frames":500,"seconds":null,"scope":"server","include_native_calls":true}`.
   Captures are in-memory, bounded, disabled by default, and never include admin
   tokens, identifiers, IPs or event payloads.
+- **Command execution** accepts `{"command":"resmon 1","source":0}`. Built-ins:
+  `resmon [1|0|on|off]`, `profiler record [frames]`, `profiler stop`,
+  `profiler status`, `profiler view`. Unknown commands are relayed to resources
+  registered with `RegisterCommand`. Audit targets only include the command
+  name (`command:resmon`), not raw arguments.
 
 ## Profiler capture routes (`profiler.read`)
 

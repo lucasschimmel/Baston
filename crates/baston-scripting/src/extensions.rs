@@ -8,8 +8,7 @@
 //! `globalThis.__baston.dispatch(...)` via `execute_script`, which keeps us
 //! independent from `v8::Global<v8::Function>` juggling.
 
-use std::collections::HashSet;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -30,6 +29,8 @@ pub struct RuntimeContext {
     pub handled_events: HashSet<String>,
     /// Export names registered by this resource (bookkeeping).
     pub exports: HashSet<String>,
+    /// Server commands registered by this resource via `RegisterCommand`.
+    pub commands: HashMap<String, bool>,
     /// Whether this resource registered a `RegisterZoneTransferState` callback.
     pub has_zone_transfer_state: bool,
     /// JSON collected by `op_report_zone_transfer_state` during the last
@@ -83,6 +84,19 @@ fn op_add_event_handler(state: &mut OpState, #[string] event: String, _cb_id: u3
     let ctx = state.borrow_mut::<RuntimeContext>();
     tracing::debug!(target: "events", resource = %ctx.resource_name, %event, "handler registered");
     ctx.handled_events.insert(event);
+}
+
+#[op2(fast)]
+fn op_register_command(state: &mut OpState, #[string] name: String, restricted: bool, _cb_id: u32) {
+    let ctx = state.borrow_mut::<RuntimeContext>();
+    tracing::debug!(
+        target: "commands",
+        resource = %ctx.resource_name,
+        %name,
+        restricted,
+        "command registered"
+    );
+    ctx.commands.insert(name, restricted);
 }
 
 #[op2(fast)]
@@ -251,6 +265,7 @@ deno_core::extension!(
     baston_events,
     ops = [
         op_add_event_handler,
+        op_register_command,
         op_trigger_event,
         op_trigger_client_event,
         op_invoke_native_on_client,

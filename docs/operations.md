@@ -34,12 +34,24 @@ the gateway.
 The admin port also serves `/api/v1/*`: read-only monitoring (status,
 players, zones, resources, ResMon, profiler status), profiler trace capture
 and audited control routes (kick, resource start/stop/restart, drain,
-profiler record/stop) with per-key permissions declared in `[[api.keys]]`.
+profiler record/stop, bounded command execution) with per-key permissions
+declared in `[[api.keys]]`.
 See [api.md](api.md).
 
-Console commands (`resmon 1`, `profiler record 500`, `profiler stop/status/view`)
-are not implemented yet. Use the `/api/v1/resmon` and `/api/v1/profiler/*`
-routes as the authoritative control surface until a command registry lands.
+Use `POST /api/v1/commands/execute` with `console.execute` for admin command
+compatibility:
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "content-type: application/json" \
+  -d '{"command":"resmon 1"}' \
+  http://localhost:8080/api/v1/commands/execute | jq
+```
+
+Supported built-ins are `resmon [1|0|on|off]`, `profiler record [frames]`,
+`profiler stop`, `profiler status`, and `profiler view`. Unknown commands are
+relayed to JS resources registered with `RegisterCommand`; native console/RCON
+front-ends can call the same API path later.
 
 ## Draining a zone
 

@@ -11,7 +11,7 @@ use baston_protocol::mesh::{
     ActivatePlayerRequest, ActivatePlayerResponse, ControlResourceRequest, ControlResourceResponse,
     HeartbeatRequest, ListResourcesRequest, ListResourcesResponse, PlayerStateRequest,
     PrepareForPlayerResponse, RegisterZoneRequest, ReleasePlayerRequest, ReleasePlayerResponse,
-    ResourceStatus,
+    ResmonSnapshotRequest, ResmonSnapshotResponse, ResourceStatus,
 };
 use baston_protocol::{Aabb, PlayerStateSnapshot};
 use dashmap::DashMap;
@@ -355,6 +355,23 @@ impl ZoneService for ZoneGrpc {
                 ok: false,
                 message: e.to_string(),
             },
+        }))
+    }
+
+    async fn get_resmon_snapshot(
+        &self,
+        _request: Request<ResmonSnapshotRequest>,
+    ) -> Result<Response<ResmonSnapshotResponse>, Status> {
+        let Some(rm) = self.mesh.resource_manager() else {
+            return Err(Status::unavailable("resource manager not wired"));
+        };
+        let snapshot = rm.observability().snapshot();
+        let snapshot_json =
+            serde_json::to_string(&snapshot).map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(ResmonSnapshotResponse {
+            ok: true,
+            message: String::new(),
+            snapshot_json,
         }))
     }
 }

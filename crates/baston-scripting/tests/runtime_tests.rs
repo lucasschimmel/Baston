@@ -179,3 +179,46 @@ async fn handler_errors_are_reported_to_resmon() {
         .expect("boom handler stats");
     assert_eq!(handler.errors, 1);
 }
+
+#[tokio::test]
+async fn register_command_dispatches_to_resource() {
+    let (host, _) = host();
+    host.load_resource(
+        "cmd",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                RegisterCommand('hello', (source, args, raw) => {
+                  if (source !== 0 || args[0] !== 'world' || raw !== 'hello world') {
+                    throw new Error('bad command payload')
+                  }
+                  TriggerEvent('cmd:seen')
+                }, false)
+                AddEventHandler('cmd:seen', () => { throw new Error('command event reached') })
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load");
+
+    host.execute_command("hello", 0, vec!["world".into()], "hello world".into())
+        .await
+        .expect("command");
+
+    let snapshot = host.observability().snapshot();
+    let command = snapshot
+        .handlers
+        .iter()
+        .find(|handler| handler.resource == "cmd" && handler.name == "hello")
+        .expect("command handler stats");
+    assert_eq!(command.count, 1);
+    assert_eq!(command.errors, 0);
+
+    let event = snapshot
+        .handlers
+        .iter()
+        .find(|handler| handler.resource == "cmd" && handler.name == "cmd:seen")
+        .expect("cmd event stats");
+    assert_eq!(event.errors, 1);
+}

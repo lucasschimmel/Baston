@@ -21,6 +21,7 @@ service ZoneService {
   // and status listing to each zone's ResourceManager.
   rpc ListResources(ListResourcesRequest) returns (ListResourcesResponse);
   rpc ControlResource(ControlResourceRequest) returns (ControlResourceResponse);
+  rpc GetResmonSnapshot(ResmonSnapshotRequest) returns (ResmonSnapshotResponse);
 }
 
 message BoundingBox {
@@ -135,4 +136,15 @@ message ControlResourceRequest {
 message ControlResourceResponse {
   bool ok = 1;
   string message = 2;
+}
+
+message ResmonSnapshotRequest {}
+
+message ResmonSnapshotResponse {
+  bool ok = 1;
+  string message = 2;
+  // JSON-serialized baston_scripting::ResMonSnapshot. This is an admin
+  // diagnostic path, not a hot data-plane path, and keeps the protobuf stable
+  // while ResMon fields evolve.
+  string snapshot_json = 3;
 }

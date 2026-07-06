@@ -1,17 +1,18 @@
 //! Runtime performance collection for ResMon and bounded Chrome Trace export.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const DEFAULT_SAMPLE_CAP: usize = 512;
 const DEFAULT_TRACE_CAP: usize = 4096;
 const MAX_PROM_EVENT_LABELS: usize = 128;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DispatchKind {
     LoadScript,
     Event,
@@ -19,6 +20,7 @@ pub enum DispatchKind {
     PlayerConnecting,
     ZoneTransferState,
     NativeRoundtrip,
+    Command,
 }
 
 impl DispatchKind {
@@ -30,11 +32,12 @@ impl DispatchKind {
             Self::PlayerConnecting => "PlayerConnecting",
             Self::ZoneTransferState => "ZoneTransferState",
             Self::NativeRoundtrip => "NativeRoundtrip",
+            Self::Command => "Command",
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResourcePerfStats {
     pub resource: String,
     pub dispatch_count: u64,
@@ -53,7 +56,7 @@ pub struct ResourcePerfStats {
     pub memory_external_bytes: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandlerPerfStats {
     pub resource: String,
     pub kind: DispatchKind,
@@ -65,7 +68,7 @@ pub struct HandlerPerfStats {
     pub errors: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResMonSnapshot {
     pub uptime_secs: u64,
     pub scope: String,
@@ -73,7 +76,7 @@ pub struct ResMonSnapshot {
     pub handlers: Vec<HandlerPerfStats>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfilerStatus {
     pub active: bool,
     pub scope: String,
@@ -185,6 +188,7 @@ pub struct Observability {
     resources: DashMap<String, Mutex<ResourceStats>>,
     profiler: Mutex<ProfilerState>,
     prom_events: Mutex<Vec<String>>,
+    resmon_enabled: AtomicBool,
 }
 
 impl Default for Observability {
@@ -202,6 +206,7 @@ impl Observability {
             resources: DashMap::new(),
             profiler: Mutex::new(ProfilerState::default()),
             prom_events: Mutex::new(Vec::new()),
+            resmon_enabled: AtomicBool::new(false),
         }
     }
 
@@ -397,6 +402,14 @@ impl Observability {
             resources,
             handlers,
         }
+    }
+
+    pub fn set_resmon_enabled(&self, enabled: bool) {
+        self.resmon_enabled.store(enabled, Ordering::Release);
+    }
+
+    pub fn resmon_enabled(&self) -> bool {
+        self.resmon_enabled.load(Ordering::Acquire)
     }
 
     pub fn resource_snapshot(&self, name: &str) -> Option<ResourcePerfStats> {
