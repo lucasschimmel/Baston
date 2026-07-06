@@ -115,3 +115,46 @@ groups:
             misconfiguration or a corrupt encrypted asset. Check zone logs
             (`docker compose logs`, target=resources) and `GET /api/v1/resources`
             for the failing resource.
+
+      - alert: ScriptWatchdogTerminations
+        # Any forced V8 termination means one resource ran past the dispatch
+        # budget and was interrupted. That is always actionable.
+        expr: increase(baston_script_watchdog_terminations_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "BASTON script watchdog fired for resource {{ $labels.resource }}"
+          description: >-
+            A resource dispatch exceeded the watchdog budget and V8 terminated
+            it. Inspect `GET /api/v1/resmon/resources/{{ $labels.resource }}`,
+            then capture `POST /api/v1/profiler/record` around the workload to
+            identify the slow handler.
+
+      - alert: NativeRoundtripTimeouts
+        # Server->client native calls block the resource runtime until result or
+        # timeout, so a sustained increase directly impacts script latency.
+        expr: sum(rate(baston_native_roundtrip_timeouts_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "BASTON native roundtrip timeouts are increasing"
+          description: >-
+            Native roundtrip timeouts are rising for server-side scripts. Check
+            the Native roundtrip panels on the Server Overview dashboard and
+            `GET /api/v1/resmon/events` for the affected resource/hash.
+
+      - alert: ScriptDispatchP99High
+        # 100ms p99 is well above normal JS dispatch latency and visible enough
+        # to deserve investigation before it becomes hitching.
+        expr: histogram_quantile(0.99, sum by (resource, le) (rate(baston_script_dispatch_duration_seconds_bucket[5m]))) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "BASTON script dispatch p99 high for {{ $labels.resource }}"
+          description: >-
+            Script dispatch p99 stayed above 100ms for 10m. Use
+            `GET /api/v1/resmon/resources/{{ $labels.resource }}` and a bounded
+            profiler recording to find the slow event or handler.

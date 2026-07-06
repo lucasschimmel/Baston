@@ -72,6 +72,58 @@
       "gridPos": { "x": 18, "y": 14, "w": 6, "h": 8 },
       "fieldConfig": { "defaults": { "unit": "Bps" } },
       "targets": [{ "expr": "rate(snapshot_bytes_sent[1m])", "refId": "A" }]
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "Script dispatch p95/p99 by resource (ms)",
+      "gridPos": { "x": 0, "y": 22, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "ms" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum by (resource, le) (rate(baston_script_dispatch_duration_seconds_bucket[5m]))) * 1000", "refId": "A", "legendFormat": "{{resource}} p95" },
+        { "expr": "histogram_quantile(0.99, sum by (resource, le) (rate(baston_script_dispatch_duration_seconds_bucket[5m]))) * 1000", "refId": "B", "legendFormat": "{{resource}} p99" }
+      ]
+    },
+    {
+      "id": 11, "type": "timeseries", "title": "Script dispatch rate /s by resource",
+      "gridPos": { "x": 12, "y": 22, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [
+        { "expr": "sum by (resource, status) (rate(baston_script_dispatch_total[5m]))", "refId": "A", "legendFormat": "{{resource}} · {{status}}" }
+      ]
+    },
+    {
+      "id": 12, "type": "stat", "title": "Script watchdog terminations (5m)",
+      "gridPos": { "x": 0, "y": 30, "w": 6, "h": 6 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "red", "value": 1 }
+          ] }
+        }
+      },
+      "targets": [{ "expr": "sum(increase(baston_script_watchdog_terminations_total[5m]))", "refId": "A" }]
+    },
+    {
+      "id": 13, "type": "timeseries", "title": "Native roundtrip p95/p99 (ms)",
+      "gridPos": { "x": 6, "y": 30, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "ms" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum by (resource, le) (rate(baston_native_roundtrip_duration_seconds_bucket[5m]))) * 1000", "refId": "A", "legendFormat": "{{resource}} p95" },
+        { "expr": "histogram_quantile(0.99, sum by (resource, le) (rate(baston_native_roundtrip_duration_seconds_bucket[5m]))) * 1000", "refId": "B", "legendFormat": "{{resource}} p99" }
+      ]
+    },
+    {
+      "id": 14, "type": "timeseries", "title": "Native timeouts /s",
+      "gridPos": { "x": 18, "y": 30, "w": 6, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "targets": [{ "expr": "sum by (resource) (rate(baston_native_roundtrip_timeouts_total[5m]))", "refId": "A", "legendFormat": "{{resource}}" }]
+    },
+    {
+      "id": 15, "type": "stat", "title": "Profiler active",
+      "gridPos": { "x": 0, "y": 36, "w": 6, "h": 6 },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "targets": [{ "expr": "baston_profiler_active", "refId": "A" }]
     }
   ]
 }
