@@ -297,7 +297,7 @@ async fn profiler_permissions_and_trace_flow() {
         .unwrap(),
     )
     .await;
-    assert!(trace["traceEvents"].as_array().unwrap().len() > 0);
+    assert!(!trace["traceEvents"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]

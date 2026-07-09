@@ -261,16 +261,16 @@ impl ScriptHost {
         // normal path; this keeps load idempotent regardless).
         self.runtimes.write().await.remove(name);
 
-        let handle = spawn_runtime_thread(
-            name,
-            self.started_at,
-            Arc::clone(&self.deferrals),
-            Arc::clone(&self.players),
-            self.net.clone(),
-            Arc::clone(&self.observability),
-            Arc::clone(&self.convars),
-            self.resources.clone(),
-        )?;
+        let handle = spawn_runtime_thread(RuntimeThreadParams {
+            resource_name: name,
+            started_at: self.started_at,
+            deferrals: Arc::clone(&self.deferrals),
+            players: Arc::clone(&self.players),
+            net: self.net.clone(),
+            observability: Arc::clone(&self.observability),
+            convars: Arc::clone(&self.convars),
+            resources: self.resources.clone(),
+        })?;
         let queued = handle
             .send(|reply| RuntimeCommand::ExecuteScripts { scripts, reply })
             .await?;
@@ -438,9 +438,8 @@ impl ScriptHost {
     }
 }
 
-/// Spawn the dedicated isolate thread for one resource.
-fn spawn_runtime_thread(
-    resource_name: &str,
+struct RuntimeThreadParams<'a> {
+    resource_name: &'a str,
     started_at: Instant,
     deferrals: Arc<DeferralRegistry>,
     players: Arc<PlayerDirectory>,
@@ -448,9 +447,24 @@ fn spawn_runtime_thread(
     observability: Arc<Observability>,
     convars: Arc<DashMap<String, String>>,
     resources: ResourceRegistry,
+}
+
+/// Spawn the dedicated isolate thread for one resource.
+fn spawn_runtime_thread(
+    params: RuntimeThreadParams<'_>,
 ) -> Result<ResourceRuntimeHandle, ScriptError> {
     let (tx, mut rx) = mpsc::channel::<RuntimeCommand>(64);
-    let name = resource_name.to_owned();
+    let name = params.resource_name.to_owned();
+    let RuntimeThreadParams {
+        started_at,
+        deferrals,
+        players,
+        net,
+        observability,
+        convars,
+        resources,
+        ..
+    } = params;
     // Runtime creation happens on the isolate thread; report init errors
     // through this channel so load_resource can surface them.
     let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(), ScriptError>>();

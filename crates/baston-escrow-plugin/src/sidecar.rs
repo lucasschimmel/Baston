@@ -112,6 +112,9 @@ impl Sidecar {
             .map_err(|e| EscrowPluginError::SidecarSpawn(format!("writing sidecar.cfg: {e}")))?;
 
         let mut cmd = Command::new(&params.fxserver_path);
+        if let Some(dir) = params.fxserver_path.parent() {
+            cmd.current_dir(dir);
+        }
         cmd.arg("+set")
             .arg("resources_path")
             .arg(&params.resources_dir)
