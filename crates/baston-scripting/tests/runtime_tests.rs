@@ -346,3 +346,103 @@ async fn core_resource_natives_read_registry_and_files() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[tokio::test]
+async fn shared_cfx_runtime_natives_are_exposed() {
+    let (host, _) = host();
+    host.load_resource(
+        "shared-cfx",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                if (!IsDuplicityVersion()) throw new Error('server runtime')
+                if (GetGameName() !== 'gta5') throw new Error('game name')
+                if (GetInstanceId() !== 0) throw new Error('instance id')
+                if (GetInvokingResource() !== 'shared-cfx') throw new Error('invoking resource')
+                if (ProfilerIsRecording()) throw new Error('profiler default')
+                ProfilerEnterScope('shared-cfx-test')
+                ProfilerExitScope()
+                if (WasEventCanceled()) throw new Error('event cancel default')
+                if (IsAceAllowed('command.test')) throw new Error('ace default')
+                if (GetRegisteredCommands().length !== 0) throw new Error('registered commands default')
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load");
+}
+
+#[tokio::test]
+async fn shared_cfx_kvp_natives_are_resource_scoped() {
+    let (host, _) = host();
+    host.load_resource(
+        "kvp-a",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                SetResourceKvp('alpha', 'one')
+                SetResourceKvpInt('count', 42)
+                SetResourceKvpFloat('ratio', 2.5)
+                if (GetResourceKvpString('alpha') !== 'one') throw new Error('string kvp')
+                if (GetResourceKvpInt('count') !== 42) throw new Error('int kvp')
+                if (GetResourceKvpFloat('ratio') !== 2.5) throw new Error('float kvp')
+                const h = StartFindKvp('')
+                const keys = [FindKvp(h), FindKvp(h), FindKvp(h)].filter(Boolean).sort()
+                EndFindKvp(h)
+                if (keys.join(',') !== 'alpha,count,ratio') throw new Error('find kvp')
+                DeleteResourceKvp('alpha')
+                if (GetResourceKvpString('alpha') !== null) throw new Error('delete kvp')
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load kvp-a");
+
+    host.load_resource(
+        "kvp-b",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                if (GetResourceKvpString('count') !== null) throw new Error('kvp leaked')
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load kvp-b");
+}
+
+#[tokio::test]
+async fn generated_server_native_shims_are_callable() {
+    let (host, _) = host();
+    host.load_resource(
+        "server-cfx",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                const vehicle = CreateVehicle(0x1234, 1.0, 2.0, 3.0, 90.0, true, false)
+                if (!DoesEntityExist(vehicle)) throw new Error('vehicle exists')
+                if (GetEntityType(vehicle) !== 2) throw new Error('vehicle type')
+                const coords = GetEntityCoords(vehicle)
+                if (coords[0] !== 1.0 || coords[1] !== 2.0 || coords[2] !== 3.0) {
+                  throw new Error('vehicle coords')
+                }
+                SetEntityCoords(vehicle, 4.0, 5.0, 6.0)
+                const moved = GetEntityCoords(vehicle)
+                if (moved[0] !== 4.0 || moved[1] !== 5.0 || moved[2] !== 6.0) {
+                  throw new Error('moved coords')
+                }
+                if (GetEntityModel(vehicle) !== 0x1234) throw new Error('model')
+                if (GetAllVehicles()[0] !== vehicle) throw new Error('all vehicles')
+                if (GetHashKey('test') === 0) throw new Error('hash')
+                DeleteEntity(vehicle)
+                if (DoesEntityExist(vehicle)) throw new Error('deleted')
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load");
+}
