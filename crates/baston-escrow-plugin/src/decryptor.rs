@@ -3,7 +3,7 @@
 //! Sends `{ "op": "decrypt", ... }` requests and interprets the `{ data }` /
 //! `{ error }` reply. Plain (non-escrow) files never touch the sidecar.
 
-use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 
@@ -14,7 +14,7 @@ use baston_core::script_decryptor::{
 };
 
 use crate::error::EscrowPluginError;
-use crate::sidecar::Sidecar;
+use crate::sidecar::{Sidecar, SidecarParams};
 
 /// A [`ScriptDecryptor`] that delegates escrow decryption to the sidecar.
 pub struct SidecarDecryptor {
@@ -28,30 +28,24 @@ impl SidecarDecryptor {
     }
 
     /// Start a dedicated FXServer sidecar (escrow-only convenience path).
-    pub fn start(fxserver_path: &Path, resources_dir: &Path) -> Result<Self, EscrowPluginError> {
-        Ok(Self::new(Sidecar::start(fxserver_path, resources_dir)?))
+    pub fn start(params: &SidecarParams) -> Result<Self, EscrowPluginError> {
+        Ok(Self::new(Sidecar::start(params)?))
     }
 
     /// Spawn against an arbitrary command (used by tests with the stub sidecar).
-    pub fn spawn_with_command(cmd: Command) -> Result<Self, EscrowPluginError> {
-        Ok(Self::new(Sidecar::spawn_with_command(cmd)?))
+    pub fn spawn_with_command(cmd: Command, ipc_dir: PathBuf) -> Result<Self, EscrowPluginError> {
+        Ok(Self::new(Sidecar::spawn_with_command(cmd, ipc_dir)?))
     }
 
-    fn request(
-        &self,
-        resource: &str,
-        file: &str,
-        bytes: &[u8],
-    ) -> Result<Vec<u8>, EscrowPluginError> {
-        let request_line = serde_json::json!({
+    /// Ask the sidecar for the decrypted bytes of `resource`/`file`. The request
+    /// carries only the path: the shim re-reads the file through svadhesive's VFS
+    /// hook (which yields plaintext), so we never ship the ciphertext over IPC.
+    fn request(&self, resource: &str, file: &str) -> Result<Vec<u8>, EscrowPluginError> {
+        let value = self.sidecar.request(serde_json::json!({
             "op": "decrypt",
             "resource": resource,
             "file": file,
-            "data": B64.encode(bytes),
-        })
-        .to_string();
-
-        let value = self.sidecar.request(request_line)?;
+        }))?;
         if let Some(data) = value.get("data").and_then(|d| d.as_str()) {
             B64.decode(data)
                 .map_err(|e| EscrowPluginError::SidecarProtocol(e.to_string()))
@@ -78,7 +72,7 @@ impl ScriptDecryptor for SidecarDecryptor {
         if !is_cfx_encrypted(bytes) {
             return Ok(bytes.to_vec());
         }
-        self.request(resource_name, file_path, bytes)
+        self.request(resource_name, file_path)
             .map_err(|e| DecryptError::DecryptionFailed {
                 resource: resource_name.to_string(),
                 file: file_path.to_string(),

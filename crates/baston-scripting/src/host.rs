@@ -10,11 +10,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use baston_protocol::PlayerDirectory;
+use dashmap::DashMap;
 use tokio::sync::{mpsc, oneshot, RwLock};
 
 use crate::deferrals::DeferralRegistry;
 use crate::error::ScriptError;
 use crate::observability::Observability;
+use crate::resource_registry::ResourceRegistry;
 use crate::runtime::ScriptRuntime;
 
 /// A script file to load into a resource's isolate.
@@ -94,6 +96,8 @@ pub struct ScriptHost {
     players: Arc<PlayerDirectory>,
     net: crate::net_bridge::NetBridge,
     observability: Arc<Observability>,
+    convars: Arc<DashMap<String, String>>,
+    resources: ResourceRegistry,
     started_at: Instant,
     cross_zone: Arc<std::sync::RwLock<Option<CrossZonePublisher>>>,
 }
@@ -134,6 +138,8 @@ impl ScriptHost {
             players,
             net,
             observability: Observability::shared(),
+            convars: Arc::new(DashMap::new()),
+            resources: ResourceRegistry::default(),
             started_at: Instant::now(),
             cross_zone: Arc::new(std::sync::RwLock::new(None)),
         })
@@ -141,6 +147,10 @@ impl ScriptHost {
 
     pub fn observability(&self) -> Arc<Observability> {
         Arc::clone(&self.observability)
+    }
+
+    pub fn resources(&self) -> ResourceRegistry {
+        self.resources.clone()
     }
 
     /// Install the Phase D cross-zone event publisher (zone processes only).
@@ -258,6 +268,8 @@ impl ScriptHost {
             Arc::clone(&self.players),
             self.net.clone(),
             Arc::clone(&self.observability),
+            Arc::clone(&self.convars),
+            self.resources.clone(),
         )?;
         let queued = handle
             .send(|reply| RuntimeCommand::ExecuteScripts { scripts, reply })
@@ -434,6 +446,8 @@ fn spawn_runtime_thread(
     players: Arc<PlayerDirectory>,
     net: crate::net_bridge::NetBridge,
     observability: Arc<Observability>,
+    convars: Arc<DashMap<String, String>>,
+    resources: ResourceRegistry,
 ) -> Result<ResourceRuntimeHandle, ScriptError> {
     let (tx, mut rx) = mpsc::channel::<RuntimeCommand>(64);
     let name = resource_name.to_owned();
@@ -463,6 +477,7 @@ fn spawn_runtime_thread(
                         return;
                     }
                 };
+            runtime.install_server_state(convars, resources);
             let _ = init_tx.send(Ok(()));
 
             let local = tokio::task::LocalSet::new();

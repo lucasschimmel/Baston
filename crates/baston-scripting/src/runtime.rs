@@ -9,14 +9,17 @@ use std::time::{Duration, Instant};
 use deno_core::{v8, JsRuntime, PollEventLoopOptions, RuntimeOptions};
 
 use baston_protocol::PlayerDirectory;
+use dashmap::DashMap;
 
 use crate::deferrals::DeferralRegistry;
 use crate::error::ScriptError;
 use crate::extensions::{
-    all_extensions, RuntimeContext, SharedDeferrals, SharedNet, SharedObservability, SharedPlayers,
+    all_extensions, RuntimeContext, SharedConvars, SharedDeferrals, SharedNet, SharedObservability,
+    SharedPlayers, SharedResources,
 };
 use crate::net_bridge::NetBridge;
 use crate::observability::{DispatchKind, DispatchMeasurement, Observability, V8MemoryStats};
+use crate::resource_registry::ResourceRegistry;
 
 const BOOTSTRAP_JS: &str = include_str!("../assets/bootstrap.js");
 
@@ -244,6 +247,17 @@ impl ScriptRuntime {
 
     pub fn resource_name(&self) -> &str {
         &self.resource_name
+    }
+
+    pub fn install_server_state(
+        &mut self,
+        convars: Arc<DashMap<String, String>>,
+        resources: ResourceRegistry,
+    ) {
+        let op_state = self.js.op_state();
+        let mut op_state = op_state.borrow_mut();
+        op_state.put(SharedConvars(convars));
+        op_state.put(SharedResources(resources));
     }
 
     /// Execute a resource script (plain script semantics, like FXServer).

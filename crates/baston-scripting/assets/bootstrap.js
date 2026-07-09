@@ -241,6 +241,18 @@
   globalThis.emitNet = TriggerClientEvent;
   globalThis.RegisterCommand = RegisterCommand;
   globalThis.InvokeNativeOnClient = InvokeNativeOnClient;
+  globalThis.GetConvar = (name, defaultValue) =>
+    ops.op_get_convar(String(name), String(defaultValue ?? ""));
+  globalThis.GetConvarInt = (name, defaultValue) =>
+    ops.op_get_convar_int(String(name), Number(defaultValue ?? 0) | 0);
+  globalThis.GetConvarFloat = (name, defaultValue) =>
+    ops.op_get_convar_float(String(name), Number(defaultValue ?? 0));
+  globalThis.GetConvarBool = (name, defaultValue) =>
+    ops.op_get_convar_bool(String(name), !!defaultValue);
+  globalThis.SetConvar = (name, value) =>
+    ops.op_set_convar(String(name), String(value ?? ""));
+  globalThis.SetConvarReplicated = globalThis.SetConvar;
+  globalThis.SetConvarServerInfo = globalThis.SetConvar;
   // GetPlayerPed(source): round trip to the player's client (Phase B).
   globalThis.GetPlayerPed = (source) =>
     InvokeNativeOnClient(source, "0x43A66C31C68491C0", [-1], true);
@@ -248,11 +260,65 @@
   globalThis.exports = exportsProxy;
   globalThis.GetCurrentResourceName = () => ops.op_get_current_resource_name();
   globalThis.GetGameTimer = () => ops.op_get_game_timer();
+  globalThis.GetNumResources = () => ops.op_get_num_resources();
+  globalThis.GetResourceByFindIndex = (index) => {
+    const name = ops.op_get_resource_by_find_index(index >>> 0);
+    return name === "" ? null : name;
+  };
+  globalThis.GetResourceState = (name) => ops.op_get_resource_state(String(name));
+  globalThis.GetResourcePath = (name) => {
+    const path = ops.op_get_resource_path(String(name));
+    return path === "" ? null : path;
+  };
+  globalThis.GetNumResourceMetadata = (resource, key) =>
+    ops.op_get_num_resource_metadata(String(resource), String(key));
+  globalThis.GetResourceMetadata = (resource, key, index) => {
+    const value = ops.op_get_resource_metadata(
+      String(resource),
+      String(key),
+      index >>> 0
+    );
+    return value === "" ? null : value;
+  };
+  globalThis.LoadResourceFile = (resource, fileName) => {
+    const value = ops.op_load_resource_file(String(resource), String(fileName));
+    return value === "" ? null : value;
+  };
+  globalThis.SaveResourceFile = (resource, fileName, data, dataLength = -1) =>
+    ops.op_save_resource_file(
+      String(resource),
+      String(fileName),
+      String(data ?? ""),
+      Number(dataLength ?? -1) | 0
+    );
   globalThis.GetNumPlayerIndices = () => ops.op_get_num_player_indices();
   globalThis.GetPlayerFromIndex = (i) => ops.op_get_player_from_index(i >>> 0);
   globalThis.GetPlayerName = (source) => ops.op_get_player_name(source >>> 0);
+  globalThis.DoesPlayerExist = (source) =>
+    ops.op_does_player_exist(source >>> 0);
+  globalThis.GetNumPlayerIdentifiers = (source) =>
+    ops.op_get_num_player_identifiers(source >>> 0);
+  globalThis.GetPlayerIdentifier = (source, index) => {
+    const id = ops.op_get_player_identifier(source >>> 0, index >>> 0);
+    return id === "" ? null : id;
+  };
   globalThis.GetPlayerIdentifierByType = (source, type) =>
     ops.op_get_player_identifier_by_type(source >>> 0, String(type));
+  globalThis.GetPlayerEndpoint = (source) => {
+    const endpoint = ops.op_get_player_endpoint(source >>> 0);
+    return endpoint === "" ? null : endpoint;
+  };
+  globalThis.GetPlayerGuid = (source) => {
+    const guid = ops.op_get_player_guid(source >>> 0);
+    return guid === "" ? null : guid;
+  };
+  globalThis.GetPlayerPing = (source) => ops.op_get_player_ping(source >>> 0);
+  globalThis.GetNumPlayerTokens = (source) =>
+    ops.op_get_num_player_tokens(source >>> 0);
+  globalThis.GetPlayerToken = (source, index) => {
+    const token = ops.op_get_player_token(source >>> 0, index >>> 0);
+    return token === "" ? null : token;
+  };
   globalThis.GetPlayers = () => {
     const n = ops.op_get_num_player_indices();
     const out = [];

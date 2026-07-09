@@ -39,6 +39,7 @@ normally does. That is the whole compliance argument.
 mode = "off"            # "off" | "gate" | "verified"
 sv_license_key = ""     # your key from https://portal.cfx.re
 # fxserver_path = "Artifacts/windows/31623/FXServer.exe"   # verified only
+# sidecar_port = 30130  # private, localhost-only port for the sidecar (verified/escrow)
 ```
 
 | Mode | What it does | Requires | Use when |
@@ -56,6 +57,25 @@ with an actionable message. It never boots optimistically.
 If both `[license] mode = "verified"` and `[escrow] enabled = true`, BASTON
 starts **one** FXServer sidecar and uses it for both — it never boots a second
 FXServer.
+
+### How `verified` talks to the component (technical)
+
+- BASTON writes a private launch config carrying your `sv_licenseKey` (kept off
+  the command line and out of every log) and starts the genuine `FXServer.exe`
+  **off the public server list** (`sv_master1 ""`, never `sv_lan` — LAN mode
+  would suppress the very licence validation we rely on), bound to a private
+  localhost port (`sidecar_port`) so it never clashes with BASTON's public port.
+- The component validates the key against CFX exactly as it always does, and
+  publishes the verdict locally as the `sv_licenseKeyToken` convar.
+- A tiny materialised resource (`baston-cfx-shim`) reads that convar and answers
+  BASTON over a **file-drop** channel (request/response files under its `ipc/`
+  dir). This is used because the CitizenFX server Lua sandbox exposes no
+  `io.read`; it runs only at boot (and, for escrow, at resource load) — never on
+  a hot path, so it does not affect BASTON's runtime performance.
+- BASTON reads the verdict and **fails closed**: no valid token within the
+  startup budget → it refuses to start.
+
+Run several BASTON instances on one host? Give each a distinct `sidecar_port`.
 
 ## What gets enforced
 

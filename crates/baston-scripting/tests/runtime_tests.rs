@@ -4,13 +4,22 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use baston_scripting::{DeferralRegistry, ScriptHost, ScriptSource};
+use baston_scripting::{DeferralRegistry, ScriptHost, ScriptResourceState, ScriptSource};
 
 fn host() -> (ScriptHost, Arc<DeferralRegistry>) {
+    let (host, deferrals, _) = host_with_players();
+    (host, deferrals)
+}
+
+fn host_with_players() -> (
+    ScriptHost,
+    Arc<DeferralRegistry>,
+    Arc<baston_protocol::PlayerDirectory>,
+) {
     let deferrals = Arc::new(DeferralRegistry::new());
     let players = Arc::new(baston_protocol::PlayerDirectory::new());
-    let host = ScriptHost::spawn(Arc::clone(&deferrals), players).expect("host spawn");
-    (host, deferrals)
+    let host = ScriptHost::spawn(Arc::clone(&deferrals), Arc::clone(&players)).expect("host spawn");
+    (host, deferrals, players)
 }
 
 #[tokio::test]
@@ -221,4 +230,119 @@ async fn register_command_dispatches_to_resource() {
         .find(|handler| handler.resource == "cmd" && handler.name == "cmd:seen")
         .expect("cmd event stats");
     assert_eq!(event.errors, 1);
+}
+
+#[tokio::test]
+async fn core_convar_natives_follow_fxserver_defaults() {
+    let (host, _) = host();
+    host.load_resource(
+        "convars",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                if (GetConvar('missing', 'fallback') !== 'fallback') throw new Error('default string')
+                if (GetConvarInt('missing_int', 7) !== 7) throw new Error('default int')
+                if (GetConvarFloat('missing_float', 1.5) !== 1.5) throw new Error('default float')
+                if (GetConvarBool('missing_bool', true) !== true) throw new Error('default bool')
+                SetConvar('voice_useNativeAudio', 'true')
+                SetConvar('rounds', '42')
+                SetConvar('ratio', '2.25')
+                if (GetConvar('voice_useNativeAudio', 'false') !== 'true') throw new Error('string')
+                if (GetConvarBool('voice_useNativeAudio', false) !== true) throw new Error('bool')
+                if (GetConvarInt('rounds', 0) !== 42) throw new Error('int')
+                if (GetConvarFloat('ratio', 0) !== 2.25) throw new Error('float')
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load");
+}
+
+#[tokio::test]
+async fn core_player_natives_read_player_directory() {
+    let (host, _, players) = host_with_players();
+    players.insert(baston_protocol::PlayerInfo {
+        source: 12,
+        name: "Lucas".into(),
+        identifiers: vec![
+            "license:abc123".into(),
+            "steam:76561198000000000".into(),
+            "ip:127.0.0.1".into(),
+        ],
+    });
+
+    host.load_resource(
+        "players",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                if (!DoesPlayerExist(12)) throw new Error('exists')
+                if (DoesPlayerExist(99)) throw new Error('missing exists')
+                if (GetNumPlayerIdentifiers(12) !== 3) throw new Error('identifier count')
+                if (GetPlayerIdentifier(12, 1) !== 'steam:76561198000000000') throw new Error('identifier index')
+                if (GetPlayerIdentifier(12, 9) !== null) throw new Error('identifier bounds')
+                if (GetPlayerIdentifierByType(12, 'license') !== 'license:abc123') throw new Error('identifier type')
+                if (GetPlayerEndpoint(12) !== '127.0.0.1') throw new Error('endpoint')
+                if (GetPlayerGuid(12) !== 'license:abc123') throw new Error('guid')
+                if (GetPlayerPing(12) !== 0) throw new Error('ping fallback')
+                if (GetNumPlayerTokens(12) !== 0) throw new Error('token count')
+                if (GetPlayerToken(12, 0) !== null) throw new Error('token')
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load");
+}
+
+#[tokio::test]
+async fn core_resource_natives_read_registry_and_files() {
+    let (host, _) = host();
+    let root = std::env::temp_dir().join(format!(
+        "baston-resource-native-test-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("temp resource root");
+    std::fs::write(root.join("data.json"), "{\"ok\":true}").expect("fixture");
+    host.resources().upsert_resource(
+        "core".into(),
+        root.clone(),
+        baston_protocol::ResourceManifest {
+            name: "core".into(),
+            version: Some("1.2.3".into()),
+            dependencies: vec!["dep".into()],
+            server_scripts: vec!["server.js".into()],
+            client_scripts: vec!["client.js".into()],
+            files: vec!["data.json".into()],
+        },
+        ScriptResourceState::Started,
+    );
+
+    host.load_resource(
+        "core",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                if (GetNumResources() !== 1) throw new Error('resource count')
+                if (GetResourceByFindIndex(0) !== 'core') throw new Error('find index')
+                if (GetResourceByFindIndex(1) !== null) throw new Error('find index bounds')
+                if (GetResourceState('core') !== 'started') throw new Error('state')
+                if (GetResourceState('missing') !== 'missing') throw new Error('missing state')
+                if (!GetResourcePath('core')) throw new Error('path')
+                if (GetNumResourceMetadata('core', 'file') !== 1) throw new Error('metadata count')
+                if (GetResourceMetadata('core', 'version', 0) !== '1.2.3') throw new Error('metadata version')
+                if (LoadResourceFile('core', 'data.json') !== '{"ok":true}') throw new Error('load file')
+                if (!SaveResourceFile('core', 'out.txt', 'abcdef', 3)) throw new Error('save file')
+                if (LoadResourceFile('core', 'out.txt') !== 'abc') throw new Error('save length')
+                if (LoadResourceFile('core', '../blocked.txt') !== null) throw new Error('path traversal')
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load");
+
+    let _ = std::fs::remove_dir_all(root);
 }

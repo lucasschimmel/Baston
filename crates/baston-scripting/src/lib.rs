@@ -12,6 +12,7 @@ mod extensions;
 mod host;
 pub mod net_bridge;
 pub mod observability;
+mod resource_registry;
 mod runtime;
 
 pub use deferrals::{DeferralOutcome, DeferralRegistry};
@@ -22,4 +23,5 @@ pub use observability::{
     DispatchKind, HandlerPerfStats, Observability, ProfilerRecordOptions, ProfilerStatus,
     ResMonSnapshot, ResourcePerfStats,
 };
+pub use resource_registry::{ResourceRegistry, ScriptResourceState};
 pub use runtime::ScriptRuntime;

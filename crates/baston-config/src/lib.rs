@@ -264,6 +264,13 @@ pub struct LicenseConfig {
     /// (mode = `"verified"`). BASTON never ships this binary.
     #[serde(default)]
     pub fxserver_path: Option<PathBuf>,
+    /// Private, localhost-only TCP port for the FXServer sidecar's endpoint
+    /// (mode = `"verified"`, or escrow). Nothing connects to it — BASTON talks to
+    /// the sidecar over a local file-drop channel — it only keeps the sidecar's
+    /// listener off BASTON's public port. Give each sidecar on a host a distinct
+    /// port if you run several.
+    #[serde(default = "default_sidecar_port")]
+    pub sidecar_port: u16,
 }
 
 impl Default for LicenseConfig {
@@ -272,8 +279,13 @@ impl Default for LicenseConfig {
             mode: LicenseMode::Off,
             sv_license_key: String::new(),
             fxserver_path: None,
+            sidecar_port: default_sidecar_port(),
         }
     }
+}
+
+fn default_sidecar_port() -> u16 {
+    30130
 }
 
 /// Licence enforcement mode (`[license] mode`). Missing → `Off` so existing
@@ -988,6 +1000,7 @@ mod tests {
             mode: LicenseMode::Verified,
             sv_license_key: "cfxk_1a2b3c4d5e6f7g8h9i0j_realkey".into(),
             fxserver_path: None,
+            ..Default::default()
         };
         assert!(matches!(
             lic.validate(),

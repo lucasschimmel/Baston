@@ -45,6 +45,10 @@ sv_license_key = ""
 # mode = "verified": path to an official FXServer.exe you downloaded from CFX.
 # BASTON never ships this binary. Shares one sidecar process with [escrow] when both on.
 # fxserver_path = "Artifacts/windows/31623/FXServer.exe"
+# Private, localhost-only port for the sidecar (verified/escrow). Nothing connects to
+# it (IPC is a local file-drop) — it only keeps the sidecar off BASTON's public port.
+# Give each BASTON instance on a host a distinct value if you run several.
+# sidecar_port = 30130
 
 # Monitoring/control HTTP API keys (served on meshing.admin_port, default
 # 8080). Each key is a named bearer token with explicit permissions; control

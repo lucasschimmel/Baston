@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
+use dashmap::DashMap;
 use deno_core::{op2, OpState};
 
 use crate::deferrals::DeferralRegistry;
@@ -53,6 +54,12 @@ pub struct SharedNet(pub crate::net_bridge::NetBridge);
 
 /// Shared runtime observability collector stored in `OpState`.
 pub struct SharedObservability(pub Arc<Observability>);
+
+/// Shared console variables (`GetConvar*` / `SetConvar*`).
+pub struct SharedConvars(pub Arc<DashMap<String, String>>);
+
+/// Shared resource snapshot (`GetResourceState`, `LoadResourceFile`, ...).
+pub struct SharedResources(pub crate::resource_registry::ResourceRegistry);
 
 /// How long a server → client native call may wait for its result.
 ///
@@ -311,10 +318,158 @@ fn op_get_current_resource_name(state: &mut OpState) -> String {
 
 deno_core::extension!(
     baston_runtime,
-    ops = [op_get_game_timer, op_get_current_resource_name]
+    ops = [
+        op_get_game_timer,
+        op_get_current_resource_name,
+        op_get_convar,
+        op_get_convar_int,
+        op_get_convar_float,
+        op_get_convar_bool,
+        op_set_convar,
+        op_get_num_resources,
+        op_get_resource_by_find_index,
+        op_get_resource_state,
+        op_get_resource_path,
+        op_get_num_resource_metadata,
+        op_get_resource_metadata,
+        op_load_resource_file,
+        op_save_resource_file,
+    ]
 );
 
 // --- 5. players (backed by the shared PlayerDirectory since B1) ---
+
+#[op2]
+#[string]
+fn op_get_convar(
+    state: &mut OpState,
+    #[string] name: String,
+    #[string] default_value: String,
+) -> String {
+    state
+        .borrow::<SharedConvars>()
+        .0
+        .get(&name)
+        .map(|value| value.value().clone())
+        .unwrap_or(default_value)
+}
+
+#[op2(fast)]
+fn op_get_convar_int(state: &mut OpState, #[string] name: String, default_value: i32) -> i32 {
+    state
+        .borrow::<SharedConvars>()
+        .0
+        .get(&name)
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(default_value)
+}
+
+#[op2(fast)]
+fn op_get_convar_float(state: &mut OpState, #[string] name: String, default_value: f64) -> f64 {
+    state
+        .borrow::<SharedConvars>()
+        .0
+        .get(&name)
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(default_value)
+}
+
+#[op2(fast)]
+fn op_get_convar_bool(state: &mut OpState, #[string] name: String, default_value: bool) -> bool {
+    state
+        .borrow::<SharedConvars>()
+        .0
+        .get(&name)
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "true" | "1" | "yes" | "on"
+            )
+        })
+        .unwrap_or(default_value)
+}
+
+#[op2(fast)]
+fn op_set_convar(state: &mut OpState, #[string] name: String, #[string] value: String) {
+    state.borrow::<SharedConvars>().0.insert(name, value);
+}
+
+#[op2(fast)]
+fn op_get_num_resources(state: &mut OpState) -> u32 {
+    state.borrow::<SharedResources>().0.count() as u32
+}
+
+#[op2]
+#[string]
+fn op_get_resource_by_find_index(state: &mut OpState, index: u32) -> String {
+    state.borrow::<SharedResources>().0.name_at(index as usize)
+}
+
+#[op2]
+#[string]
+fn op_get_resource_state(state: &mut OpState, #[string] name: String) -> String {
+    state.borrow::<SharedResources>().0.state(&name).to_owned()
+}
+
+#[op2]
+#[string]
+fn op_get_resource_path(state: &mut OpState, #[string] name: String) -> String {
+    state.borrow::<SharedResources>().0.path(&name)
+}
+
+#[op2(fast)]
+fn op_get_num_resource_metadata(
+    state: &mut OpState,
+    #[string] resource: String,
+    #[string] key: String,
+) -> u32 {
+    state
+        .borrow::<SharedResources>()
+        .0
+        .metadata_count(&resource, &key)
+}
+
+#[op2]
+#[string]
+fn op_get_resource_metadata(
+    state: &mut OpState,
+    #[string] resource: String,
+    #[string] key: String,
+    index: u32,
+) -> String {
+    state
+        .borrow::<SharedResources>()
+        .0
+        .metadata_value(&resource, &key, index as usize)
+}
+
+#[op2]
+#[string]
+fn op_load_resource_file(
+    state: &mut OpState,
+    #[string] resource: String,
+    #[string] file_name: String,
+) -> String {
+    state
+        .borrow::<SharedResources>()
+        .0
+        .load_file(&resource, &file_name)
+        .unwrap_or_default()
+}
+
+#[op2(fast)]
+fn op_save_resource_file(
+    state: &mut OpState,
+    #[string] resource: String,
+    #[string] file_name: String,
+    #[string] data: String,
+    data_len: i32,
+) -> bool {
+    state
+        .borrow::<SharedResources>()
+        .0
+        .save_file(&resource, &file_name, &data, data_len)
+}
 
 #[op2(fast)]
 fn op_get_num_player_indices(state: &mut OpState) -> u32 {
@@ -336,6 +491,62 @@ fn op_get_player_name(state: &mut OpState, source: u32) -> String {
         .get(source)
         .map(|p| p.name)
         .unwrap_or_default()
+}
+
+#[op2(fast)]
+fn op_does_player_exist(state: &mut OpState, source: u32) -> bool {
+    state.borrow::<SharedPlayers>().0.exists(source)
+}
+
+#[op2(fast)]
+fn op_get_num_player_identifiers(state: &mut OpState, source: u32) -> u32 {
+    state.borrow::<SharedPlayers>().0.identifier_count(source) as u32
+}
+
+#[op2]
+#[string]
+fn op_get_player_identifier(state: &mut OpState, source: u32, index: u32) -> String {
+    state
+        .borrow::<SharedPlayers>()
+        .0
+        .identifier_at(source, index as usize)
+        .unwrap_or_default()
+}
+
+#[op2]
+#[string]
+fn op_get_player_endpoint(state: &mut OpState, source: u32) -> String {
+    state
+        .borrow::<SharedPlayers>()
+        .0
+        .endpoint(source)
+        .unwrap_or_default()
+}
+
+#[op2]
+#[string]
+fn op_get_player_guid(state: &mut OpState, source: u32) -> String {
+    state
+        .borrow::<SharedPlayers>()
+        .0
+        .guid(source)
+        .unwrap_or_default()
+}
+
+#[op2(fast)]
+fn op_get_player_ping(_state: &mut OpState, _source: u32) -> u32 {
+    0
+}
+
+#[op2(fast)]
+fn op_get_num_player_tokens(_state: &mut OpState, _source: u32) -> u32 {
+    0
+}
+
+#[op2]
+#[string]
+fn op_get_player_token(_state: &mut OpState, _source: u32, _index: u32) -> String {
+    String::new()
 }
 
 /// FXServer `GetPlayerIdentifierByType`: returns the full `type:value`
@@ -361,6 +572,14 @@ deno_core::extension!(
         op_get_player_from_index,
         op_get_player_name,
         op_get_player_identifier_by_type,
+        op_does_player_exist,
+        op_get_num_player_identifiers,
+        op_get_player_identifier,
+        op_get_player_endpoint,
+        op_get_player_guid,
+        op_get_player_ping,
+        op_get_num_player_tokens,
+        op_get_player_token,
     ]
 );
 

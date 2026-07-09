@@ -29,6 +29,16 @@ fn apply_simple_license_modes(config: &BastonConfig) {
     }
 }
 
+/// Minimal resources dir for a licence-only sidecar (holds just the materialised
+/// shim), sited next to the operator's resources so it shares the same volume.
+#[cfg(all(feature = "escrow", windows))]
+fn sidecar_scratch_dir(resources_path: &Path) -> std::path::PathBuf {
+    resources_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".baston-sidecar-res")
+}
+
 /// Wire the optional CFX component (genuine, unmodified FXServer sidecar) for
 /// **licence verification** and/or **escrow decryption** — sharing ONE process.
 ///
@@ -67,7 +77,42 @@ fn wire_cfx_sidecar(
         .clone()
         .or_else(|| config.escrow.fxserver_path.clone())
         .ok_or_else(|| anyhow::anyhow!("verified licence / escrow needs an fxserver_path"))?;
-    let handle = baston_escrow_plugin::SidecarHandle::start(&fxserver_path, &config.resources.path)
+
+    // The operator's CFX server key (`cfxk_…`) is what the component validates and
+    // what escrow decryption is keyed on. Fed to the sidecar as `sv_licenseKey`.
+    let license_key = {
+        let key = config.license.sv_license_key.trim();
+        if key.is_empty() {
+            None
+        } else {
+            Some(key.to_owned())
+        }
+    };
+    if need_escrow && license_key.is_none() {
+        tracing::warn!(target: "zone",
+            "escrow is enabled but [license] sv_license_key is empty — svadhesive needs the \
+             CFX server key to derive escrow decryption keys, so decryption will fail. Set \
+             [license] sv_license_key to your key from https://portal.cfx.re");
+    }
+
+    // Escrow needs the operator's resources reachable by the sidecar; a
+    // licence-only sidecar boots faster against a minimal dir holding just the shim.
+    let resources_dir = if need_escrow {
+        config.resources.path.clone()
+    } else {
+        let dir = sidecar_scratch_dir(&config.resources.path);
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| anyhow::anyhow!("creating sidecar resources dir {dir:?}: {e}"))?;
+        dir
+    };
+
+    let params = baston_escrow_plugin::SidecarParams {
+        fxserver_path,
+        resources_dir,
+        license_key,
+        port: config.license.sidecar_port,
+    };
+    let handle = baston_escrow_plugin::SidecarHandle::start(&params)
         .map_err(|e| anyhow::anyhow!("failed to start the FXServer sidecar: {e}"))?;
 
     if need_license {

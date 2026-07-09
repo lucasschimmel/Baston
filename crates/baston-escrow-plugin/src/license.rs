@@ -6,7 +6,7 @@
 //! this oracle merely reads the *local* verdict the component exposes (the Lua
 //! shim reads `sv_licenseKeyToken` via `GetConvar`). BASTON never contacts CFX.
 
-use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use baston_core::license::{Entitlements, LicenseStatus};
 
 use crate::error::EscrowPluginError;
-use crate::sidecar::Sidecar;
+use crate::sidecar::{Sidecar, SidecarParams};
 
 /// Reads the CFX server-licence verdict from the sidecar.
 pub struct LicenseOracle {
@@ -28,19 +28,20 @@ impl LicenseOracle {
     }
 
     /// Start a dedicated FXServer sidecar (licence-only convenience path).
-    pub fn start(fxserver_path: &Path, resources_dir: &Path) -> Result<Self, EscrowPluginError> {
-        Ok(Self::new(Sidecar::start(fxserver_path, resources_dir)?))
+    pub fn start(params: &SidecarParams) -> Result<Self, EscrowPluginError> {
+        Ok(Self::new(Sidecar::start(params)?))
     }
 
     /// Spawn against an arbitrary command (used by tests with the stub sidecar).
-    pub fn spawn_with_command(cmd: Command) -> Result<Self, EscrowPluginError> {
-        Ok(Self::new(Sidecar::spawn_with_command(cmd)?))
+    pub fn spawn_with_command(cmd: Command, ipc_dir: PathBuf) -> Result<Self, EscrowPluginError> {
+        Ok(Self::new(Sidecar::spawn_with_command(cmd, ipc_dir)?))
     }
 
     /// One-shot licence query.
     pub fn query_once(&self) -> Result<LicenseStatus, EscrowPluginError> {
-        let line = serde_json::json!({ "op": "license_status" }).to_string();
-        let value = self.sidecar.request(line)?;
+        let value = self
+            .sidecar
+            .request(serde_json::json!({ "op": "license_status" }))?;
         parse_status(&value)
     }
 

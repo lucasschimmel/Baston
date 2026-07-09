@@ -84,6 +84,33 @@ impl PlayerDirectory {
         })
     }
 
+    pub fn exists(&self, source: u32) -> bool {
+        self.players.contains_key(&source)
+    }
+
+    pub fn identifier_count(&self, source: u32) -> usize {
+        self.players
+            .get(&source)
+            .map(|p| p.identifiers.len())
+            .unwrap_or_default()
+    }
+
+    pub fn identifier_at(&self, source: u32, index: usize) -> Option<String> {
+        self.players
+            .get(&source)
+            .and_then(|p| p.identifiers.get(index).cloned())
+    }
+
+    pub fn endpoint(&self, source: u32) -> Option<String> {
+        self.identifier_by_type(source, "ip")
+            .map(|id| id.trim_start_matches("ip:").to_owned())
+    }
+
+    pub fn guid(&self, source: u32) -> Option<String> {
+        self.identifier_by_type(source, "license")
+            .or_else(|| self.identifier_at(source, 0))
+    }
+
     pub fn sources(&self) -> Vec<u32> {
         self.players.iter().map(|p| *p.key()).collect()
     }
@@ -120,6 +147,14 @@ mod tests {
         );
         assert_eq!(dir.identifier_by_type(source, "discord"), None);
         assert_eq!(dir.identifier_by_type(999, "license"), None);
+        assert!(dir.exists(source));
+        assert_eq!(dir.identifier_count(source), 3);
+        assert_eq!(
+            dir.identifier_at(source, 1).as_deref(),
+            Some("steam:76561198000000000")
+        );
+        assert_eq!(dir.endpoint(source).as_deref(), Some("127.0.0.1"));
+        assert_eq!(dir.guid(source).as_deref(), Some("license:abc123"));
     }
 
     #[test]

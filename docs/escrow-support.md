@@ -11,7 +11,7 @@ implicitly.
 ResourceManager ──reads raw bytes──▶ ScriptDecryptor (baston-core trait)
                                         ├── PlainDecryptor (default, no-op)
                                         └── SidecarDecryptor (baston-escrow-plugin)
-                                                 │  JSON line protocol (stdin/stdout)
+                                                 │  JSON file-drop IPC (request/response files)
                                                  ▼
                                         FXServer subprocess + svadhesive.dll
                                                  (decrypts via its VFS hook)
@@ -57,17 +57,23 @@ actionable error; use `backend = "sidecar"`.
    backend = "sidecar"
    server_license = "license:REPLACE_ME"
    fxserver_path = "Artifacts/windows/31623/FXServer.exe"
+
+   [license]
+   # svadhesive derives escrow decryption keys from the CFX *server* key, so
+   # escrow needs a real key here even if you don't use mode = "verified".
+   sv_license_key = "cfxk_REPLACE_ME"
    ```
 
-3. Ensure the `baston-decrypt-shim` resource is present under your resources
-   directory (shipped in `resources/baston-decrypt-shim/`).
+3. No manual step for the shim: BASTON materialises the `baston-cfx-shim`
+   resource (and its `ipc/` channel) under the sidecar's resources directory at
+   startup, kept in lockstep with the plugin. The canonical copy lives in
+   `resources/baston-cfx-shim/`.
 
 On startup you should see:
 
 ```
-[baston-zone] escrow plugin active
-[baston-escrow] baston-escrow sidecar started (FXServer subprocess)
-[baston-zone] resource <escrow-resource>: resource script decrypted OK
+baston CFX sidecar started (FXServer subprocess, file-drop IPC)
+[zone] escrow plugin active (shared CFX sidecar)
 ```
 
 With `enabled = false` (or on Linux, or without `--features escrow`) BASTON logs
@@ -89,9 +95,9 @@ The loader emits (Prometheus, `/metrics`):
 - **Streaming assets** (`.yft`, `.ydd`, `.ydr`) are **out of scope** for
   Phase D-bis; only server scripts are decrypted.
 - The `direct` (FFI) backend is unsupported (see above).
-- The Lua shim's stdin/stdout transport depends on the FXServer build; where raw
-  process stdin is unavailable, use the alternate file-drop transport (the Rust
-  `SidecarDecryptor` speaks the same JSON line protocol either way).
+- IPC uses a **file-drop** channel (request/response files under the shim's
+  `ipc/` dir), because the CitizenFX server Lua sandbox exposes no `io.read`.
+  It runs only at boot and at resource load — never on a hot path.
 
 ## Troubleshooting
 

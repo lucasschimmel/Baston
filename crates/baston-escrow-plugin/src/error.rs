@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-/// Errors produced while installing or running the escrow plugin.
+/// Errors produced while installing or running the escrow/licence sidecar.
 #[derive(Debug, Error)]
 pub enum EscrowPluginError {
     #[error(
@@ -15,11 +15,8 @@ pub enum EscrowPluginError {
     #[error("failed to spawn FXServer sidecar: {0}")]
     SidecarSpawn(String),
 
-    #[error("sidecar did not report READY within the startup timeout")]
+    #[error("sidecar did not become ready within the startup timeout")]
     SidecarStartTimeout,
-
-    #[error("sidecar reported an unexpected startup line instead of READY: {0:?}")]
-    SidecarNotReady(String),
 
     #[error("sidecar I/O error: {0}")]
     SidecarIo(String),
@@ -27,8 +24,8 @@ pub enum EscrowPluginError {
     #[error("sidecar process died: {0}")]
     SidecarDied(String),
 
-    #[error("sidecar decrypt request timed out")]
-    SidecarDecryptTimeout,
+    #[error("sidecar request timed out")]
+    SidecarRequestTimeout,
 
     #[error("sidecar protocol error: {0}")]
     SidecarProtocol(String),

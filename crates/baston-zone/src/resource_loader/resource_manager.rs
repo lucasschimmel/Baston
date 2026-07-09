@@ -7,7 +7,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use baston_core::script_decryptor::{PlainDecryptor, ScriptDecryptor};
-use baston_scripting::{Observability, ScriptHost, ScriptSource};
+use baston_scripting::{Observability, ScriptHost, ScriptResourceState, ScriptSource};
 use tokio::sync::Mutex;
 
 use super::manifest::{discover, DiscoveredResource};
@@ -101,6 +101,13 @@ impl ResourceManager {
                     discovered,
                     state: ResourceState::Unloaded,
                 });
+            let entry = resources.get(&name).expect("resource just inserted");
+            self.script_host.resources().upsert_resource(
+                name.clone(),
+                entry.discovered.root.clone(),
+                entry.discovered.manifest.clone(),
+                ScriptResourceState::Uninitialized,
+            );
             names.push(name);
         }
         Ok(names)
@@ -133,6 +140,9 @@ impl ResourceManager {
                 return Ok(());
             }
             entry.state = ResourceState::Loading;
+            self.script_host
+                .resources()
+                .set_state(name, ScriptResourceState::Starting);
             (
                 entry.discovered.root.clone(),
                 entry.discovered.manifest.server_scripts.clone(),
@@ -147,6 +157,14 @@ impl ResourceManager {
             } else {
                 ResourceState::Error
             };
+            self.script_host.resources().set_state(
+                name,
+                if result.is_ok() {
+                    ScriptResourceState::Started
+                } else {
+                    ScriptResourceState::Unknown
+                },
+            );
         }
         result
     }
@@ -226,6 +244,9 @@ impl ResourceManager {
         if let Some(entry) = resources.get_mut(name) {
             entry.state = ResourceState::Stopped;
         }
+        self.script_host
+            .resources()
+            .set_state(name, ScriptResourceState::Stopped);
         Ok(())
     }
 
@@ -263,6 +284,18 @@ impl ResourceManager {
             let mut resources = self.resources.lock().await;
             if let Some(entry) = resources.get_mut(name) {
                 entry.discovered.manifest = manifest;
+                self.script_host.resources().upsert_resource(
+                    name.to_owned(),
+                    root.clone(),
+                    entry.discovered.manifest.clone(),
+                    match entry.state {
+                        ResourceState::Unloaded => ScriptResourceState::Uninitialized,
+                        ResourceState::Loading => ScriptResourceState::Starting,
+                        ResourceState::Started => ScriptResourceState::Started,
+                        ResourceState::Stopped => ScriptResourceState::Stopped,
+                        ResourceState::Error => ScriptResourceState::Unknown,
+                    },
+                );
             }
         }
         self.ensure(name).await

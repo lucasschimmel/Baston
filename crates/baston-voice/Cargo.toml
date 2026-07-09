@@ -1,0 +1,32 @@
+[package]
+name = "baston-voice"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Mumble-compatible voice server embedded in baston-gateway.
+# "Mumble at the wire, custom brain": we speak the Mumble control/voice
+# protocol to the stock FiveM client, but the routing core is our own.
+# Kept a leaf crate (no deno_core/v8) so its test suite compiles fast.
+
+[dependencies]
+prost = { workspace = true }
+bytes = "1"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+metrics = { workspace = true }
+# OCB2-AES128 (Mumble UDP crypto). `aes` gives us the raw AES-128 block; OCB2
+# itself is implemented in-crate (Mumble's variant, not RFC OCB3).
+aes = "0.8"
+# TLS control channel (multiplexed on the game port). Matches the workspace
+# rustls provider so we don't double-register a crypto backend.
+rustls = { workspace = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
+rcgen = "0.13"
+
+[dev-dependencies]
+metrics-util = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }
