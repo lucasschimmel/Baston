@@ -1,0 +1,20 @@
+#!/bin/sh
+# Blocks direct commits on main. main is release-only: it only ever receives
+# merge commits from develop (via `git merge --no-ff develop` at release time)
+# or an annotated tag. All day-to-day work happens on develop / feature branches.
+
+branch="$(git symbolic-ref --short HEAD 2>/dev/null)"
+
+if [ "$branch" = "main" ]; then
+  is_merge=0
+  if [ -f "$(git rev-parse --git-path MERGE_HEAD)" ]; then
+    is_merge=1
+  fi
+
+  if [ "$is_merge" -ne 1 ]; then
+    echo "Refusing direct commit on 'main'." >&2
+    echo "main is release-only. Commit on 'develop' (or a feature/fix branch off it)," >&2
+    echo "then merge into main only to cut a release." >&2
+    exit 1
+  fi
+fi
