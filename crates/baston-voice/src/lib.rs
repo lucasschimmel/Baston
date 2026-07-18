@@ -29,6 +29,7 @@ pub mod framing;
 pub mod pds;
 pub mod proto;
 pub mod router;
+pub mod server;
 pub mod session;
 pub mod target;
 pub mod voice;
