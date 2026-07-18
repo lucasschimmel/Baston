@@ -59,8 +59,14 @@ fn starts_and_reports_ready() {
 #[test]
 fn decrypts_encrypted_payload() {
     let h = harness();
-    write_resource_file(&h, "escrow-test", "dist/server/index.js", b"console.log('ok')");
-    let sidecar = SidecarDecryptor::spawn_with_command(stub_command(&h), h.ipc.clone()).expect("start");
+    write_resource_file(
+        &h,
+        "escrow-test",
+        "dist/server/index.js",
+        b"console.log('ok')",
+    );
+    let sidecar =
+        SidecarDecryptor::spawn_with_command(stub_command(&h), h.ipc.clone()).expect("start");
     let out = sidecar
         .decrypt(
             "escrow-test",
@@ -75,7 +81,8 @@ fn decrypts_encrypted_payload() {
 #[test]
 fn plain_payload_bypasses_sidecar() {
     let h = harness();
-    let sidecar = SidecarDecryptor::spawn_with_command(stub_command(&h), h.ipc.clone()).expect("start");
+    let sidecar =
+        SidecarDecryptor::spawn_with_command(stub_command(&h), h.ipc.clone()).expect("start");
     let plain = b"console.log('plain')";
     let out = sidecar
         .decrypt("axiom-core", "dist/server/index.js", plain, None)
@@ -86,7 +93,8 @@ fn plain_payload_bypasses_sidecar() {
 #[test]
 fn sidecar_error_reply_surfaces_cleanly() {
     let h = harness();
-    let sidecar = SidecarDecryptor::spawn_with_command(stub_command(&h), h.ipc.clone()).expect("start");
+    let sidecar =
+        SidecarDecryptor::spawn_with_command(stub_command(&h), h.ipc.clone()).expect("start");
     let err = sidecar
         .decrypt("__error__", "f.js", &fxap(b"x"), None)
         .expect_err("must error");
@@ -96,7 +104,8 @@ fn sidecar_error_reply_surfaces_cleanly() {
 #[test]
 fn sidecar_crash_is_reported_not_panicked() {
     let h = harness();
-    let sidecar = SidecarDecryptor::spawn_with_command(stub_command(&h), h.ipc.clone()).expect("start");
+    let sidecar =
+        SidecarDecryptor::spawn_with_command(stub_command(&h), h.ipc.clone()).expect("start");
     // The stub exits without replying → clean error, no panic.
     let err = sidecar
         .decrypt("__die__", "f.js", &fxap(b"x"), None)
@@ -107,7 +116,8 @@ fn sidecar_crash_is_reported_not_panicked() {
 #[test]
 fn frozen_sidecar_times_out_without_deadlock() {
     let h = harness();
-    let sidecar = SidecarDecryptor::spawn_with_command(stub_command(&h), h.ipc.clone()).expect("start");
+    let sidecar =
+        SidecarDecryptor::spawn_with_command(stub_command(&h), h.ipc.clone()).expect("start");
     // The stub blocks forever; decrypt must return within REQUEST_TIMEOUT (8s).
     let start = std::time::Instant::now();
     let err = sidecar

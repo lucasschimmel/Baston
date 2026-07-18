@@ -217,9 +217,9 @@ impl Sidecar {
             // Accept the id whether the shim encoded it as an integer or a float.
             if let Ok(bytes) = fs::read(&response_path) {
                 if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                    let matches = value.get("id").is_some_and(|v| {
-                        v.as_u64() == Some(id) || v.as_f64() == Some(id as f64)
-                    });
+                    let matches = value
+                        .get("id")
+                        .is_some_and(|v| v.as_u64() == Some(id) || v.as_f64() == Some(id as f64));
                     if matches {
                         return Ok(value);
                     }
@@ -277,7 +277,12 @@ fn write_if_changed(path: &Path, contents: &str) -> Result<(), EscrowPluginError
 
 /// Remove leftover IPC state so a fresh run never observes a previous one's files.
 fn reset_ipc(ipc_dir: &Path) {
-    for name in ["request.json", "request.json.tmp", "response.json", "ready.json"] {
+    for name in [
+        "request.json",
+        "request.json.tmp",
+        "response.json",
+        "ready.json",
+    ] {
         let _ = fs::remove_file(ipc_dir.join(name));
     }
 }
