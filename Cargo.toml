@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# The cargo-fuzz harness needs nightly + libFuzzer; excluded so stable CI
+# ignores it (see fuzz/README.md and .github/workflows/fuzz.yml).
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0-alpha"

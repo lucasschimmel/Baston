@@ -1,0 +1,57 @@
+[package]
+name = "baston-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+baston-protocol = { path = "../crates/baston-protocol" }
+
+# Detached from the root workspace (root Cargo.toml excludes "fuzz").
+[workspace]
+
+[[bin]]
+name = "decode_incoming"
+path = "fuzz_targets/decode_incoming.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_downlink"
+path = "fuzz_targets/decode_downlink.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_nack"
+path = "fuzz_targets/parse_nack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_ack"
+path = "fuzz_targets/parse_ack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_object_ids"
+path = "fuzz_targets/parse_object_ids.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lz4dict_decompress"
+path = "fuzz_targets/lz4dict_decompress.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,36 @@
+name: fuzz
+
+# Nightly libFuzzer runs, kept out of the stable CI: scheduled weekly and
+# runnable on demand. Findings never block merges (continue-on-error).
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * 1"
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - decode_incoming
+          - decode_downlink
+          - parse_nack
+          - parse_ack
+          - parse_object_ids
+          - lz4dict_decompress
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+      - name: Fuzz ${{ matrix.target }}
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts
