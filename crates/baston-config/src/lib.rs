@@ -18,6 +18,11 @@ pub enum ConfigError {
         path: PathBuf,
         source: toml::de::Error,
     },
+    #[error("[{section}] invalid configuration: {reason}")]
+    Invalid {
+        section: &'static str,
+        reason: String,
+    },
     #[error("invalid environment override {var}={value}: {reason}")]
     EnvOverride {
         var: &'static str,
@@ -143,7 +148,34 @@ pub struct BastonConfig {
     pub license: LicenseConfig,
     #[serde(default)]
     pub api: ApiConfig,
+    #[serde(default)]
+    pub voice: VoiceConfig,
     pub tls: Option<TlsConfig>,
+}
+
+/// `[voice]` section — the embedded Mumble-compatible voice server.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VoiceConfig {
+    /// Off by default: enabling binds a TCP(TLS)+UDP listener on `port`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Voice port (TCP control + UDP voice share the number). Defaults to
+    /// game port + 1 by convention; must differ from `server.port`.
+    #[serde(default = "default_voice_port")]
+    pub port: u16,
+}
+
+impl Default for VoiceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_voice_port(),
+        }
+    }
+}
+
+fn default_voice_port() -> u16 {
+    30121
 }
 
 /// `[api]` section — keys for the monitoring/control HTTP API (served on the
@@ -816,6 +848,15 @@ impl BastonConfig {
         self.license.validate()?;
         self.escrow.validate()?;
         self.api.validate()?;
+        if self.voice.enabled && self.voice.port == self.server.port {
+            return Err(ConfigError::Invalid {
+                section: "voice",
+                reason: format!(
+                    "voice.port ({}) must differ from server.port (the game transport owns it)",
+                    self.voice.port
+                ),
+            });
+        }
         Ok(())
     }
 
@@ -859,6 +900,18 @@ impl BastonConfig {
         }
         if let Ok(enabled) = std::env::var("BASTON_MESHING_ENABLED") {
             self.meshing.enabled = matches!(enabled.as_str(), "true" | "1" | "yes");
+        }
+        if let Ok(enabled) = std::env::var("BASTON_VOICE_ENABLED") {
+            self.voice.enabled = matches!(enabled.as_str(), "true" | "1" | "yes");
+        }
+        if let Ok(port) = std::env::var("BASTON_VOICE_PORT") {
+            self.voice.port =
+                port.parse()
+                    .map_err(|e: std::num::ParseIntError| ConfigError::EnvOverride {
+                        var: "BASTON_VOICE_PORT",
+                        value: port.clone(),
+                        reason: e.to_string(),
+                    })?;
         }
         if let Ok(port) = std::env::var("BASTON_METRICS_PORT") {
             self.metrics.port =
@@ -904,6 +957,35 @@ mod tests {
         assert!(config.auth.pubkey_url.contains("lambda.fivem.net"));
         assert_eq!(config.connection.deferral_timeout_secs, 10);
         assert_eq!(config.resources.path, PathBuf::from("resources"));
+    }
+
+    #[test]
+    fn voice_defaults_off_on_game_port_plus_one() {
+        let config: BastonConfig = toml::from_str("[server]\nport = 30120\n").unwrap();
+        assert!(!config.voice.enabled);
+        assert_eq!(config.voice.port, 30121);
+        config.validate().expect("disabled voice is always valid");
+    }
+
+    #[test]
+    fn voice_section_parses_and_rejects_game_port_collision() {
+        let config: BastonConfig =
+            toml::from_str("[server]\nport = 30120\n[voice]\nenabled = true\nport = 64738\n")
+                .unwrap();
+        assert!(config.voice.enabled);
+        assert_eq!(config.voice.port, 64738);
+        config.validate().expect("distinct port is valid");
+
+        let clash: BastonConfig =
+            toml::from_str("[server]\nport = 30120\n[voice]\nenabled = true\nport = 30120\n")
+                .unwrap();
+        assert!(matches!(
+            clash.validate(),
+            Err(ConfigError::Invalid {
+                section: "voice",
+                ..
+            })
+        ));
     }
 
     #[test]

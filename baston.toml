@@ -60,6 +60,14 @@ audit_log = "baston-audit.jsonl"
 # token = "REPLACE_ME_openssl_rand_hex_32"
 # permissions = ["monitor.read"]          # monitor.read | resource.control | player.kick | zone.drain
 
+# Embedded Mumble-compatible voice server (baston-voice crate). Off by
+# default. Enables a TCP(TLS)+UDP listener on `port` (control + voice share
+# the port number, standard Mumble). Env overrides: BASTON_VOICE_ENABLED,
+# BASTON_VOICE_PORT.
+[voice]
+enabled = false
+port = 30121
+
 # CFX Asset Escrow support (Phase D-bis). Off by default. See
 # docs/escrow-support.md. Requires a Windows build with `--features escrow`.
 [escrow]
