@@ -57,6 +57,24 @@ impl VoicePacket {
     }
 }
 
+/// Encode a server→client voice packet: the speaker's session id is inserted
+/// after the header byte (the client→server form carries the sequence varint
+/// first; the server prepends who is speaking, as umurmur does). The remaining
+/// payload — sequence varint + audio frames (+ position when `with_position`)
+/// — is forwarded verbatim.
+pub fn encode_outbound(session: u64, packet: &VoicePacket, with_position: bool) -> Vec<u8> {
+    let body = if with_position {
+        &packet.payload[1..]
+    } else {
+        &packet.payload[1..packet.audio_end.min(packet.payload.len())]
+    };
+    let mut out = Vec::with_capacity(1 + 9 + body.len());
+    out.push(packet.payload[0]);
+    crate::pds::write_u64(&mut out, session);
+    out.extend_from_slice(body);
+    out
+}
+
 /// Parse a decrypted voice payload. Returns `None` on a malformed/truncated
 /// packet (the caller drops it — never panics on hostile input).
 pub fn parse(payload: &[u8]) -> Option<VoicePacket> {
@@ -188,6 +206,24 @@ mod tests {
         let v2 = parse(&rewritten).unwrap();
         assert_eq!(v2.position, Some([1.0, 2.0, 3.0]));
         assert_eq!(v2.without_position(), v.without_position());
+    }
+
+    #[test]
+    fn encode_outbound_inserts_session_and_strips_position() {
+        let pos = [4.0f32, 5.0, 6.0];
+        let pkt = opus_packet(VoiceTargetKind::Normal, 9, &[7; 6], Some(pos));
+        let v = parse(&pkt).unwrap();
+
+        // With position: header + session varint + original body (seq..pos).
+        let out = encode_outbound(42, &v, true);
+        let mut r = crate::pds::PdsReader::new(&out[1..]);
+        assert_eq!(r.read_u64(), Some(42), "speaker session prepended");
+        assert_eq!(out[0], pkt[0]);
+        assert_eq!(&out[1 + r.offset()..], &pkt[1..]);
+
+        // Without position: the 12-byte tail is gone.
+        let stripped = encode_outbound(42, &v, false);
+        assert_eq!(stripped.len(), out.len() - 12);
     }
 
     #[test]
