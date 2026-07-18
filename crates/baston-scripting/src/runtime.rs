@@ -288,6 +288,12 @@ impl ScriptRuntime {
         op_state.put(SharedResources(resources));
     }
 
+    /// Install the voice control surface backing the `MUMBLE_*` natives.
+    pub fn install_voice(&mut self, voice: crate::extensions::SharedVoice) {
+        let op_state = self.js.op_state();
+        op_state.borrow_mut().put(voice);
+    }
+
     /// Execute a resource script (plain script semantics, like FXServer).
     pub async fn execute_resource_script(
         &mut self,

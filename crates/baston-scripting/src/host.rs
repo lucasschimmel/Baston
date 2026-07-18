@@ -113,6 +113,7 @@ pub struct ScriptHost {
     resources: ResourceRegistry,
     started_at: Instant,
     cross_zone: Arc<std::sync::RwLock<Option<CrossZonePublisher>>>,
+    voice: Arc<std::sync::RwLock<Option<Arc<dyn crate::extensions::VoiceControl>>>>,
 }
 
 /// Lifecycle/internal events that never leave the local zone.
@@ -155,7 +156,14 @@ impl ScriptHost {
             resources: ResourceRegistry::default(),
             started_at: Instant::now(),
             cross_zone: Arc::new(std::sync::RwLock::new(None)),
+            voice: Arc::new(std::sync::RwLock::new(None)),
         })
+    }
+
+    /// Install the voice control surface (`MUMBLE_*` natives). Applies to
+    /// resources loaded afterwards — call before `load_resource`.
+    pub fn set_voice_control(&self, voice: Arc<dyn crate::extensions::VoiceControl>) {
+        *self.voice.write().unwrap_or_else(|e| e.into_inner()) = Some(voice);
     }
 
     pub fn observability(&self) -> Arc<Observability> {
@@ -292,6 +300,7 @@ impl ScriptHost {
             observability: Arc::clone(&self.observability),
             convars: Arc::clone(&self.convars),
             resources: self.resources.clone(),
+            voice: self.voice.read().unwrap_or_else(|e| e.into_inner()).clone(),
         })?;
         let queued = handle
             .send(|reply| RuntimeCommand::ExecuteScripts { scripts, reply })
@@ -496,6 +505,7 @@ struct RuntimeThreadParams<'a> {
     observability: Arc<Observability>,
     convars: Arc<DashMap<String, String>>,
     resources: ResourceRegistry,
+    voice: Option<Arc<dyn crate::extensions::VoiceControl>>,
 }
 
 /// Spawn the dedicated isolate thread for one resource.
@@ -512,6 +522,7 @@ fn spawn_runtime_thread(
         observability,
         convars,
         resources,
+        voice,
         ..
     } = params;
     // Runtime creation happens on the isolate thread; report init errors
@@ -541,6 +552,7 @@ fn spawn_runtime_thread(
                     }
                 };
             runtime.install_server_state(convars, resources);
+            runtime.install_voice(crate::extensions::SharedVoice(voice));
             let _ = init_tx.send(Ok(()));
 
             let local = tokio::task::LocalSet::new();

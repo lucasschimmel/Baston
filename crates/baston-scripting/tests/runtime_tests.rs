@@ -447,6 +447,86 @@ async fn generated_server_native_shims_are_callable() {
     .expect("load");
 }
 
+#[derive(Default)]
+struct FakeVoice {
+    channels: std::sync::Mutex<std::collections::HashSet<u32>>,
+    muted: std::sync::Mutex<std::collections::HashSet<u32>>,
+    overrides: std::sync::Mutex<std::collections::HashMap<u32, [f32; 3]>>,
+}
+
+impl baston_scripting::VoiceControl for FakeVoice {
+    fn create_channel(&self, id: u32) {
+        self.channels.lock().unwrap().insert(id);
+    }
+    fn channel_exists(&self, id: u32) -> bool {
+        self.channels.lock().unwrap().contains(&id)
+    }
+    fn set_player_muted(&self, netid: u32, muted: bool) {
+        let mut m = self.muted.lock().unwrap();
+        if muted {
+            m.insert(netid);
+        } else {
+            m.remove(&netid);
+        }
+    }
+    fn is_player_muted(&self, netid: u32) -> bool {
+        self.muted.lock().unwrap().contains(&netid)
+    }
+    fn set_proximity_override(&self, netid: u32, position: Option<[f32; 3]>) {
+        let mut o = self.overrides.lock().unwrap();
+        match position {
+            Some(p) => {
+                o.insert(netid, p);
+            }
+            None => {
+                o.remove(&netid);
+            }
+        }
+    }
+    fn proximity_override(&self, netid: u32) -> [f32; 3] {
+        self.overrides
+            .lock()
+            .unwrap()
+            .get(&netid)
+            .copied()
+            .unwrap_or([0.0; 3])
+    }
+}
+
+#[tokio::test]
+async fn mumble_natives_drive_the_voice_control_surface() {
+    let (host, _) = host();
+    let voice = Arc::new(FakeVoice::default());
+    host.set_voice_control(voice.clone());
+
+    host.load_resource(
+        "voice-test",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                MumbleCreateChannel(64);
+                MumbleSetPlayerMuted(7, true);
+                if (MumbleIsPlayerMuted(7) !== true) throw new Error('mute readback');
+                MumbleSetPlayerMuted(7, false);
+                if (MumbleIsPlayerMuted(7) !== false) throw new Error('unmute readback');
+                const v = NetworkGetVoiceProximityOverrideForPlayer(7);
+                if (v[0] !== 0 || v[1] !== 0 || v[2] !== 0) throw new Error('default override');
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load");
+
+    assert!(voice.channel_exists_public(64));
+}
+
+impl FakeVoice {
+    fn channel_exists_public(&self, id: u32) -> bool {
+        self.channels.lock().unwrap().contains(&id)
+    }
+}
+
 /// Audit ROB-2 regression: a handler stalled on an unanswered client-native
 /// await (1 s timeout) must not block the resource's other events. Before the
 /// concurrent-dispatch host loop, the second event's side effect would only be

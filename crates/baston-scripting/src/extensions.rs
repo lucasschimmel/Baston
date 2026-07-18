@@ -63,6 +63,23 @@ pub struct SharedConvars(pub Arc<DashMap<String, String>>);
 /// Shared resource snapshot (`GetResourceState`, `LoadResourceFile`, ...).
 pub struct SharedResources(pub crate::resource_registry::ResourceRegistry);
 
+/// Server-side voice control surface backing the `MUMBLE_*` natives. The
+/// gateway implements this on the baston-voice handle so baston-scripting
+/// stays decoupled from the voice crate. `None` = voice disabled: the natives
+/// keep returning neutral defaults (stub behaviour).
+pub trait VoiceControl: Send + Sync {
+    fn create_channel(&self, id: u32);
+    fn channel_exists(&self, id: u32) -> bool;
+    fn set_player_muted(&self, netid: u32, muted: bool);
+    fn is_player_muted(&self, netid: u32) -> bool;
+    fn set_proximity_override(&self, netid: u32, position: Option<[f32; 3]>);
+    fn proximity_override(&self, netid: u32) -> [f32; 3];
+}
+
+/// Shared voice handle (`MUMBLE_*` natives).
+#[derive(Clone)]
+pub struct SharedVoice(pub Option<Arc<dyn VoiceControl>>);
+
 /// How long a server → client native call may wait for its result.
 ///
 /// This is also the upper bound on how long one such call can stall the
@@ -381,6 +398,24 @@ fn json_arg_i64(args: &[serde_json::Value], index: usize) -> i64 {
     args.get(index).and_then(|v| v.as_i64()).unwrap_or_default()
 }
 
+/// Player/net-id argument: natives pass server ids as numbers or numeric
+/// strings (`source` is stringly-typed in much of the FiveM ecosystem).
+fn json_arg_netid(args: &[serde_json::Value], index: usize) -> u32 {
+    match args.get(index) {
+        Some(serde_json::Value::Number(n)) => n.as_u64().unwrap_or_default() as u32,
+        Some(serde_json::Value::String(s)) => s.trim().parse().unwrap_or_default(),
+        _ => 0,
+    }
+}
+
+fn json_arg_bool(args: &[serde_json::Value], index: usize) -> bool {
+    match args.get(index) {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or_default() != 0,
+        _ => false,
+    }
+}
+
 #[op2]
 #[string]
 fn op_cfx_shared_native(
@@ -656,6 +691,52 @@ fn op_cfx_server_native(
             tracing::info!(target: "structured-trace", "{}", json_arg_string(&args, 0));
             serde_json::Value::Null
         }
+        // --- voice (baston-voice via the gateway's VoiceControl impl) ---
+        "MUMBLE_CREATE_CHANNEL" => {
+            if let Some(voice) = shared_voice(state) {
+                voice.create_channel(json_arg_i64(&args, 0) as u32);
+            }
+            serde_json::Value::Null
+        }
+        "MUMBLE_DOES_CHANNEL_EXIST" => match shared_voice(state) {
+            Some(voice) => {
+                serde_json::json!(voice.channel_exists(json_arg_i64(&args, 0) as u32))
+            }
+            None => serde_json::json!(false),
+        },
+        "MUMBLE_SET_PLAYER_MUTED" => {
+            if let Some(voice) = shared_voice(state) {
+                voice.set_player_muted(json_arg_netid(&args, 0), json_arg_bool(&args, 1));
+            }
+            serde_json::Value::Null
+        }
+        "MUMBLE_IS_PLAYER_MUTED" => match shared_voice(state) {
+            Some(voice) => serde_json::json!(voice.is_player_muted(json_arg_netid(&args, 0))),
+            None => serde_json::json!(false),
+        },
+        "NETWORK_SET_VOICE_PROXIMITY_OVERRIDE_FOR_PLAYER" => {
+            if let Some(voice) = shared_voice(state) {
+                let pos = [
+                    json_arg_f64(&args, 1) as f32,
+                    json_arg_f64(&args, 2) as f32,
+                    json_arg_f64(&args, 3) as f32,
+                ];
+                voice.set_proximity_override(json_arg_netid(&args, 0), Some(pos));
+            }
+            serde_json::Value::Null
+        }
+        "NETWORK_CLEAR_VOICE_PROXIMITY_OVERRIDE_FOR_PLAYER" => {
+            if let Some(voice) = shared_voice(state) {
+                voice.set_proximity_override(json_arg_netid(&args, 0), None);
+            }
+            serde_json::Value::Null
+        }
+        "NETWORK_GET_VOICE_PROXIMITY_OVERRIDE_FOR_PLAYER" => {
+            let pos = shared_voice(state)
+                .map(|voice| voice.proximity_override(json_arg_netid(&args, 0)))
+                .unwrap_or([0.0; 3]);
+            serde_json::json!([pos[0], pos[1], pos[2]])
+        }
         _ => default_native_value(&result_kind),
     };
 
@@ -686,6 +767,13 @@ fn entity_update(id: u32, field: &str, value: serde_json::Value) {
             object.insert(field.to_owned(), value);
         }
     }
+}
+
+/// The voice handle installed by the host, if any (voice enabled).
+fn shared_voice(state: &OpState) -> Option<Arc<dyn VoiceControl>> {
+    state
+        .try_borrow::<SharedVoice>()
+        .and_then(|v| v.0.as_ref().map(Arc::clone))
 }
 
 fn default_native_value(result_kind: &str) -> serde_json::Value {

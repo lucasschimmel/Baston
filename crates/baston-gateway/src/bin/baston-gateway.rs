@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use baston_config::BastonConfig;
+use baston_gateway::voice::GatewayVoice;
 use baston_gateway::{router, AppState, AuthService, PlayerRegistry};
 use baston_scripting::{DeferralRegistry, ScriptHost};
 use baston_zone::resource_loader::{spawn_hot_reload, ResourceManager};
@@ -91,11 +92,30 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!(target: "baston", "dev.auth_bypass is enabled — CFX tickets are NOT validated");
     }
 
+    // Embedded Mumble-compatible voice server (baston-voice). Spawned before
+    // the script host so the MUMBLE_* natives are live from the first
+    // resource load. Sessions are created when a client's Mumble side
+    // authenticates; the UDP task tears them down on game disconnect.
+    let voice = if config.voice.enabled {
+        Some(
+            baston_voice::server::spawn(baston_voice::server::VoiceServerConfig {
+                bind: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                port: config.voice.port,
+            })
+            .await?,
+        )
+    } else {
+        None
+    };
+
     let deferrals = Arc::new(DeferralRegistry::new());
     let players = Arc::new(PlayerRegistry::new());
     let (net_bridge, net_rx) = baston_scripting::NetBridge::new();
     let script_host =
         ScriptHost::spawn_with_net(Arc::clone(&deferrals), Arc::clone(&players), net_bridge)?;
+    if let Some(voice) = &voice {
+        script_host.set_voice_control(Arc::new(GatewayVoice(voice.clone())));
+    }
     let resource_manager = ResourceManager::new(script_host.clone(), config.resources.path.clone());
 
     resource_manager.discover().await?;
@@ -316,21 +336,10 @@ async fn main() -> anyhow::Result<()> {
         config.state_sync.onesync,
     )?;
 
-    // Embedded Mumble-compatible voice server (baston-voice). Sessions are
-    // created when the client's Mumble side authenticates; the UDP task
-    // tears them down on game disconnect.
-    let voice = if config.voice.enabled {
-        let handle = baston_voice::server::spawn(baston_voice::server::VoiceServerConfig {
-            bind: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-            port: config.voice.port,
-        })
-        .await?;
-        udp.set_voice(handle.clone());
-        Some(handle)
-    } else {
-        None
-    };
-    let _ = &voice;
+    // Voice teardown follows the game connection.
+    if let Some(voice) = &voice {
+        udp.set_voice(voice.clone());
+    }
 
     // Admin + monitoring/control API on the admin port. Legacy /admin/*
     // routes need the mesh; /api/v1/* works in single-process mode too.

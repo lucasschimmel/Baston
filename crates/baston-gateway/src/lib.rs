@@ -12,6 +12,7 @@ pub mod players;
 pub mod quadtree;
 pub mod state_aggregator;
 pub mod udp;
+pub mod voice;
 pub mod zone_registry;
 
 pub use connection_router::ConnectionRouter;

@@ -17,6 +17,7 @@ mod runtime;
 
 pub use deferrals::{DeferralOutcome, DeferralRegistry};
 pub use error::ScriptError;
+pub use extensions::{SharedVoice, VoiceControl};
 pub use host::{ScriptHost, ScriptSource};
 pub use net_bridge::{NetBridge, NetOutbound};
 pub use observability::{
