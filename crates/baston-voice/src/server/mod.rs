@@ -89,6 +89,14 @@ pub struct VoiceHandle {
     port: u16,
 }
 
+impl std::fmt::Debug for VoiceHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VoiceHandle")
+            .field("port", &self.port)
+            .finish()
+    }
+}
+
 impl VoiceHandle {
     /// The actual bound port (differs from the config only when it was 0).
     pub fn port(&self) -> u16 {

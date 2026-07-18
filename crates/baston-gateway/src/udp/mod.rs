@@ -65,6 +65,8 @@ pub enum UdpCommand {
     },
     /// Forcefully drop a player's game connection.
     DropSource { source: u32 },
+    /// Wire the embedded voice server (per-player teardown on disconnect).
+    SetVoice(baston_voice::server::VoiceHandle),
 }
 
 /// Cloneable handle to the UDP task.
@@ -102,6 +104,14 @@ impl UdpHandle {
         }
     }
 
+    /// Attach the voice server so player disconnects tear their voice
+    /// session down.
+    pub fn set_voice(&self, voice: baston_voice::server::VoiceHandle) {
+        if self.cmd_tx.try_send(UdpCommand::SetVoice(voice)).is_err() {
+            tracing::warn!(target: "udp", "voice handle not delivered: queue full or closed");
+        }
+    }
+
     pub fn drop_source(&self, source: u32) {
         if self
             .cmd_tx
@@ -134,6 +144,8 @@ struct UdpServer {
     host_release_waiters: Vec<u32>,
     /// Phase C: validated client-state ingestion (None before wiring).
     state_ingest: Option<Arc<StateIngest>>,
+    /// Embedded Mumble voice server: torn down per player on disconnect.
+    voice: Option<baston_voice::server::VoiceHandle>,
     /// Phase D: forward client state to the player's current zone process.
     mesh_forward: Option<crate::mesh_forward::MeshForwarder>,
     /// OneSync-NG: server-authoritative entity game state. `Some` when
@@ -243,6 +255,7 @@ pub fn spawn_with_mesh(
         current_hosting: None,
         host_release_waiters: Vec::new(),
         state_ingest,
+        voice: None,
         mesh_forward,
         // Big mode is implied by OneSync-on in BASTON (Infinity-style); the
         // length hack (Beyond, 16-bit ids) stays off until validated live.
@@ -386,6 +399,9 @@ impl UdpServer {
                 if let Some(peer_id) = self.source_peers.get(&source).copied() {
                     self.host.peer_mut(peer_id).disconnect(0);
                 }
+            }
+            UdpCommand::SetVoice(voice) => {
+                self.voice = Some(voice);
             }
         }
     }
@@ -974,6 +990,9 @@ impl UdpServer {
         }
         if let Some(ingest) = &self.state_ingest {
             ingest.on_player_dropped(source);
+        }
+        if let Some(voice) = &self.voice {
+            voice.on_player_dropped(source);
         }
         // OneSync-NG: release the client's object-id leases and orphan the
         // entities it owned (migration to a survivor is task 6/7).

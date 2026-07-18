@@ -38,6 +38,7 @@ baston-config = { workspace = true }
 baston-protocol = { workspace = true }
 baston-scripting = { workspace = true }
 baston-zone = { workspace = true }
+baston-voice = { workspace = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

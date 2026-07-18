@@ -316,6 +316,22 @@ async fn main() -> anyhow::Result<()> {
         config.state_sync.onesync,
     )?;
 
+    // Embedded Mumble-compatible voice server (baston-voice). Sessions are
+    // created when the client's Mumble side authenticates; the UDP task
+    // tears them down on game disconnect.
+    let voice = if config.voice.enabled {
+        let handle = baston_voice::server::spawn(baston_voice::server::VoiceServerConfig {
+            bind: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            port: config.voice.port,
+        })
+        .await?;
+        udp.set_voice(handle.clone());
+        Some(handle)
+    } else {
+        None
+    };
+    let _ = &voice;
+
     // Admin + monitoring/control API on the admin port. Legacy /admin/*
     // routes need the mesh; /api/v1/* works in single-process mode too.
     {

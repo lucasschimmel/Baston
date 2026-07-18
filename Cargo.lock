@@ -350,6 +350,7 @@ dependencies = [
  "baston-config",
  "baston-protocol",
  "baston-scripting",
+ "baston-voice",
  "baston-zone",
  "bincode 2.0.1",
  "dashmap",

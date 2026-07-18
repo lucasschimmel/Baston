@@ -57,6 +57,7 @@ baston-scripting = { path = "crates/baston-scripting" }
 baston-zone = { path = "crates/baston-zone" }
 baston-gateway = { path = "crates/baston-gateway" }
 baston-escrow-plugin = { path = "crates/baston-escrow-plugin" }
+baston-voice = { path = "crates/baston-voice" }
 
 [profile.dev]
 # deno_core/v8 is extremely slow unoptimized; opt-level 1 keeps dev iteration usable.
