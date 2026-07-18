@@ -109,6 +109,10 @@ onesync = "off"               # "on" = clone parsing serveur-autoritaire (OneSyn
 enabled = true
 port = 9090                   # /metrics Prometheus
 
+[voice]
+enabled = false               # serveur vocal Mumble embarqué (baston-voice)
+port = 30121                  # TCP(TLS) contrôle + UDP voix (même numéro)
+
 [license]
 mode = "off"                  # off | gate | verified   (cf docs/licensing.md)
 sv_license_key = ""
@@ -258,6 +262,37 @@ Concrètement, pour brancher Supabase/Postgres :
 > `baston-scripting` expose réellement (fetch, timers). Ne suppose pas une API
 > Node complète — regarde `crates/baston-scripting/src/extensions.rs` et
 > `assets/bootstrap.js` pour la surface disponible.
+
+---
+
+## 5bis. Voix (serveur Mumble embarqué)
+
+BASTON embarque son propre serveur vocal compatible Mumble (crate
+`baston-voice`) — l'équivalent du umurmur intégré à FXServer. Le client FiveM
+stock s'y connecte tel quel (TLS auto-signé, username `"[netId]"`).
+
+```toml
+[voice]
+enabled = true    # défaut : false
+port = 30121      # TCP (contrôle TLS) + UDP (voix) — même numéro, ≠ port jeu
+```
+
+Overrides : `BASTON_VOICE_ENABLED`, `BASTON_VOICE_PORT`.
+
+Ce qui marche aujourd'hui :
+
+- Handshake Mumble complet (Version → Authenticate → CryptSetup →
+  ChannelState/UserState → ServerSync), crypto OCB2-AES128 sur UDP, fallback
+  **UDPTunnel** (voix via TCP quand l'UDP est bloqué), ping chiffré et probe
+  server-list.
+- Routage par canal + voice targets (whispers/radios pma-voice), strip du bloc
+  positionnel quand les contextes diffèrent.
+- Natives serveur branchées : `MumbleCreateChannel`, `MumbleSetPlayerMuted`,
+  `MumbleIsPlayerMuted`, `NetworkSet/Get/ClearVoiceProximityOverrideForPlayer`.
+- La session vocale est détruite quand le joueur quitte le serveur de jeu.
+
+Limite actuelle : pas encore de culling AoI serveur-autoritaire (le trait
+`AoiOracle` est prêt, `NoCulling` par défaut — comportement pma-voice stock).
 
 ---
 

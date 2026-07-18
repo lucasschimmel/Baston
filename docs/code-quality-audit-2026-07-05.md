@@ -46,14 +46,17 @@ Les cinq paliers du §7 ont été traités. **État du build après remédiation
 | **3 — Avant OneSync-NG** | **ROB-3 (fuite d'object-id sur create rejeté — `apply_create` retourne un bool, + test)** · ROB-5 (progression garantie du budget d'interest) · ROB-6 (gardes `length` du bitbuffer) · TYPE-4 (asymétrie `length_hack` documentée) · F1 (cap priorité f32) · sweep déterministe "ne panique jamais" (4000 itérations sur les 3 portes non fiables) |
 | **4 — Hygiène** | TYPE-2 (`mode`/`backend` en `enum`, 2 variantes d'erreur supprimées) · PROC-2 (`.cargo/config.toml` désindexé + gitignoré + `.example`) |
 
-### Différé volontairement (avec justification)
+### Différé initialement — soldé (session 2026-07-18)
 
-| Finding | Raison |
-|---------|--------|
-| **ROB-2** (sérialisation de l'appel natif) | Le fix complet = rendre les dispatches concurrents sur un `JsRuntime` `!Send` → **refonte du cœur d'exécution du scripting, live-testé**. Trop risqué à l'aveugle. Mitigation appliquée : sérialisation documentée + bornée par `NATIVE_CALL_TIMEOUT`. À traiter comme un chantier de design dédié. |
-| **ROB-4** (unification `IdAllocator`) | Le bug concret (ROB-3) est corrigé ; la divergence de comptabilité qu'il visait n'est **pas atteignable** une fois ROB-3 réglé (les chemins `remove_client`/`apply_remove` nettoient les deux structures). Réécriture structurelle = optionnelle. |
-| **STRUCT-1** (découpage fichiers > 400 l) | Pur churn cosmétique à fort risque sur du code fonctionnel ; cohésion jugée bonne par la revue (ex. `udp/mod.rs` = machine à états mono-propriétaire, handlers < 50 l). Non fait. |
-| **cargo-fuzz** (harnais complet) | Remplacé par un sweep déterministe sur stable (CI stable, pas de toolchain nightly). Harnais `cargo-fuzz` = suivi optionnel. |
+Les quatre items différés lors de la remédiation initiale ont depuis été
+traités :
+
+| Finding | Résolution |
+|---------|-----------|
+| **ROB-2** (sérialisation de l'appel natif) | **Corrigé.** La boucle de commandes du host ne bloque plus sur chaque dispatch : les fonctions de dispatch du bootstrap retournent une promesse de complétion, la phase d'exécution synchrone reste inline (ordre de démarrage des handlers préservé), chaque réponse est réglée par une tâche `spawn_local`, et une unique tâche « pump » pilote l'event loop V8. Les broadcasts démarrent tous les runtimes avant de collecter les réponses. Test de non-régression : un native client jamais résolu (timeout 1 s) ne retarde plus l'événement suivant. |
+| **ROB-4** (unification `IdAllocator`) | **Corrigé.** `id_used`/`id_leased` remplacés par un `Vec<IdState>` unique (`Free`/`Leased`/`Used`) ; un create sur un id leasé consomme le bail (`Leased → Used`), `remove_client` ne libère que les ids encore `Leased`. Test ajouté (lease → create → takeover → disconnect du bailleur). |
+| **STRUCT-1** (découpage fichiers > 400 l) | **Fait pour les pires fichiers** : `onesync.rs` → module répertoire, `udp/mod.rs` → handle/server/inbound, `extensions.rs` → modules par groupe d'ops, tests de `baston-config` déplacés dans `src/tests.rs`. Le reste (cohésion jugée bonne) est laissé tel quel. |
+| **cargo-fuzz** (harnais complet) | **Fait.** `fuzz/` (exclu du workspace, CI stable intacte) avec six cibles libFuzzer miroir du sweep déterministe, + workflow nightly hebdo/manuel `continue-on-error` (`.github/workflows/fuzz.yml`). |
 
 ---
 
