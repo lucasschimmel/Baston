@@ -570,12 +570,8 @@ async fn stalled_client_native_does_not_block_other_events() {
         .await
         .expect("native invoke sent")
         .expect("net bridge open");
-    match first {
-        baston_scripting::NetOutbound::ClientEvent { event, .. } => {
-            assert_eq!(event, "__baston:invokeNative");
-        }
-        other => panic!("unexpected outbound: {other:?}"),
-    }
+    let baston_scripting::NetOutbound::ClientEvent { event, .. } = first;
+    assert_eq!(event, "__baston:invokeNative");
 
     let started = std::time::Instant::now();
     host.trigger_event("fast", &[]).await.expect("fast event");
@@ -583,10 +579,8 @@ async fn stalled_client_native_does_not_block_other_events() {
         .await
         .expect("'fast' must not wait for the stalled native")
         .expect("net bridge open");
-    match pong {
-        baston_scripting::NetOutbound::ClientEvent { event, .. } => assert_eq!(event, "pong"),
-        other => panic!("unexpected outbound: {other:?}"),
-    }
+    let baston_scripting::NetOutbound::ClientEvent { event, .. } = pong;
+    assert_eq!(event, "pong");
     assert!(
         started.elapsed() < Duration::from_millis(900),
         "second event stalled behind the native await: {:?}",

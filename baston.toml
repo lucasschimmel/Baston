@@ -67,6 +67,10 @@ audit_log = "baston-audit.jsonl"
 [voice]
 enabled = false
 port = 30121
+# Advertised to clients as voice_externalAddress (their Mumble connects to
+# external_address:port). Empty = not advertised. Use the address players
+# reach the server at ("127.0.0.1" for local tests).
+external_address = ""
 
 # CFX Asset Escrow support (Phase D-bis). Off by default. See
 # docs/escrow-support.md. Requires a Windows build with `--features escrow`.

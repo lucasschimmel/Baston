@@ -45,6 +45,8 @@ pub(super) struct UdpServer {
     pub(super) state_ingest: Option<Arc<StateIngest>>,
     /// Embedded Mumble voice server: torn down per player on disconnect.
     pub(super) voice: Option<baston_voice::server::VoiceHandle>,
+    /// Voice endpoint replicated to clients (`voice_externalAddress`/`Port`).
+    pub(super) voice_advertise: Option<(String, u16)>,
     /// Phase D: forward client state to the player's current zone process.
     pub(super) mesh_forward: Option<crate::mesh_forward::MeshForwarder>,
     /// OneSync-NG: server-authoritative entity game state. `Some` when
@@ -155,6 +157,7 @@ pub fn spawn_with_mesh(
         host_release_waiters: Vec::new(),
         state_ingest,
         voice: None,
+        voice_advertise: None,
         mesh_forward,
         // Big mode is implied by OneSync-on in BASTON (Infinity-style); the
         // length hack (Beyond, 16-bit ids) stays off until validated live.
@@ -299,8 +302,9 @@ impl UdpServer {
                     self.host.peer_mut(peer_id).disconnect(0);
                 }
             }
-            UdpCommand::SetVoice(voice) => {
-                self.voice = Some(voice);
+            UdpCommand::SetVoice { handle, advertise } => {
+                self.voice = Some(handle);
+                self.voice_advertise = advertise;
             }
         }
     }

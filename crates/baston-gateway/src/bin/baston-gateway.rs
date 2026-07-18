@@ -336,9 +336,16 @@ async fn main() -> anyhow::Result<()> {
         config.state_sync.onesync,
     )?;
 
-    // Voice teardown follows the game connection.
+    // Voice teardown follows the game connection; clients learn the voice
+    // endpoint through the replicated voice_external* convars.
     if let Some(voice) = &voice {
-        udp.set_voice(voice.clone());
+        let advertise = (!config.voice.external_address.is_empty())
+            .then(|| (config.voice.external_address.clone(), config.voice.port));
+        if advertise.is_none() {
+            tracing::warn!(target: "voice",
+                "[voice] external_address is empty — clients will not be told where the voice server is");
+        }
+        udp.set_voice(voice.clone(), advertise);
     }
 
     // Admin + monitoring/control API on the admin port. Legacy /admin/*

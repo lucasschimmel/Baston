@@ -163,6 +163,13 @@ pub struct VoiceConfig {
     /// game port + 1 by convention; must differ from `server.port`.
     #[serde(default = "default_voice_port")]
     pub port: u16,
+    /// Address advertised to clients via the replicated
+    /// `voice_externalAddress` convar (their embedded Mumble connects to
+    /// `external_address:port`). Empty = do not advertise — clients will not
+    /// find the voice server. Set it to the address players use to reach the
+    /// server (e.g. `127.0.0.1` for local tests, your public IP otherwise).
+    #[serde(default)]
+    pub external_address: String,
 }
 
 impl Default for VoiceConfig {
@@ -170,6 +177,7 @@ impl Default for VoiceConfig {
         Self {
             enabled: false,
             port: default_voice_port(),
+            external_address: String::new(),
         }
     }
 }

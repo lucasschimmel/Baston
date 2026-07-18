@@ -30,7 +30,13 @@ pub enum UdpCommand {
     /// Forcefully drop a player's game connection.
     DropSource { source: u32 },
     /// Wire the embedded voice server (per-player teardown on disconnect).
-    SetVoice(baston_voice::server::VoiceHandle),
+    /// `advertise` is the `(address, port)` replicated to clients as
+    /// `voice_externalAddress`/`voice_externalPort` so their embedded Mumble
+    /// connects to us instead of probing the game port.
+    SetVoice {
+        handle: baston_voice::server::VoiceHandle,
+        advertise: Option<(String, u16)>,
+    },
 }
 
 /// Cloneable handle to the UDP task.
@@ -69,9 +75,21 @@ impl UdpHandle {
     }
 
     /// Attach the voice server so player disconnects tear their voice
-    /// session down.
-    pub fn set_voice(&self, voice: baston_voice::server::VoiceHandle) {
-        if self.cmd_tx.try_send(UdpCommand::SetVoice(voice)).is_err() {
+    /// session down and clients learn the voice endpoint via replicated
+    /// convars.
+    pub fn set_voice(
+        &self,
+        voice: baston_voice::server::VoiceHandle,
+        advertise: Option<(String, u16)>,
+    ) {
+        if self
+            .cmd_tx
+            .try_send(UdpCommand::SetVoice {
+                handle: voice,
+                advertise,
+            })
+            .is_err()
+        {
             tracing::warn!(target: "udp", "voice handle not delivered: queue full or closed");
         }
     }

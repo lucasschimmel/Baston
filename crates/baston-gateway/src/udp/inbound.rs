@@ -105,8 +105,15 @@ impl UdpServer {
 
         // msgConVars: msgpack map of ConVar_Replicated variables.
         let onesync_value = if onesync_on { "on" } else { "off" };
-        let convars =
+        let mut convars =
             std::collections::BTreeMap::from([("onesync".to_owned(), onesync_value.to_owned())]);
+        // Voice endpoint: the client's embedded Mumble defaults to the game
+        // port; these two convars redirect it to the baston-voice listener
+        // (same mechanism external mumble setups use with FXServer).
+        if let Some((addr, port)) = &self.voice_advertise {
+            convars.insert("voice_externalAddress".to_owned(), addr.clone());
+            convars.insert("voice_externalPort".to_owned(), port.to_string());
+        }
         if let Ok(payload) = rmp_serde::to_vec(&convars) {
             let mut packet = baston_protocol::udp::hash_rage_string("msgConVars")
                 .to_le_bytes()
