@@ -83,13 +83,25 @@ impl ClientState {
     }
 }
 
+/// Allocation state of one object id. A single authoritative state machine
+/// replaces the old `id_used`/`id_leased` twin bitmaps (audit ROB-4): an id is
+/// either free, leased to a client via `GetFreeObjectIds`, or consumed by a
+/// live entity. A create on a leased id promotes `Leased → Used` (the lease is
+/// consumed), so the two flags can never diverge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum IdState {
+    #[default]
+    Free,
+    Leased,
+    Used,
+}
+
 /// Server-authoritative game state for one routing bucket / zone.
 pub struct ServerGameState {
     entities: HashMap<u16, ServerEntity>,
     clients: HashMap<u32, ClientState>,
-    /// Ownership of every object id: leased-out set and live set.
-    id_used: Vec<bool>,
-    id_leased: Vec<bool>,
+    /// Allocation state of every object id.
+    ids: Vec<IdState>,
     max_object_id: u16,
     big_mode: bool,
     length_hack: bool,
@@ -106,8 +118,7 @@ impl ServerGameState {
         Self {
             entities: HashMap::new(),
             clients: HashMap::new(),
-            id_used: vec![false; max_object_id as usize + 1],
-            id_leased: vec![false; max_object_id as usize + 1],
+            ids: vec![IdState::Free; max_object_id as usize + 1],
             max_object_id,
             big_mode,
             length_hack,
@@ -145,7 +156,12 @@ impl ServerGameState {
     pub fn remove_client(&mut self, source: u32) -> Vec<u16> {
         if let Some(state) = self.clients.remove(&source) {
             for id in state.leased {
-                self.id_leased[id as usize] = false;
+                // Only release ids still in the leased state; an id promoted to
+                // Used by a create stays claimed while its entity lives (it may
+                // have been taken over by another client).
+                if self.ids[id as usize] == IdState::Leased {
+                    self.ids[id as usize] = IdState::Free;
+                }
             }
         }
         let mut orphaned = Vec::new();
@@ -156,8 +172,7 @@ impl ServerGameState {
         }
         for id in &orphaned {
             self.entities.remove(id);
-            self.id_used[*id as usize] = false;
-            self.id_leased[*id as usize] = false;
+            self.ids[*id as usize] = IdState::Free;
         }
         orphaned
     }
@@ -169,8 +184,8 @@ impl ServerGameState {
         let mut ids = Vec::with_capacity(n);
         let mut id: u16 = 1;
         while ids.len() < n && id < self.max_object_id {
-            if !self.id_used[id as usize] && !self.id_leased[id as usize] {
-                self.id_leased[id as usize] = true;
+            if self.ids[id as usize] == IdState::Free {
+                self.ids[id as usize] = IdState::Leased;
                 ids.push(id);
             }
             id += 1;
@@ -227,7 +242,7 @@ impl ServerGameState {
                             creation_token,
                             data,
                         ) {
-                            self.id_used[object_id as usize] = true;
+                            self.ids[object_id as usize] = IdState::Used;
                         }
                         write_ack_record(&mut ack, 1, object_id, uniqifier);
                         outcome.creates += 1;
@@ -493,8 +508,7 @@ impl ServerGameState {
             // Only the owner may remove, and the uniqifier must match.
             if ent.owner == source && ent.uniqifier == uniqifier {
                 self.entities.remove(&object_id);
-                self.id_used[object_id as usize] = false;
-                self.id_leased[object_id as usize] = false;
+                self.ids[object_id as usize] = IdState::Free;
             }
         }
     }
@@ -631,8 +645,9 @@ mod tests {
         // the id space doesn't leak (regression test for the unconditional
         // `id_used` marking).
         assert_eq!(gs.entity_count(), 0);
-        assert!(
-            !gs.id_used[obj as usize],
+        assert_eq!(
+            gs.ids[obj as usize],
+            IdState::Free,
             "rejected create must not mark the object id as used"
         );
     }
@@ -662,6 +677,42 @@ mod tests {
         let orphaned = gs.remove_client(5);
         assert_eq!(orphaned, vec![60]);
         assert_eq!(gs.entity_count(), 0);
+        assert_eq!(gs.ids[60], IdState::Free);
+    }
+
+    #[test]
+    fn used_id_survives_leasing_client_disconnect_after_takeover() {
+        let mut gs = ServerGameState::new(true, false);
+        // Client 1 leases ids, then creates an entity on the first leased id:
+        // the lease is consumed (Leased → Used).
+        let (leased, _pkt) = gs.lease_object_ids(1, 6);
+        let obj = leased[0];
+        gs.ingest_clone_payload(
+            1,
+            &build_clone_payload(|b| {
+                write_inbound_create(b, obj, 0x4444, NetObjEntityType::Automobile, &[0x01]);
+            }),
+        );
+        assert_eq!(gs.ids[obj as usize], IdState::Used);
+
+        // Ownership moves to client 2, then the leasing client disconnects.
+        let takeover = build_clone_payload(|b| {
+            b.write_bits_single(rec::TAKEOVER, 3);
+            b.write_bits_single(2, 16);
+            b.write_bits_single(u32::from(obj), 13);
+        });
+        gs.ingest_clone_payload(1, &takeover);
+        gs.remove_client(1);
+
+        // The entity is alive under client 2; its id must not be re-leasable.
+        assert!(gs.entity(obj).is_some());
+        assert_eq!(gs.ids[obj as usize], IdState::Used);
+        // Untouched leases from client 1 were released.
+        assert!(leased[1..]
+            .iter()
+            .all(|&id| gs.ids[id as usize] == IdState::Free));
+        let (fresh, _pkt) = gs.lease_object_ids(3, 6);
+        assert!(!fresh.contains(&obj), "live id must not be re-leased");
     }
 
     #[test]
