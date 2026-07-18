@@ -19,3 +19,4 @@
 /cache/
 # Machine-local runtime configs may contain CFX licence keys or admin tokens.
 *.local.toml
+baston-live-test.log
