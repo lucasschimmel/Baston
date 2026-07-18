@@ -75,12 +75,25 @@ impl ResourceRuntimeHandle {
         &self,
         make: impl FnOnce(oneshot::Sender<Result<QueuedEvents, ScriptError>>) -> RuntimeCommand,
     ) -> Result<QueuedEvents, ScriptError> {
+        self.begin(make)
+            .await?
+            .await
+            .map_err(|_| ScriptError::HostGone)?
+    }
+
+    /// Enqueue a command and return the reply receiver without awaiting it, so
+    /// broadcasts can start every resource's dispatch before collecting any
+    /// reply (one slow resource must not delay the others' start).
+    async fn begin(
+        &self,
+        make: impl FnOnce(oneshot::Sender<Result<QueuedEvents, ScriptError>>) -> RuntimeCommand,
+    ) -> Result<oneshot::Receiver<Result<QueuedEvents, ScriptError>>, ScriptError> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(make(reply))
             .await
             .map_err(|_| ScriptError::HostGone)?;
-        rx.await.map_err(|_| ScriptError::HostGone)?
+        Ok(rx)
     }
 }
 
@@ -188,11 +201,12 @@ impl ScriptHost {
         let mut queued = Vec::new();
         {
             let runtimes = self.runtimes.read().await;
+            let mut replies = Vec::with_capacity(runtimes.len());
             for (resource, handle) in runtimes.iter() {
                 let event = event.to_owned();
                 let args_json = args_json.clone();
                 match handle
-                    .send(|reply| RuntimeCommand::DispatchNetEvent {
+                    .begin(|reply| RuntimeCommand::DispatchNetEvent {
                         event,
                         source,
                         args_json,
@@ -200,6 +214,14 @@ impl ScriptHost {
                     })
                     .await
                 {
+                    Ok(rx) => replies.push((resource.clone(), rx)),
+                    Err(e) => {
+                        tracing::error!(target: "scripting", %resource, error = %e, "net event dispatch failed");
+                    }
+                }
+            }
+            for (resource, rx) in replies {
+                match rx.await.map_err(|_| ScriptError::HostGone).and_then(|r| r) {
                     Ok(mut q) => queued.append(&mut q),
                     Err(e) => {
                         tracing::error!(target: "scripting", %resource, error = %e, "net event dispatch failed");
@@ -326,16 +348,25 @@ impl ScriptHost {
         let mut queued = Vec::new();
         {
             let runtimes = self.runtimes.read().await;
+            let mut replies = Vec::with_capacity(runtimes.len());
             for (resource, handle) in runtimes.iter() {
                 let player_name = player_name.to_owned();
                 match handle
-                    .send(|reply| RuntimeCommand::DispatchPlayerConnecting {
+                    .begin(|reply| RuntimeCommand::DispatchPlayerConnecting {
                         source,
                         player_name,
                         reply,
                     })
                     .await
                 {
+                    Ok(rx) => replies.push((resource.clone(), rx)),
+                    Err(e) => {
+                        tracing::error!(target: "scripting", %resource, error = %e, "playerConnecting dispatch failed");
+                    }
+                }
+            }
+            for (resource, rx) in replies {
+                match rx.await.map_err(|_| ScriptError::HostGone).and_then(|r| r) {
                     Ok(mut q) => queued.append(&mut q),
                     Err(e) => {
                         tracing::error!(target: "scripting", %resource, error = %e, "playerConnecting dispatch failed");
@@ -358,9 +389,10 @@ impl ScriptHost {
         let mut queued = Vec::new();
         {
             let runtimes = self.runtimes.read().await;
+            let mut replies = Vec::with_capacity(runtimes.len());
             for (resource, handle) in runtimes.iter() {
                 match handle
-                    .send(|reply| RuntimeCommand::DispatchCommand {
+                    .begin(|reply| RuntimeCommand::DispatchCommand {
                         command: command.to_owned(),
                         source,
                         args: args.clone(),
@@ -369,6 +401,14 @@ impl ScriptHost {
                     })
                     .await
                 {
+                    Ok(rx) => replies.push((resource.clone(), rx)),
+                    Err(e) => {
+                        tracing::error!(target: "scripting", %resource, error = %e, "command dispatch failed");
+                    }
+                }
+            }
+            for (resource, rx) in replies {
+                match rx.await.map_err(|_| ScriptError::HostGone).and_then(|r| r) {
                     Ok(mut q) => queued.append(&mut q),
                     Err(e) => {
                         tracing::error!(target: "scripting", %resource, error = %e, "command dispatch failed");
@@ -417,17 +457,26 @@ impl ScriptHost {
                 break;
             }
             let runtimes = self.runtimes.read().await;
+            let mut replies = Vec::with_capacity(runtimes.len());
             for (resource, handle) in runtimes.iter() {
                 let event = event.clone();
                 let args_json = args_json.clone();
                 match handle
-                    .send(|reply| RuntimeCommand::DispatchEvent {
+                    .begin(|reply| RuntimeCommand::DispatchEvent {
                         event,
                         args_json,
                         reply,
                     })
                     .await
                 {
+                    Ok(rx) => replies.push((resource.clone(), rx)),
+                    Err(e) => {
+                        tracing::error!(target: "scripting", %resource, error = %e, "event dispatch failed");
+                    }
+                }
+            }
+            for (resource, rx) in replies {
+                match rx.await.map_err(|_| ScriptError::HostGone).and_then(|r| r) {
                     Ok(queued) => pending.extend(queued),
                     Err(e) => {
                         tracing::error!(target: "scripting", %resource, error = %e, "event dispatch failed");
@@ -453,7 +502,7 @@ struct RuntimeThreadParams<'a> {
 fn spawn_runtime_thread(
     params: RuntimeThreadParams<'_>,
 ) -> Result<ResourceRuntimeHandle, ScriptError> {
-    let (tx, mut rx) = mpsc::channel::<RuntimeCommand>(64);
+    let (tx, rx) = mpsc::channel::<RuntimeCommand>(64);
     let name = params.resource_name.to_owned();
     let RuntimeThreadParams {
         started_at,
@@ -495,73 +544,233 @@ fn spawn_runtime_thread(
             let _ = init_tx.send(Ok(()));
 
             let local = tokio::task::LocalSet::new();
-            local.block_on(&tokio_rt, async move {
-                while let Some(cmd) = rx.recv().await {
-                    match cmd {
-                        RuntimeCommand::ExecuteScripts { scripts, reply } => {
-                            let mut result = Ok(());
-                            for script in scripts {
-                                if let Err(e) = runtime
-                                    .execute_resource_script(&script.path, script.code)
-                                    .await
-                                {
-                                    result = Err(e);
-                                    break;
-                                }
-                            }
-                            let _ = reply.send(result.map(|()| runtime.drain_queued_events()));
-                        }
-                        RuntimeCommand::DispatchEvent {
-                            event,
-                            args_json,
-                            reply,
-                        } => {
-                            let result = runtime.dispatch_event(&event, &args_json).await;
-                            let _ = reply.send(result.map(|()| runtime.drain_queued_events()));
-                        }
-                        RuntimeCommand::DispatchPlayerConnecting {
-                            source,
-                            player_name,
-                            reply,
-                        } => {
-                            let result = runtime
-                                .dispatch_player_connecting(source, &player_name)
-                                .await;
-                            let _ = reply.send(result.map(|()| runtime.drain_queued_events()));
-                        }
-                        RuntimeCommand::DispatchNetEvent {
-                            event,
-                            source,
-                            args_json,
-                            reply,
-                        } => {
-                            let result =
-                                runtime.dispatch_net_event(&event, source, &args_json).await;
-                            let _ = reply.send(result.map(|()| runtime.drain_queued_events()));
-                        }
-                        RuntimeCommand::DispatchCommand {
-                            command,
-                            source,
-                            args,
-                            raw,
-                            reply,
-                        } => {
-                            let result = runtime
-                                .dispatch_command(&command, source, &args, &raw)
-                                .await;
-                            let _ = reply.send(result.map(|()| runtime.drain_queued_events()));
-                        }
-                        RuntimeCommand::CollectTransferState { source, reply } => {
-                            let result = runtime.collect_zone_transfer_state(source).await;
-                            let _ = reply.send(result);
-                        }
-                    }
-                }
-            });
+            local.block_on(&tokio_rt, run_isolate_loop(runtime, rx));
         })
         .map_err(|e| ScriptError::HostStart(e.to_string()))?;
 
     init_rx.recv().map_err(|_| ScriptError::HostGone)??;
 
     Ok(ResourceRuntimeHandle { tx })
+}
+
+/// Shared coordination state between the event-loop pump task, the command
+/// loop, and the per-dispatch settle tasks. Single-threaded (`Rc`) — all of it
+/// lives on the resource's isolate thread.
+struct PumpShared {
+    /// Signaled whenever a dispatch starts, so an idle pump resumes polling.
+    wake: tokio::sync::Notify,
+    /// Signaled after every event-loop poll pass: settle tasks re-check their
+    /// completion promise.
+    progress: tokio::sync::Notify,
+    /// Bumped each time the event loop drains to idle.
+    idle_gen: std::cell::Cell<u64>,
+}
+
+type SharedRuntime = std::rc::Rc<std::cell::RefCell<ScriptRuntime>>;
+
+/// The isolate thread's command loop (audit ROB-2). One pump task drives the
+/// V8 event loop; each dispatch runs its synchronous execute phase inline (so
+/// per-resource handler start-order is preserved) and then settles its reply
+/// from a `spawn_local` task. A handler stalled on a client-native await no
+/// longer blocks the next command. Invariant: the `RefCell` borrow is never
+/// held across an await.
+async fn run_isolate_loop(runtime: ScriptRuntime, mut rx: mpsc::Receiver<RuntimeCommand>) {
+    let rt: SharedRuntime = std::rc::Rc::new(std::cell::RefCell::new(runtime));
+    let shared = std::rc::Rc::new(PumpShared {
+        wake: tokio::sync::Notify::new(),
+        progress: tokio::sync::Notify::new(),
+        idle_gen: std::cell::Cell::new(0),
+    });
+    let pump = tokio::task::spawn_local(drive_event_loop(
+        std::rc::Rc::clone(&rt),
+        std::rc::Rc::clone(&shared),
+    ));
+
+    while let Some(cmd) = rx.recv().await {
+        match cmd {
+            RuntimeCommand::ExecuteScripts { scripts, reply } => {
+                // Load path stays serialized: each script runs to event-loop
+                // idle before the next, matching the old run-to-completion
+                // semantics resources rely on during startup.
+                let mut result = Ok(());
+                for script in scripts {
+                    let ticket = rt.borrow_mut().start_script_load(&script.path, script.code);
+                    let since_idle = shared.idle_gen.get();
+                    shared.wake.notify_one();
+                    if let Err(e) = settle_ticket(&rt, &shared, ticket, since_idle).await {
+                        result = Err(e);
+                        break;
+                    }
+                    wait_event_loop_idle(&shared, since_idle).await;
+                }
+                let _ = reply.send(result.map(|()| rt.borrow_mut().drain_queued_events()));
+            }
+            RuntimeCommand::DispatchEvent {
+                event,
+                args_json,
+                reply,
+            } => {
+                let ticket = rt.borrow_mut().start_event_dispatch(&event, &args_json);
+                spawn_settle(&rt, &shared, ticket, reply);
+            }
+            RuntimeCommand::DispatchPlayerConnecting {
+                source,
+                player_name,
+                reply,
+            } => {
+                let ticket = rt
+                    .borrow_mut()
+                    .start_player_connecting_dispatch(source, &player_name);
+                spawn_settle(&rt, &shared, ticket, reply);
+            }
+            RuntimeCommand::DispatchNetEvent {
+                event,
+                source,
+                args_json,
+                reply,
+            } => {
+                let ticket = rt
+                    .borrow_mut()
+                    .start_net_event_dispatch(&event, source, &args_json);
+                spawn_settle(&rt, &shared, ticket, reply);
+            }
+            RuntimeCommand::DispatchCommand {
+                command,
+                source,
+                args,
+                raw,
+                reply,
+            } => {
+                let ticket = rt
+                    .borrow_mut()
+                    .start_command_dispatch(&command, source, &args, &raw);
+                match ticket {
+                    Some(ticket) => spawn_settle(&rt, &shared, ticket, reply),
+                    None => {
+                        let _ = reply.send(Ok(Vec::new()));
+                    }
+                }
+            }
+            RuntimeCommand::CollectTransferState { source, reply } => {
+                // The transfer-state collector is fully synchronous JS.
+                let result = rt.borrow_mut().collect_zone_transfer_state_sync(source);
+                shared.wake.notify_one();
+                let _ = reply.send(result);
+            }
+        }
+    }
+    pump.abort();
+}
+
+/// The single event-loop poller. Waits for `wake` while the loop is idle,
+/// re-polls whenever new dispatches start, and signals `progress` after each
+/// pass so settle tasks re-check their promises.
+async fn drive_event_loop(rt: SharedRuntime, shared: std::rc::Rc<PumpShared>) {
+    loop {
+        let drive = std::future::poll_fn(|cx| {
+            let poll = rt.borrow_mut().poll_event_loop_pass(cx);
+            shared.progress.notify_waiters();
+            poll
+        });
+        tokio::select! {
+            biased;
+            _ = shared.wake.notified() => {}
+            res = drive => {
+                if let Err(e) = res {
+                    tracing::error!(target: "scripting", error = %e, "script event loop error");
+                }
+                shared.idle_gen.set(shared.idle_gen.get() + 1);
+                shared.progress.notify_waiters();
+                shared.wake.notified().await;
+            }
+        }
+    }
+}
+
+fn spawn_settle(
+    rt: &SharedRuntime,
+    shared: &std::rc::Rc<PumpShared>,
+    ticket: crate::runtime::DispatchTicket,
+    reply: oneshot::Sender<Result<QueuedEvents, ScriptError>>,
+) {
+    // Sampled synchronously after the execute phase and before any yield: an
+    // idle_gen bump past this value proves a full event-loop drain that
+    // included this dispatch's ops.
+    let since_idle = shared.idle_gen.get();
+    shared.wake.notify_one();
+    let rt = std::rc::Rc::clone(rt);
+    let shared = std::rc::Rc::clone(shared);
+    tokio::task::spawn_local(async move {
+        let result = settle_ticket(&rt, &shared, ticket, since_idle).await;
+        let _ = reply.send(result.map(|()| rt.borrow_mut().drain_queued_events()));
+    });
+}
+
+/// Wait until the event loop has drained to idle at least once since
+/// `since_idle` was sampled.
+async fn wait_event_loop_idle(shared: &std::rc::Rc<PumpShared>, since_idle: u64) {
+    loop {
+        let notified = shared.progress.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if shared.idle_gen.get() > since_idle {
+            return;
+        }
+        notified.await;
+    }
+}
+
+/// Wait for a dispatch's completion promise to settle. A promise still pending
+/// once the event loop drains to idle is dangling (nothing left can resolve
+/// it) and is treated as complete — the pre-ROB-2 host replied at event-loop
+/// idle too, so this preserves the old contract for such handlers.
+async fn settle_ticket(
+    rt: &SharedRuntime,
+    shared: &std::rc::Rc<PumpShared>,
+    ticket: crate::runtime::DispatchTicket,
+    since_idle: u64,
+) -> Result<(), ScriptError> {
+    use crate::runtime::PromiseOutcome;
+    let crate::runtime::DispatchTicket { started, meta } = ticket;
+    match started {
+        Err(e) => {
+            rt.borrow_mut().finish_dispatch(&meta, Some(&e.to_string()));
+            Err(e)
+        }
+        Ok(None) => {
+            rt.borrow_mut().finish_dispatch(&meta, None);
+            Ok(())
+        }
+        Ok(Some(promise)) => loop {
+            let notified = shared.progress.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let outcome = rt.borrow_mut().promise_outcome(&promise);
+            match outcome {
+                PromiseOutcome::Pending => {
+                    if shared.idle_gen.get() > since_idle {
+                        rt.borrow_mut().finish_dispatch(&meta, None);
+                        return Ok(());
+                    }
+                    notified.await;
+                }
+                PromiseOutcome::Fulfilled => {
+                    rt.borrow_mut().finish_dispatch(&meta, None);
+                    return Ok(());
+                }
+                PromiseOutcome::Rejected(message) => {
+                    let resource = {
+                        let mut r = rt.borrow_mut();
+                        r.finish_dispatch(&meta, Some(&message));
+                        r.resource_name().to_owned()
+                    };
+                    return Err(ScriptError::Execute {
+                        resource,
+                        script: "<dispatch>".to_owned(),
+                        message,
+                    });
+                }
+            }
+        },
+    }
 }

@@ -161,6 +161,34 @@ impl Drop for Watchdog {
     }
 }
 
+/// Completion state of a dispatch's JS promise.
+#[derive(Debug)]
+pub enum PromiseOutcome {
+    Pending,
+    Fulfilled,
+    Rejected(String),
+}
+
+/// Measurement context carried from `start_*` to `finish_dispatch`.
+#[derive(Debug)]
+pub struct DispatchMeta {
+    kind: DispatchKind,
+    event_name: String,
+    source: Option<u32>,
+    execute_us: u64,
+    total_started: Instant,
+    watchdog_fired: bool,
+}
+
+/// A started dispatch: the synchronous execute phase already ran; `started`
+/// carries its result and, when async handlers are still running, the JS
+/// completion promise to poll.
+#[derive(Debug)]
+pub struct DispatchTicket {
+    pub started: Result<Option<v8::Global<v8::Value>>, ScriptError>,
+    pub meta: DispatchMeta,
+}
+
 /// A single resource's V8 isolate with the BASTON extensions and bootstrap
 /// polyfills loaded. `!Send` — lives on the script-host thread only.
 pub struct ScriptRuntime {
@@ -354,6 +382,286 @@ impl ScriptRuntime {
         );
         self.run_dispatch(command, code, DispatchKind::Command, Some(source))
             .await
+    }
+
+    // --- concurrent dispatch API (host driver) -----------------------------
+    //
+    // The host no longer awaits each dispatch to completion (audit ROB-2):
+    // `start_*` synchronously executes the dispatch script — which returns a
+    // Promise when async handlers are still running — and the host resolves
+    // the ticket from a `spawn_local` task while a single pump task drives
+    // the isolate's event loop. All methods here are synchronous so the
+    // `RefCell<ScriptRuntime>` borrow is never held across an await.
+
+    /// Start an event dispatch; complete it via [`ScriptRuntime::promise_outcome`]
+    /// + [`ScriptRuntime::finish_dispatch`].
+    pub fn start_event_dispatch(&mut self, event: &str, args_json: &str) -> DispatchTicket {
+        let code = format!(
+            "globalThis.__baston.dispatch({}, {});",
+            serde_json::to_string(event).unwrap_or_else(|_| "\"\"".into()),
+            serde_json::to_string(args_json).unwrap_or_else(|_| "\"[]\"".into()),
+        );
+        self.start_dispatch_raw(code, event, DispatchKind::Event, None)
+    }
+
+    /// Start a net-event dispatch with `globalThis.source` bound.
+    pub fn start_net_event_dispatch(
+        &mut self,
+        event: &str,
+        source: u32,
+        args_json: &str,
+    ) -> DispatchTicket {
+        let code = format!(
+            "globalThis.__baston.dispatchWithSource({}, {}, {});",
+            serde_json::to_string(event).unwrap_or_else(|_| "\"\"".into()),
+            source,
+            serde_json::to_string(args_json).unwrap_or_else(|_| "\"[]\"".into()),
+        );
+        self.start_dispatch_raw(code, event, DispatchKind::NetEvent, Some(source))
+    }
+
+    /// Start a `playerConnecting` dispatch.
+    pub fn start_player_connecting_dispatch(
+        &mut self,
+        source: u32,
+        player_name: &str,
+    ) -> DispatchTicket {
+        let code = format!(
+            "globalThis.__baston.dispatchPlayerConnecting({}, {});",
+            source,
+            serde_json::to_string(player_name).unwrap_or_else(|_| "\"\"".into()),
+        );
+        self.start_dispatch_raw(
+            code,
+            "playerConnecting",
+            DispatchKind::PlayerConnecting,
+            Some(source),
+        )
+    }
+
+    /// Start a command dispatch. `None` when this runtime never registered the
+    /// command (nothing to run).
+    pub fn start_command_dispatch(
+        &mut self,
+        command: &str,
+        source: u32,
+        args: &[String],
+        raw: &str,
+    ) -> Option<DispatchTicket> {
+        if !self.has_command(command) {
+            return None;
+        }
+        let args_json = serde_json::to_string(args).unwrap_or_else(|_| "[]".into());
+        let code = format!(
+            "globalThis.__baston.dispatchCommand({}, {}, {}, {});",
+            serde_json::to_string(command).unwrap_or_else(|_| "\"\"".into()),
+            source,
+            serde_json::to_string(&args_json).unwrap_or_else(|_| "\"[]\"".into()),
+            serde_json::to_string(raw).unwrap_or_else(|_| "\"\"".into()),
+        );
+        Some(self.start_dispatch_raw(code, command, DispatchKind::Command, Some(source)))
+    }
+
+    /// Start a resource script load (plain script semantics). The host waits
+    /// for event-loop idle afterwards to preserve load ordering.
+    pub fn start_script_load(&mut self, script_path: &str, code: String) -> DispatchTicket {
+        let name = intern_script_name(format!("baston:{}/{}", self.resource_name, script_path));
+        self.start_named(
+            name,
+            code,
+            script_path.to_owned(),
+            DispatchKind::LoadScript,
+            script_path.to_owned(),
+            None,
+        )
+    }
+
+    fn start_dispatch_raw(
+        &mut self,
+        code: String,
+        event: &str,
+        kind: DispatchKind,
+        source: Option<u32>,
+    ) -> DispatchTicket {
+        self.start_named(
+            "baston:dispatch",
+            code,
+            format!("dispatch:{event}"),
+            kind,
+            event.to_owned(),
+            source,
+        )
+    }
+
+    fn start_named(
+        &mut self,
+        name: &'static str,
+        code: String,
+        ctx: String,
+        kind: DispatchKind,
+        event_name: String,
+        source: Option<u32>,
+    ) -> DispatchTicket {
+        let total_started = Instant::now();
+        let guard = self.watchdog.arm();
+        let exec = self.js.execute_script(name, code);
+        drop(guard);
+        let execute_us = total_started.elapsed().as_micros() as u64;
+        let watchdog_fired = self.watchdog.took_fired();
+        if watchdog_fired {
+            tracing::warn!(
+                target: "scripting",
+                resource = %self.resource_name,
+                ctx = %ctx,
+                "watchdog force-terminated a runaway dispatch after {:?}; runtime kept alive",
+                self.watchdog.budget,
+            );
+            self.js.v8_isolate().cancel_terminate_execution();
+        }
+        let started = match exec {
+            Ok(global) => {
+                let is_promise = {
+                    deno_core::scope!(scope, self.js);
+                    let local = v8::Local::new(scope, &global);
+                    local.is_promise()
+                };
+                if is_promise {
+                    Ok(Some(global))
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(e) => Err(ScriptError::Execute {
+                resource: self.resource_name.clone(),
+                script: ctx.clone(),
+                message: e.to_string(),
+            }),
+        };
+        DispatchTicket {
+            started,
+            meta: DispatchMeta {
+                kind,
+                event_name,
+                source,
+                execute_us,
+                total_started,
+                watchdog_fired,
+            },
+        }
+    }
+
+    /// One pass of the isolate's event loop, watchdog-protected. Exactly one
+    /// task (the host pump) may call this.
+    pub fn poll_event_loop_pass(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), ScriptError>> {
+        let guard = self.watchdog.arm();
+        let poll = self.js.poll_event_loop(cx, PollEventLoopOptions::default());
+        drop(guard);
+        if self.watchdog.took_fired() {
+            tracing::warn!(
+                target: "scripting",
+                resource = %self.resource_name,
+                "watchdog force-terminated a runaway event-loop pass after {:?}; runtime kept alive",
+                self.watchdog.budget,
+            );
+            self.js.v8_isolate().cancel_terminate_execution();
+        }
+        poll.map(|r| {
+            r.map_err(|e| ScriptError::Execute {
+                resource: self.resource_name.clone(),
+                script: "<event loop>".to_owned(),
+                message: e.to_string(),
+            })
+        })
+    }
+
+    /// Current state of a dispatch's completion promise.
+    pub fn promise_outcome(&mut self, promise: &v8::Global<v8::Value>) -> PromiseOutcome {
+        deno_core::scope!(scope, self.js);
+        let local = v8::Local::new(scope, promise);
+        let Ok(promise) = v8::Local::<v8::Promise>::try_from(local) else {
+            return PromiseOutcome::Fulfilled;
+        };
+        match promise.state() {
+            v8::PromiseState::Pending => PromiseOutcome::Pending,
+            v8::PromiseState::Fulfilled => PromiseOutcome::Fulfilled,
+            v8::PromiseState::Rejected => {
+                let msg = promise.result(scope).to_rust_string_lossy(scope);
+                PromiseOutcome::Rejected(msg)
+            }
+        }
+    }
+
+    /// Record the dispatch measurement once its ticket settled. `error` is the
+    /// dispatch-level failure (execute throw or rejected completion promise).
+    pub fn finish_dispatch(&mut self, meta: &DispatchMeta, error: Option<&str>) {
+        let handler_errors = {
+            let op_state = self.js.op_state();
+            let mut op_state = op_state.borrow_mut();
+            let ctx = op_state.borrow_mut::<RuntimeContext>();
+            let errors = ctx.handler_errors;
+            ctx.handler_errors = 0;
+            errors
+        };
+        let total_us = meta.total_started.elapsed().as_micros() as u64;
+        let memory = Some(self.v8_memory_stats());
+        self.observability.record_dispatch(DispatchMeasurement {
+            resource: self.resource_name.clone(),
+            kind: meta.kind,
+            name: meta.event_name.clone(),
+            execute_us: meta.execute_us,
+            event_loop_us: total_us.saturating_sub(meta.execute_us),
+            total_us,
+            errored: error.is_some() || meta.watchdog_fired || handler_errors > 0,
+            watchdog_fired: meta.watchdog_fired,
+            memory,
+            source: meta.source,
+            zone: None,
+        });
+    }
+
+    /// Synchronous variant of [`ScriptRuntime::collect_zone_transfer_state`]
+    /// for the concurrent host driver: the JS collector is fully synchronous,
+    /// so the state is readable right after the execute phase.
+    pub fn collect_zone_transfer_state_sync(
+        &mut self,
+        source: u32,
+    ) -> Result<Option<String>, ScriptError> {
+        {
+            let op_state = self.js.op_state();
+            let has = op_state
+                .borrow()
+                .borrow::<RuntimeContext>()
+                .has_zone_transfer_state;
+            if !has {
+                return Ok(None);
+            }
+            op_state
+                .borrow_mut()
+                .borrow_mut::<RuntimeContext>()
+                .collected_transfer_state = None;
+        }
+        let code = format!("globalThis.__baston.collectZoneTransferState({source});");
+        let ticket = self.start_dispatch_raw(
+            code,
+            "collectZoneTransferState",
+            DispatchKind::ZoneTransferState,
+            Some(source),
+        );
+        let result = match &ticket.started {
+            Ok(_) => None,
+            Err(e) => Some(e.to_string()),
+        };
+        self.finish_dispatch(&ticket.meta, result.as_deref());
+        ticket.started?;
+        let op_state = self.js.op_state();
+        let mut op_state = op_state.borrow_mut();
+        Ok(op_state
+            .borrow_mut::<RuntimeContext>()
+            .collected_transfer_state
+            .take())
     }
 
     async fn run_dispatch(

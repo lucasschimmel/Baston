@@ -446,3 +446,72 @@ async fn generated_server_native_shims_are_callable() {
     .await
     .expect("load");
 }
+
+/// Audit ROB-2 regression: a handler stalled on an unanswered client-native
+/// await (1 s timeout) must not block the resource's other events. Before the
+/// concurrent-dispatch host loop, the second event's side effect would only be
+/// observable after the full native timeout.
+#[tokio::test]
+async fn stalled_client_native_does_not_block_other_events() {
+    let deferrals = Arc::new(DeferralRegistry::new());
+    let players = Arc::new(baston_protocol::PlayerDirectory::new());
+    let (net, mut net_rx) = baston_scripting::NetBridge::new();
+    let host = ScriptHost::spawn_with_net(Arc::clone(&deferrals), Arc::clone(&players), net)
+        .expect("host spawn");
+
+    host.load_resource(
+        "stall-test",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                AddEventHandler('slow', async () => {
+                  // TASK_PLAY_ANIM-style native; nobody ever answers.
+                  await InvokeNativeOnClient(1, "0x43A66C31C68491C0", [-1], true);
+                });
+                AddEventHandler('fast', () => {
+                  TriggerClientEvent('pong', 1);
+                });
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load");
+
+    // Fire the stalling event; its reply only settles at the 1 s native
+    // timeout, so run it in the background.
+    let slow_host = host.clone();
+    let slow = tokio::spawn(async move { slow_host.trigger_event("slow", &[]).await });
+
+    // Drain the outbound native-invoke event so only 'pong' remains, then
+    // fire the second event and expect its side effect well under the 1 s
+    // native timeout.
+    let first = tokio::time::timeout(Duration::from_secs(5), net_rx.recv())
+        .await
+        .expect("native invoke sent")
+        .expect("net bridge open");
+    match first {
+        baston_scripting::NetOutbound::ClientEvent { event, .. } => {
+            assert_eq!(event, "__baston:invokeNative");
+        }
+        other => panic!("unexpected outbound: {other:?}"),
+    }
+
+    let started = std::time::Instant::now();
+    host.trigger_event("fast", &[]).await.expect("fast event");
+    let pong = tokio::time::timeout(Duration::from_millis(500), net_rx.recv())
+        .await
+        .expect("'fast' must not wait for the stalled native")
+        .expect("net bridge open");
+    match pong {
+        baston_scripting::NetOutbound::ClientEvent { event, .. } => assert_eq!(event, "pong"),
+        other => panic!("unexpected outbound: {other:?}"),
+    }
+    assert!(
+        started.elapsed() < Duration::from_millis(900),
+        "second event stalled behind the native await: {:?}",
+        started.elapsed()
+    );
+
+    let _ = slow.await.expect("slow join");
+}

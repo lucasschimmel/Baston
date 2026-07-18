@@ -137,25 +137,42 @@
 
   // --- internal dispatch API (called from Rust via execute_script) ---
 
+  // Track async handler completion so Rust can wait for THIS dispatch only
+  // (not the whole event loop). A rejected handler promise is reported the
+  // same way as a sync throw, so the returned promise never rejects for
+  // handler errors — Rust treats a rejection as a dispatch-level failure.
+  function settleHandlerResult(name, result, pending) {
+    if (result && typeof result.then === "function") {
+      pending.push(
+        result.then(undefined, (e) => {
+          ops.op_report_handler_error();
+          console.error(`[baston] error in '${name}' handler: ${stringify(e)}`);
+        })
+      );
+    }
+  }
+
   function dispatch(name, argsJson) {
     const handlers = eventHandlers.get(name);
     if (!handlers || handlers.size === 0) return;
     const args = JSON.parse(argsJson);
+    const pending = [];
     for (const fn of [...handlers.values()]) {
       try {
-        fn(...args);
+        settleHandlerResult(name, fn(...args), pending);
       } catch (e) {
         ops.op_report_handler_error();
         console.error(`[baston] error in '${name}' handler: ${stringify(e)}`);
       }
     }
+    if (pending.length) return Promise.all(pending);
   }
 
   function dispatchWithSource(name, source, argsJson) {
     const prev = globalThis.source;
     globalThis.source = source;
     try {
-      dispatch(name, argsJson);
+      return dispatch(name, argsJson);
     } finally {
       globalThis.source = prev;
     }
@@ -177,9 +194,24 @@
           typeof card === "string" ? card : JSON.stringify(card)
         ),
     };
+    const pending = [];
     for (const fn of [...handlers.values()]) {
       try {
-        fn(playerName, setKickReason, deferrals);
+        const result = fn(playerName, setKickReason, deferrals);
+        if (result && typeof result.then === "function") {
+          pending.push(
+            result.then(undefined, (e) => {
+              ops.op_report_handler_error();
+              console.error(
+                `[baston] error in playerConnecting handler: ${stringify(e)}`
+              );
+              ops.op_deferral_done(
+                source,
+                "server error in playerConnecting handler"
+              );
+            })
+          );
+        }
       } catch (e) {
         ops.op_report_handler_error();
         console.error(
@@ -188,6 +220,7 @@
         ops.op_deferral_done(source, "server error in playerConnecting handler");
       }
     }
+    if (pending.length) return Promise.all(pending);
   }
 
   function dispatchCommand(name, source, argsJson, raw) {
@@ -196,14 +229,16 @@
     const args = JSON.parse(argsJson);
     const prev = globalThis.source;
     globalThis.source = source;
+    const pending = [];
     try {
-      entry.cb(source, args, raw);
+      settleHandlerResult(`command:${name}`, entry.cb(source, args, raw), pending);
     } catch (e) {
       ops.op_report_handler_error();
       console.error(`[baston] error in command '${name}': ${stringify(e)}`);
     } finally {
       globalThis.source = prev;
     }
+    if (pending.length) return Promise.all(pending);
   }
 
   // --- Zone transfer state (Phase D handoffs) ---
