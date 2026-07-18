@@ -1,0 +1,145 @@
+//! Server → client native dispatch (`op_invoke_native_on_client`).
+
+use std::time::Instant;
+
+use deno_core::{op2, OpState};
+
+use super::{RuntimeContext, SharedNet, SharedObservability};
+
+/// How long a server → client native call may wait for its result.
+///
+/// This is also the upper bound on how long one such call can stall the
+/// resource's runtime: the host command loop runs one dispatch to completion at
+/// a time, so while a handler awaits a native result no other event for that
+/// resource is serviced (see `op_invoke_native_on_client`). Keep it low enough
+/// to bound a slow/hostile client's impact, but above realistic client RTT so
+/// legitimate results aren't dropped. Removing the stall entirely needs the
+/// host loop to drive dispatches concurrently on the shared isolate (tracked
+/// separately — it's a redesign of the execution model, not a local change).
+const NATIVE_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// Dispatch a GTA native to `source`'s client via the BASTON shim and await
+/// the result. Returns a JSON string; errors are `{"__error": "..."}` so the
+/// polyfill can throw without deno_core error plumbing.
+#[op2]
+#[string]
+pub(super) async fn op_invoke_native_on_client(
+    state: std::rc::Rc<std::cell::RefCell<OpState>>,
+    source: u32,
+    #[string] hash_hex: String,
+    #[string] args_json: String,
+    expects_return: bool,
+) -> String {
+    use baston_protocol::native::{NativeCall, INVOKE_NATIVE_EVENT};
+
+    fn err(message: impl std::fmt::Display) -> String {
+        serde_json::json!({ "__error": message.to_string() }).to_string()
+    }
+
+    let hash = match u64::from_str_radix(hash_hex.trim_start_matches("0x"), 16) {
+        Ok(h) => h,
+        Err(e) => return err(format!("invalid native hash {hash_hex}: {e}")),
+    };
+    let args: Vec<serde_json::Value> = match serde_json::from_str(&args_json) {
+        Ok(a) => a,
+        Err(e) => return err(format!("invalid native args: {e}")),
+    };
+
+    static REGISTRY: std::sync::OnceLock<baston_protocol::native::NativeRegistry> =
+        std::sync::OnceLock::new();
+    if let Err(e) = REGISTRY
+        .get_or_init(baston_protocol::native::NativeRegistry::new)
+        .validate(hash, args.len())
+    {
+        return err(e);
+    }
+
+    let (net, observability, resource) = {
+        let state_ref = state.borrow();
+        (
+            state_ref.borrow::<SharedNet>().0.clone(),
+            state_ref.borrow::<SharedObservability>().0.clone(),
+            state_ref.borrow::<RuntimeContext>().resource_name.clone(),
+        )
+    };
+    let started = Instant::now();
+    let (id, rx) = net.pending_natives.register();
+    let call = NativeCall {
+        id,
+        hash: format!("0x{hash:016X}"),
+        args,
+    };
+    let payload = serde_json::json!([call]);
+    if net
+        .tx
+        .try_send(crate::net_bridge::NetOutbound::ClientEvent {
+            source,
+            event: INVOKE_NATIVE_EVENT.to_owned(),
+            args_json: payload.to_string(),
+        })
+        .is_err()
+    {
+        net.pending_natives.cancel(id);
+        observability.record_native_roundtrip(
+            &resource,
+            hash,
+            source,
+            started.elapsed().as_micros() as u64,
+            false,
+            true,
+        );
+        return err("net bridge full or closed");
+    }
+
+    if !expects_return {
+        // Fire-and-forget: the shim still replies, but nobody waits.
+        net.pending_natives.cancel(id);
+        observability.record_native_roundtrip(
+            &resource,
+            hash,
+            source,
+            started.elapsed().as_micros() as u64,
+            false,
+            false,
+        );
+        return "null".to_owned();
+    }
+
+    match tokio::time::timeout(NATIVE_CALL_TIMEOUT, rx).await {
+        Ok(Ok(value)) => {
+            observability.record_native_roundtrip(
+                &resource,
+                hash,
+                source,
+                started.elapsed().as_micros() as u64,
+                false,
+                false,
+            );
+            value.to_string()
+        }
+        Ok(Err(_)) => {
+            net.pending_natives.cancel(id);
+            observability.record_native_roundtrip(
+                &resource,
+                hash,
+                source,
+                started.elapsed().as_micros() as u64,
+                false,
+                true,
+            );
+            err("native result channel closed")
+        }
+        Err(_) => {
+            net.pending_natives.cancel(id);
+            observability.record_native_roundtrip(
+                &resource,
+                hash,
+                source,
+                started.elapsed().as_micros() as u64,
+                true,
+                true,
+            );
+            err(format!("native call 0x{hash:016X} timed out"))
+        }
+    }
+}
