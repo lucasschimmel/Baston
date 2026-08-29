@@ -618,6 +618,7 @@ fn owned_entity(network_id: u32, owner: u32) -> baston_scripting::EntitySummary 
         armour: None,
         model: None,
         heading: None,
+        desired_heading: None,
         sync: Default::default(),
     }
 }
@@ -811,7 +812,8 @@ fn synced_vehicle(network_id: u32, owner: u32) -> baston_scripting::EntitySummar
         armour: None,
         model: None,
         heading: Some(90.0),
-        sync: baston_scripting::EntitySyncState {
+        desired_heading: None,
+        sync: baston_protocol::rage::sync_parse::EntityNodeState {
             vehicle_game_state: Some(VehicleGameState {
                 radio_station: 21,
                 engine_on: true,
@@ -837,10 +839,7 @@ fn synced_vehicle(network_id: u32, owner: u32) -> baston_scripting::EntitySummar
                 ..VehicleHealth::default()
             }),
             vehicle_appearance: Some(appearance),
-            vehicle_damage: None,
-            ped_game_state: None,
-            last_vehicle: None,
-            last_vehicle_seat: None,
+            ..Default::default()
         },
     }
 }
@@ -975,6 +974,115 @@ async fn a_seat_keeps_its_last_occupant_after_the_ped_leaves() {
 
     assert_eq!(world.occupant(4243, -1), None, "the seat is empty now");
     assert_eq!(world.last_occupant(4243, -1), Some(77));
+}
+
+/// The death and movement family, which anti-cheat and RP death handlers
+/// depend on and which had no server-side answer at all before the ped nodes
+/// were decoded.
+#[tokio::test]
+async fn ped_state_natives_read_the_decoded_nodes() {
+    use baston_protocol::rage::sync_parse::{PedMovement, PedTasks};
+
+    let (host, _) = host();
+    let mut killer = owned_entity(88, 6);
+    killer.health = Some(200.0);
+
+    let mut victim = owned_entity(77, 5);
+    victim.health = Some(0.0);
+    victim.desired_heading = Some(120.0);
+    victim.sync.cause_of_death = Some(0xA284_C825);
+    victim.sync.source_of_damage = Some(88);
+    victim.sync.relationship_group = Some(0x1234_5678);
+    victim.sync.is_visible = Some(true);
+    victim.sync.attached_to = Some(0);
+    victim.sync.ped_movement = Some(PedMovement {
+        is_stealthy: false,
+        is_strafing: true,
+        is_ragdolling: true,
+    });
+    victim.sync.ped_tasks = Some(PedTasks {
+        script_command: 0xDEAD_BEEF,
+        script_task_stage: 1,
+        task_types: [151, 531, 47, 531, 531, 531, 531, 531],
+    });
+
+    host.entity_world().publish([victim, killer]);
+    host.load_resource(
+        "ped-state-test",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                const eq = (label, got, want) => {
+                  if (got !== want) {
+                    throw new Error(`${label}: got ${got}, wanted ${want}`)
+                  }
+                }
+                eq('causeOfDeath', GetPedCauseOfDeath(77), 0xA284C825)
+                eq('sourceOfDamage', GetPedSourceOfDamage(77), 88)
+                eq('sourceOfDeath', GetPedSourceOfDeath(77), 88)
+                eq('ragdoll', IsPedRagdoll(77), true)
+                eq('strafing', IsPedStrafing(77), true)
+                eq('relationship', GetPedRelationshipGroupHash(77), 0x12345678)
+                eq('desiredHeading', GetPedDesiredHeading(77), 120)
+                eq('taskCommand', GetPedScriptTaskCommand(77), 0xDEADBEEF)
+                eq('taskStage', GetPedScriptTaskStage(77), 1)
+                eq('task0', GetPedSpecificTaskType(77, 0), 151)
+                eq('task2', GetPedSpecificTaskType(77, 2), 47)
+                eq('taskOutOfRange', GetPedSpecificTaskType(77, 99), 151)
+                eq('visible', IsEntityVisible(77), true)
+                eq('attachedTo', GetEntityAttachedTo(77), 0)
+
+                // A living ped has no source of death, only a source of damage.
+                eq('killerDeath', GetPedSourceOfDeath(88), 0)
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load");
+}
+
+/// `GET_ENTITY_SCRIPT` resolves the joaat hash on the wire back to the
+/// resource name a script can actually use.
+#[tokio::test]
+async fn entity_script_resolves_the_owning_resource_name() {
+    let (host, _) = host();
+    let mut entity = owned_entity(77, 5);
+    entity.sync.script_hash = Some(baston_protocol::udp::hash_rage_string("script-owner"));
+    host.entity_world().publish([entity]);
+
+    // The reverse lookup scans loaded resources, so the registry has to know
+    // about this one — the ResourceManager does that in production.
+    host.resources().upsert_resource(
+        "script-owner".into(),
+        std::env::temp_dir(),
+        baston_protocol::ResourceManifest {
+            name: "script-owner".into(),
+            version: None,
+            dependencies: Vec::new(),
+            server_scripts: Vec::new(),
+            client_scripts: Vec::new(),
+            files: Vec::new(),
+        },
+        ScriptResourceState::Started,
+    );
+
+    host.load_resource(
+        "script-owner",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                if (GetEntityScript(77) !== 'script-owner') {
+                  throw new Error(`got ${GetEntityScript(77)}`)
+                }
+                // A hash nothing loaded produced resolves to nothing.
+                if (GetEntityScript(9999) !== '') throw new Error('unknown entity')
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load");
 }
 
 // --- HTTP natives ---

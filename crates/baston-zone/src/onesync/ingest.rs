@@ -169,14 +169,9 @@ impl ServerGameState {
             armour: previous.and_then(|e| e.armour),
             model: previous.and_then(|e| e.model),
             vehicle_seat: previous.and_then(|e| e.vehicle_seat),
-            vehicle_game_state: previous.and_then(|e| e.vehicle_game_state),
-            vehicle_health: previous.and_then(|e| e.vehicle_health),
-            vehicle_appearance: previous.and_then(|e| e.vehicle_appearance),
-            vehicle_damage: previous.and_then(|e| e.vehicle_damage),
-            ped_game_state: previous.and_then(|e| e.ped_game_state),
-            last_vehicle: previous.and_then(|e| e.last_vehicle),
-            last_vehicle_seat: previous.and_then(|e| e.last_vehicle_seat),
+            nodes: previous.map(|e| e.nodes).unwrap_or_default(),
             heading: previous.and_then(|e| e.heading),
+            desired_heading: previous.and_then(|e| e.desired_heading),
             // A client create never adopts an existing server entity: the
             // owner/uniqifier check above already rejected that case.
             server_owned: false,

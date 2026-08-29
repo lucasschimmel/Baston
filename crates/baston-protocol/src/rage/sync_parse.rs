@@ -164,6 +164,144 @@ pub struct SyncNodeData {
     pub vehicle_damage: Option<VehicleDamage>,
     /// Weapon and vehicle occupancy, from `CPedGameStateDataNode`.
     pub ped_game_state: Option<PedGameState>,
+    /// Object id of whatever last damaged this ped, from
+    /// `CPedHealthDataNode`. `0` means nothing did.
+    pub source_of_damage: Option<u16>,
+    /// Weapon hash that killed the ped, from `CPedHealthDataNode`.
+    pub cause_of_death: Option<u32>,
+    /// Heading a ped is turning towards, from `CPedOrientationDataNode`.
+    pub desired_heading: Option<f32>,
+    /// Stealth, strafing and ragdoll, from `CPedMovementGroupDataNode`.
+    pub ped_movement: Option<PedMovement>,
+    /// Relationship group hash, from `CPedAIDataNode`.
+    pub relationship_group: Option<u32>,
+    /// Script task and running task types, from `CPedTaskTreeDataNode`.
+    pub ped_tasks: Option<PedTasks>,
+    /// How the entity came to exist (`ePopType`), from its creation node or
+    /// `CPedScriptGameStateDataNode`.
+    pub population_type: Option<u8>,
+    /// Rendering visibility, from `CPhysicalGameStateDataNode`.
+    pub is_visible: Option<bool>,
+    /// Hash of the script that owns the entity, from
+    /// `CEntityScriptInfoDataNode`.
+    pub script_hash: Option<u32>,
+    /// Object id this entity is attached to, from whichever attach node its
+    /// type uses. `None` means the node said "not attached".
+    pub attached_to: Option<u16>,
+}
+
+/// The merged, last-known value of every node this module decodes beyond
+/// position, velocity, health and model.
+///
+/// A sync record carries only what changed, so consumers keep one of these per
+/// entity and fold each record in with [`Self::merge`]. Holding the whole set
+/// in one value is what keeps the authoritative entity, the script-visible
+/// mirror, and the mapping between them from each growing a field per node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EntityNodeState {
+    pub vehicle_game_state: Option<VehicleGameState>,
+    pub vehicle_health: Option<VehicleHealth>,
+    pub vehicle_appearance: Option<VehicleAppearance>,
+    pub vehicle_damage: Option<VehicleDamage>,
+    pub ped_game_state: Option<PedGameState>,
+    pub ped_movement: Option<PedMovement>,
+    pub ped_tasks: Option<PedTasks>,
+    pub relationship_group: Option<u32>,
+    /// Object id of the last thing to damage this ped; `0` = nothing did.
+    pub source_of_damage: Option<u16>,
+    pub cause_of_death: Option<u32>,
+    pub population_type: Option<u8>,
+    pub is_visible: Option<bool>,
+    pub script_hash: Option<u32>,
+    /// Object id this entity is attached to; `0` = not attached.
+    pub attached_to: Option<u16>,
+    /// Last vehicle this ped occupied. Derived by [`Self::merge`], not by any
+    /// single record: the engine keeps it in the node's own persistent state.
+    pub last_vehicle: Option<u16>,
+    /// Raw seat index that went with [`Self::last_vehicle`].
+    pub last_vehicle_seat: Option<i32>,
+}
+
+impl EntityNodeState {
+    /// Fold one decoded record in, keeping whatever it did not carry.
+    pub fn merge(&mut self, decoded: &SyncNodeData) {
+        // A ped that had a vehicle and now reports none has just left it. The
+        // decoder is stateless and cannot see that transition, so it is
+        // derived here — and it matters exactly when a script asks who just
+        // got out.
+        if let Some(state) = decoded.ped_game_state {
+            if state.cur_vehicle < 0 {
+                if let Some((vehicle, seat)) = self
+                    .ped_game_state
+                    .filter(|previous| previous.cur_vehicle >= 0)
+                    .and_then(|previous| {
+                        u16::try_from(previous.cur_vehicle)
+                            .ok()
+                            .map(|vehicle| (vehicle, previous.cur_vehicle_seat))
+                    })
+                {
+                    self.last_vehicle = Some(vehicle);
+                    self.last_vehicle_seat = Some(seat);
+                }
+            }
+        }
+
+        merge_field(&mut self.vehicle_game_state, decoded.vehicle_game_state);
+        merge_field(&mut self.vehicle_health, decoded.vehicle_health);
+        merge_field(&mut self.vehicle_appearance, decoded.vehicle_appearance);
+        merge_field(&mut self.vehicle_damage, decoded.vehicle_damage);
+        merge_field(&mut self.ped_game_state, decoded.ped_game_state);
+        merge_field(&mut self.ped_movement, decoded.ped_movement);
+        merge_field(&mut self.ped_tasks, decoded.ped_tasks);
+        merge_field(&mut self.relationship_group, decoded.relationship_group);
+        merge_field(&mut self.source_of_damage, decoded.source_of_damage);
+        merge_field(&mut self.cause_of_death, decoded.cause_of_death);
+        merge_field(&mut self.population_type, decoded.population_type);
+        merge_field(&mut self.is_visible, decoded.is_visible);
+        merge_field(&mut self.script_hash, decoded.script_hash);
+        merge_field(&mut self.attached_to, decoded.attached_to);
+    }
+}
+
+fn merge_field<T: Copy>(slot: &mut Option<T>, incoming: Option<T>) {
+    if let Some(value) = incoming {
+        *slot = Some(value);
+    }
+}
+
+/// `CPedMovementGroupDataNode` — the movement flags anti-cheat resources read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PedMovement {
+    pub is_stealthy: bool,
+    pub is_strafing: bool,
+    pub is_ragdolling: bool,
+}
+
+/// `CPedTaskTreeDataNode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PedTasks {
+    /// Hash of the script task the ped was given.
+    pub script_command: u32,
+    /// 0..7; `3` is the engine's "no script task" value.
+    pub script_task_stage: u32,
+    /// Type of the task at each of the eight tree slots. An inactive slot
+    /// carries the engine's idle marker rather than a real task.
+    pub task_types: [u16; 8],
+}
+
+/// The engine's "no script task" command hash.
+const NO_SCRIPT_TASK: u32 = 0x811E_343C;
+/// Task type reported for an empty tree slot; widened by one from build 2060.
+const IDLE_TASK_TYPE: u16 = 530;
+
+impl Default for PedTasks {
+    fn default() -> Self {
+        Self {
+            script_command: NO_SCRIPT_TASK,
+            script_task_stage: 3,
+            task_types: [IDLE_TASK_TYPE; 8],
+        }
+    }
 }
 
 /// `CVehicleGameStateDataNode`: everything a script reads about a vehicle's
@@ -544,6 +682,14 @@ fn decodes(name: &str) -> bool {
             | "CVehicleAppearanceDataNode"
             | "CVehicleDamageStatusDataNode"
             | "CPedGameStateDataNode"
+            | "CPedMovementGroupDataNode"
+            | "CPedAIDataNode"
+            | "CPedTaskTreeDataNode"
+            | "CPedScriptGameStateDataNode"
+            | "CPhysicalGameStateDataNode"
+            | "CEntityScriptInfoDataNode"
+            | "CPhysicalAttachDataNode"
+            | "CPedAttachDataNode"
     )
 }
 
@@ -594,47 +740,24 @@ fn decode_leaf(name: &str, buf: &mut MessageBuffer, build: GameBuild, out: &mut 
         // ped's real health instead of trusting whatever the client reports
         // out-of-band — the difference between an anti-cheat and a rumour.
         "CPedHealthDataNode" => {
-            let health_bits = if build.is_winter_update_25() { 14 } else { 13 };
-            let is_fine = buf.read_bit() != 0;
-            let max_health_changed = buf.read_bit() != 0;
-            let max_health = if max_health_changed {
-                buf.read_bits_single(health_bits)
-            } else {
-                // Unchanged: the engine keeps its previous value, defaulting
-                // to 200. The caller merges, so reporting nothing is right.
-                None
-            };
-            let health = if is_fine {
-                // "Fine" means at full health, whatever the maximum is.
-                max_health
-            } else {
-                let value = buf.read_bits_single(health_bits);
-                buf.read_bit(); // killed with headshot
-                buf.read_bit(); // killed with melee
-                value
-            };
-            let no_armour = buf.read_bit() != 0;
-            let armour = if no_armour {
-                Some(0)
-            } else {
-                buf.read_bits_single(13)
-            };
-            out.health = health.map(|v| v as f32);
-            out.max_health = max_health.map(|v| v as f32);
-            out.armour = armour.map(|v| v as f32);
+            // Partial results are kept on purpose: the health fields come
+            // first, so a body truncated before the damage source still tells
+            // the server what the ped's health is.
+            let _ = decode_ped_health(buf, build, out);
         }
-        // Model only. The remaining fields sit behind a population-type
-        // predicate that is ambiguous in the engine source, and we need none
-        // of them.
+        // Model and population type. The fields after them sit behind a
+        // population-type predicate (`popType - 6 <= 1`) and we need none of
+        // them, so the decoder stops here.
         "CVehicleCreationDataNode" => {
             out.model = buf.read_bits_single(32);
+            out.population_type = buf.read_bits_single(4).map(|v| v as u8);
         }
         // Model, plus the vehicle the ped spawned inside — the only place the
         // server learns ped-to-vehicle occupancy at creation time.
         "CPedCreationDataNode" => {
             buf.read_bit(); // is respawn object id
             buf.read_bit(); // respawn flagged for removal
-            buf.read_bits_single(4); // population type
+            out.population_type = buf.read_bits_single(4).map(|v| v as u8);
             out.model = buf.read_bits_single(32);
             buf.read_bits_single(16); // random seed
             let in_vehicle = buf.read_bit() != 0;
@@ -671,6 +794,9 @@ fn decode_leaf(name: &str, buf: &mut MessageBuffer, build: GameBuild, out: &mut 
             out.heading = buf
                 .read_signed_float(8, quaternion::TAU_RADIANS)
                 .map(|radians| normalise_degrees(radians.to_degrees()));
+            out.desired_heading = buf
+                .read_signed_float(8, quaternion::TAU_RADIANS)
+                .map(|radians| normalise_degrees(radians.to_degrees()));
         }
         "CPhysicalVelocityDataNode" => {
             if let (Some(x), Some(y), Some(z)) = (
@@ -697,8 +823,152 @@ fn decode_leaf(name: &str, buf: &mut MessageBuffer, build: GameBuild, out: &mut 
         "CPedGameStateDataNode" => {
             out.ped_game_state = decode_ped_game_state(buf, build);
         }
+        "CPedMovementGroupDataNode" => {
+            out.ped_movement = decode_ped_movement(buf);
+        }
+        // Relationship group, then the decision maker we do not read.
+        "CPedAIDataNode" => {
+            out.relationship_group = buf.read_bits_single(32);
+        }
+        "CPedTaskTreeDataNode" => {
+            out.ped_tasks = decode_ped_tasks(buf, build);
+        }
+        // The node carries more, but the engine's own parser stops here too.
+        "CPedScriptGameStateDataNode" => {
+            out.population_type = buf.read_bits_single(4).map(|v| v as u8);
+        }
+        "CPhysicalGameStateDataNode" => {
+            out.is_visible = Some(buf.read_bit() != 0);
+        }
+        "CEntityScriptInfoDataNode" => {
+            if buf.read_bit() != 0 {
+                out.script_hash = buf.read_bits_single(32);
+            }
+        }
+        // Both attach nodes open with the same `CBaseAttachNodeData` prefix.
+        // "Not attached" is reported as `Some(0)`, not `None`: a merge has to
+        // tell a detach apart from a record that carried no attach node, or an
+        // entity would stay attached to whatever it last held.
+        "CPhysicalAttachDataNode" | "CPedAttachDataNode" => {
+            out.attached_to = if buf.read_bit() != 0 {
+                buf.read_bits_single(13).map(|v| v as u16)
+            } else {
+                Some(0)
+            };
+        }
         _ => {}
     }
+}
+
+/// `CPedHealthDataNode::Parse`.
+///
+/// Health, armour, and — past the 2060 gate — who did the damage and with
+/// what. The tail is what makes a death handler possible server-side.
+fn decode_ped_health(
+    buf: &mut MessageBuffer,
+    build: GameBuild,
+    out: &mut SyncNodeData,
+) -> Option<()> {
+    let health_bits = if build.is_winter_update_25() { 14 } else { 13 };
+    let is_fine = buf.read_bit() != 0;
+    let max_health_changed = buf.read_bit() != 0;
+    let max_health = if max_health_changed {
+        buf.read_bits_single(health_bits)
+    } else {
+        // Unchanged: the engine keeps its previous value, defaulting to 200.
+        // The caller merges, so reporting nothing is right.
+        None
+    };
+    let health = if is_fine {
+        // "Fine" means at full health, whatever the maximum is.
+        max_health
+    } else {
+        let value = buf.read_bits_single(health_bits);
+        buf.read_bit(); // killed with headshot
+        buf.read_bit(); // killed with melee
+        value
+    };
+    let no_armour = buf.read_bit() != 0;
+    let armour = if no_armour {
+        Some(0)
+    } else {
+        buf.read_bits_single(13)
+    };
+    out.health = health.map(|v| v as f32);
+    out.max_health = max_health.map(|v| v as f32);
+    out.armour = armour.map(|v| v as f32);
+
+    if build.is_2060() {
+        let has_first = buf.read_bit() != 0;
+        let has_second = buf.read_bit() != 0;
+        if has_second {
+            buf.read_bits_single(13)?;
+        }
+        // Inverted on purpose: the engine reads this one when the flag is
+        // *clear*.
+        if !has_first {
+            buf.read_bits_single(13)?;
+        }
+    }
+
+    // Same reasoning as the attach nodes: "nothing damaged it" is 0, so that a
+    // ped healing up clears the stale attacker instead of keeping it forever.
+    out.source_of_damage = if buf.read_bit() != 0 {
+        Some(buf.read_bits_single(13)? as u16)
+    } else {
+        Some(0)
+    };
+    out.cause_of_death = Some(buf.read_bits_single(32)?);
+    Some(())
+}
+
+/// `CPedMovementGroupDataNode::Parse`.
+fn decode_ped_movement(buf: &mut MessageBuffer) -> Option<PedMovement> {
+    buf.read_bits_single(32)?; // motion group
+    if buf.read_bit() != 0 {
+        // Default action mode: the engine reports every flag as clear.
+        return Some(PedMovement::default());
+    }
+    buf.read_bits_single(3)?; // move blend type
+    buf.read_bits_single(5)?; // move blend state
+    buf.read_bits_single(32)?; // overridden weapon group
+    buf.read_bit(); // crouching
+    Some(PedMovement {
+        is_stealthy: buf.read_bit() != 0,
+        is_strafing: buf.read_bit() != 0,
+        is_ragdolling: buf.read_bit() != 0,
+    })
+}
+
+/// `CPedTaskTreeDataNode::Parse`.
+fn decode_ped_tasks(buf: &mut MessageBuffer, build: GameBuild) -> Option<PedTasks> {
+    let idle = if build.is_2060() {
+        IDLE_TASK_TYPE + 1
+    } else {
+        IDLE_TASK_TYPE
+    };
+    let mut out = PedTasks {
+        task_types: [idle; 8],
+        ..PedTasks::default()
+    };
+
+    if buf.read_bit() != 0 {
+        out.script_command = buf.read_bits_single(32)?;
+        out.script_task_stage = buf.read_bits_single(3)?;
+    }
+
+    let occupied = buf.read_bits_single(8)?;
+    for (slot, task) in out.task_types.iter_mut().enumerate() {
+        if occupied & (1 << slot) == 0 {
+            continue;
+        }
+        *task = buf.read_bits_single(10)? as u16;
+        buf.read_bit(); // active
+        buf.read_bits_single(3)?; // priority
+        buf.read_bits_single(3)?; // tree depth
+        buf.read_bits_single(5)?; // sequence id
+    }
+    Some(out)
 }
 
 /// `CVehicleGameStateDataNode::Parse`.
@@ -2053,6 +2323,179 @@ mod tests {
         let ped = decode_ped_game_state(&mut w.finish(), GameBuild(3258)).expect("decoded");
         assert_eq!(ped.cur_vehicle, -1);
         assert_eq!(ped.cur_vehicle_seat, -1);
+    }
+
+    /// The tail of the ped health node is what makes a server-side death
+    /// handler possible: who did it, and with what.
+    #[test]
+    fn ped_health_reports_its_damage_source_and_cause() {
+        let mut w = NodeWriter::new();
+        w.bit(false) // not fine
+            .bit(true) // max health changed
+            .bits(200, 13) // max health
+            .bits(0, 13) // health: dead
+            .bit(true) // headshot
+            .bit(false) // melee
+            .bit(true); // no armour
+                        // Build 3258 opens the 2060 gate: two flags, both clear, so the second
+                        // 13-bit field is read and the first is not.
+        w.bit(true).bit(false);
+        w.bit(true).bits(4243, 13); // damage source
+        w.bits(0xA284_C825, 32); // cause of death (WEAPON_PISTOL)
+
+        let mut out = SyncNodeData::default();
+        decode_ped_health(&mut w.finish(), GameBuild(3258), &mut out).expect("decoded");
+        assert_eq!(out.health, Some(0.0));
+        assert_eq!(out.max_health, Some(200.0));
+        assert_eq!(out.armour, Some(0.0));
+        assert_eq!(out.source_of_damage, Some(4243));
+        assert_eq!(out.cause_of_death, Some(0xA284_C825));
+    }
+
+    /// Health comes first, so a body cut before the damage source must still
+    /// yield the health the server needs for authority decisions.
+    #[test]
+    fn a_truncated_ped_health_node_keeps_the_health_it_read() {
+        let mut w = NodeWriter::new();
+        w.bit(true) // fine
+            .bit(true)
+            .bits(150, 13) // max health
+            .bit(false)
+            .bits(50, 13); // armour
+
+        let mut out = SyncNodeData::default();
+        assert!(decode_ped_health(&mut w.finish(), GameBuild(3258), &mut out).is_none());
+        assert_eq!(out.health, Some(150.0), "fine means full health");
+        assert_eq!(out.armour, Some(50.0));
+        assert_eq!(out.cause_of_death, None, "the tail was never there");
+    }
+
+    #[test]
+    fn ped_movement_flags_are_decoded() {
+        let mut w = NodeWriter::new();
+        w.bits(0x1234_5678, 32) // motion group
+            .bit(false) // not the default action mode
+            .bits(0, 3)
+            .bits(0, 5)
+            .bits(0, 32)
+            .bit(false) // crouching
+            .bit(true) // stealthy
+            .bit(false) // strafing
+            .bit(true); // ragdolling
+
+        let movement = decode_ped_movement(&mut w.finish()).expect("decoded");
+        assert!(movement.is_stealthy && movement.is_ragdolling);
+        assert!(!movement.is_strafing);
+    }
+
+    /// The default action mode carries no flags at all, and the engine reports
+    /// them all clear rather than leaving the previous values standing.
+    #[test]
+    fn default_action_mode_clears_the_movement_flags() {
+        let mut w = NodeWriter::new();
+        w.bits(0, 32).bit(true);
+        assert_eq!(
+            decode_ped_movement(&mut w.finish()).expect("decoded"),
+            PedMovement::default()
+        );
+    }
+
+    #[test]
+    fn ped_tasks_decode_the_script_command_and_occupied_slots() {
+        let mut w = NodeWriter::new();
+        w.bit(true) // has a script task
+            .bits(0xDEAD_BEEF, 32)
+            .bits(1, 3); // stage
+        w.bits(0b0000_0101, 8); // slots 0 and 2 occupied
+        for task_type in [151u32, 47] {
+            w.bits(task_type, 10)
+                .bit(true) // active
+                .bits(0, 3) // priority
+                .bits(0, 3) // tree depth
+                .bits(0, 5); // sequence id
+        }
+
+        let tasks = decode_ped_tasks(&mut w.finish(), GameBuild(3258)).expect("decoded");
+        assert_eq!(tasks.script_command, 0xDEAD_BEEF);
+        assert_eq!(tasks.script_task_stage, 1);
+        assert_eq!(tasks.task_types[0], 151);
+        assert_eq!(tasks.task_types[2], 47);
+        assert_eq!(
+            tasks.task_types[1],
+            IDLE_TASK_TYPE + 1,
+            "an empty slot carries the build's idle marker"
+        );
+    }
+
+    #[test]
+    fn a_ped_without_a_script_task_reports_the_engine_defaults() {
+        let mut w = NodeWriter::new();
+        w.bit(false).bits(0, 8);
+        let tasks = decode_ped_tasks(&mut w.finish(), GameBuild(2060)).expect("decoded");
+        assert_eq!(tasks.script_command, NO_SCRIPT_TASK);
+        assert_eq!(tasks.script_task_stage, 3);
+        assert_eq!(tasks.task_types, [IDLE_TASK_TYPE + 1; 8]);
+
+        let mut older = NodeWriter::new();
+        older.bit(false).bits(0, 8);
+        let tasks = decode_ped_tasks(&mut older.finish(), GameBuild(2059)).expect("decoded");
+        assert_eq!(
+            tasks.task_types, [IDLE_TASK_TYPE; 8],
+            "the idle marker widened at 2060"
+        );
+    }
+
+    /// Attachment, script ownership and visibility all reach `SyncNodeData`
+    /// through the shared leaf dispatch, so they are exercised through it.
+    #[test]
+    fn entity_level_nodes_reach_the_decoded_state() {
+        let mut attach = NodeWriter::new();
+        attach.bit(true).bits(4243, 13);
+        let mut out = SyncNodeData::default();
+        decode_leaf(
+            "CPhysicalAttachDataNode",
+            &mut attach.finish(),
+            GameBuild::default(),
+            &mut out,
+        );
+        assert_eq!(out.attached_to, Some(4243));
+
+        let mut detached = NodeWriter::new();
+        detached.bit(false);
+        let mut out = SyncNodeData::default();
+        decode_leaf(
+            "CPedAttachDataNode",
+            &mut detached.finish(),
+            GameBuild::default(),
+            &mut out,
+        );
+        assert_eq!(
+            out.attached_to,
+            Some(0),
+            "a detach must be reported, not left absent, or a merge keeps the old parent"
+        );
+
+        let mut script = NodeWriter::new();
+        script.bit(true).bits(0xCAFE_F00D, 32);
+        let mut out = SyncNodeData::default();
+        decode_leaf(
+            "CEntityScriptInfoDataNode",
+            &mut script.finish(),
+            GameBuild::default(),
+            &mut out,
+        );
+        assert_eq!(out.script_hash, Some(0xCAFE_F00D));
+
+        let mut physical = NodeWriter::new();
+        physical.bit(true);
+        let mut out = SyncNodeData::default();
+        decode_leaf(
+            "CPhysicalGameStateDataNode",
+            &mut physical.finish(),
+            GameBuild::default(),
+            &mut out,
+        );
+        assert_eq!(out.is_visible, Some(true));
     }
 
     /// Truncation must cost the node, not the walk: a body that stops halfway

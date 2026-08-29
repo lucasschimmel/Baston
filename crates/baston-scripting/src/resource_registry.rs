@@ -88,7 +88,9 @@ impl ResourceRegistry {
             .len()
     }
 
-    pub fn name_at(&self, index: usize) -> String {
+    /// Every loaded resource name, ascending, so repeated reads give scripts a
+    /// stable order.
+    pub fn names(&self) -> Vec<String> {
         let mut names: Vec<_> = self
             .inner
             .read()
@@ -98,7 +100,11 @@ impl ResourceRegistry {
             .cloned()
             .collect();
         names.sort();
-        names.get(index).cloned().unwrap_or_default()
+        names
+    }
+
+    pub fn name_at(&self, index: usize) -> String {
+        self.names().get(index).cloned().unwrap_or_default()
     }
 
     pub fn state(&self, name: &str) -> &'static str {

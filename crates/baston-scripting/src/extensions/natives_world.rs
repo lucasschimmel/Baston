@@ -22,10 +22,10 @@
 use deno_core::OpState;
 
 use super::natives_server::{json_arg_bool, json_arg_i64, json_arg_netid};
-use super::SharedEntityWorld;
+use super::{SharedEntityWorld, SharedResources};
 use crate::entity_world::EntitySummary;
 use baston_protocol::rage::sync_parse::{
-    PedGameState, VehicleAppearance, VehicleDamage, VehicleGameState, VehicleHealth,
+    PedGameState, PedTasks, VehicleAppearance, VehicleDamage, VehicleGameState, VehicleHealth,
 };
 
 /// Try to answer a native from the world mirror.
@@ -295,6 +295,59 @@ pub(super) fn try_dispatch(
                 |summary| world.player_ped(summary.owner) == Some(handle)
             )))
         }
+        "IS_PED_RAGDOLL" => Some(serde_json::json!(entity(state, args)
+            .and_then(|e| e.sync.ped_movement)
+            .is_some_and(|m| m.is_ragdolling))),
+        "IS_PED_STRAFING" => Some(serde_json::json!(entity(state, args)
+            .and_then(|e| e.sync.ped_movement)
+            .is_some_and(|m| m.is_strafing))),
+        "GET_PED_RELATIONSHIP_GROUP_HASH" => Some(serde_json::json!(entity(state, args)
+            .and_then(|e| e.sync.relationship_group)
+            .unwrap_or(0))),
+        "GET_PED_CAUSE_OF_DEATH" => Some(serde_json::json!(entity(state, args)
+            .and_then(|e| e.sync.cause_of_death)
+            .unwrap_or(0))),
+        "GET_PED_SOURCE_OF_DAMAGE" => Some(serde_json::json!(damage_source(state, args, false))),
+        // Same source, but only once the ped is actually dead — otherwise a
+        // script would read "who killed me" off someone still standing.
+        "GET_PED_SOURCE_OF_DEATH" => Some(serde_json::json!(damage_source(state, args, true))),
+        "GET_PED_DESIRED_HEADING" => Some(serde_json::json!(entity(state, args)
+            .and_then(|e| e.desired_heading)
+            .unwrap_or(0.0))),
+        "GET_PED_SCRIPT_TASK_COMMAND" => {
+            Some(serde_json::json!(ped_tasks(state, args).script_command))
+        }
+        "GET_PED_SCRIPT_TASK_STAGE" => {
+            Some(serde_json::json!(ped_tasks(state, args).script_task_stage))
+        }
+        "GET_PED_SPECIFIC_TASK_TYPE" => {
+            let slot = json_arg_i64(args, 1);
+            let tasks = ped_tasks(state, args);
+            // An out-of-range slot reports the same idle marker an empty slot
+            // would, which is what the engine does.
+            Some(serde_json::json!(usize::try_from(slot)
+                .ok()
+                .and_then(|slot| tasks.task_types.get(slot).copied())
+                .unwrap_or(idle_task_type(state, args))))
+        }
+
+        // --- entity metadata ---
+        "GET_ENTITY_POPULATION_TYPE" => Some(serde_json::json!(entity(state, args)
+            .and_then(|e| e.sync.population_type)
+            .unwrap_or(0))),
+        "IS_ENTITY_VISIBLE" => Some(serde_json::json!(entity(state, args)
+            .and_then(|e| e.sync.is_visible)
+            .unwrap_or(false))),
+        "GET_ENTITY_ATTACHED_TO" => Some(serde_json::json!(entity(state, args)
+            .and_then(|e| e.sync.attached_to)
+            .map_or(0, u32::from))),
+        // The wire carries the hash of the owning script's name; scripts want
+        // the name back, so it is resolved against the loaded resources.
+        "GET_ENTITY_SCRIPT" => Some(serde_json::json!(entity(state, args)
+            .and_then(|e| e.sync.script_hash)
+            .and_then(|hash| resource_named_by_hash(state, hash))
+            .unwrap_or_default())),
+
         "GET_PED_ARMOUR" => Some(serde_json::json!(entity(state, args)
             .and_then(|e| e.armour)
             .unwrap_or(0.0))),
@@ -347,6 +400,61 @@ fn damage(state: &OpState, args: &[serde_json::Value]) -> Option<VehicleDamage> 
 
 fn ped_state(state: &OpState, args: &[serde_json::Value]) -> Option<PedGameState> {
     entity(state, args)?.sync.ped_game_state
+}
+
+/// A ped's task tree, or the engine's "nothing running" defaults.
+fn ped_tasks(state: &OpState, args: &[serde_json::Value]) -> PedTasks {
+    entity(state, args)
+        .and_then(|e| e.sync.ped_tasks)
+        .unwrap_or_default()
+}
+
+/// The idle task marker for whatever build this ped reported under. Read off
+/// its own tree rather than assumed, so a ped from a differently-gated build
+/// still reports a consistent marker.
+fn idle_task_type(state: &OpState, args: &[serde_json::Value]) -> u16 {
+    ped_tasks(state, args).task_types[0]
+}
+
+/// `GET_PED_SOURCE_OF_DAMAGE` / `_OF_DEATH`.
+///
+/// `0` when nothing damaged the ped, when the source is no longer a live
+/// entity, or — for the death form — when the ped is not dead.
+fn damage_source(state: &OpState, args: &[serde_json::Value], require_dead: bool) -> u32 {
+    let Some(summary) = entity(state, args) else {
+        return 0;
+    };
+    if require_dead && summary.health.is_none_or(|health| health > 0.0) {
+        return 0;
+    }
+    let Some(source) = summary.sync.source_of_damage.filter(|id| *id != 0) else {
+        return 0;
+    };
+    let source = u32::from(source);
+    // The attacker may have despawned since; reporting a handle that no longer
+    // resolves is worse than reporting none.
+    if world(state).exists(source) {
+        source
+    } else {
+        0
+    }
+}
+
+/// Resolve a script hash back to the resource name that produced it.
+///
+/// The engine hashes the resource name (truncated to 63 characters) with
+/// joaat, so the reverse lookup is a scan over what is loaded.
+fn resource_named_by_hash(state: &OpState, hash: u32) -> Option<String> {
+    const MAX_HASHED_NAME: usize = 63;
+    state
+        .borrow::<SharedResources>()
+        .0
+        .names()
+        .into_iter()
+        .find(|name| {
+            let truncated = &name[..name.len().min(MAX_HASHED_NAME)];
+            baston_protocol::udp::hash_rage_string(truncated) == hash
+        })
 }
 
 /// Wire seats are biased by two so that "entering" and "none" fit an unsigned

@@ -22,8 +22,7 @@ mod state_bag;
 
 pub use deferrals::{DeferralOutcome, DeferralRegistry};
 pub use entity_world::{
-    EntitySummary, EntitySyncState, EntityWorldView, NoWorldControl, ScriptEntityType,
-    WorldCommand, WorldControl,
+    EntitySummary, EntityWorldView, NoWorldControl, ScriptEntityType, WorldCommand, WorldControl,
 };
 pub use error::ScriptError;
 pub use extensions::{SharedVoice, VoiceControl};

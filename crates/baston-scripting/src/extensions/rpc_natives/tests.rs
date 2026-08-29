@@ -117,6 +117,7 @@ fn world_with(network_id: u32, owner: u32) -> EntityWorldView {
         armour: None,
         model: None,
         heading: None,
+        desired_heading: None,
         sync: Default::default(),
     }]);
     world

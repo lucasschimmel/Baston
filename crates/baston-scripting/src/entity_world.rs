@@ -22,9 +22,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use baston_protocol::rage::sync_parse::{
-    PedGameState, VehicleAppearance, VehicleDamage, VehicleGameState, VehicleHealth,
-};
+use baston_protocol::rage::sync_parse::EntityNodeState;
 use dashmap::DashMap;
 
 /// Entity classes as reported by `GET_ENTITY_TYPE`.
@@ -69,27 +67,15 @@ pub struct EntitySummary {
     pub model: Option<u32>,
     /// Heading in degrees, from the entity's orientation node.
     pub heading: Option<f32>,
-    /// The richer per-type state the sync tree carries.
-    pub sync: EntitySyncState,
-}
-
-/// Sync-tree state beyond position, health and model — everything the vehicle
-/// and ped natives read.
-///
-/// Grouped rather than flattened into [`EntitySummary`] so the summary stays
-/// about identity and placement, and so a new node adds one field here instead
-/// of widening every construction site.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct EntitySyncState {
-    pub vehicle_game_state: Option<VehicleGameState>,
-    pub vehicle_health: Option<VehicleHealth>,
-    pub vehicle_appearance: Option<VehicleAppearance>,
-    pub vehicle_damage: Option<VehicleDamage>,
-    pub ped_game_state: Option<PedGameState>,
-    /// Object id of the last vehicle a ped occupied.
-    pub last_vehicle: Option<u16>,
-    /// Raw seat index that went with [`Self::last_vehicle`].
-    pub last_vehicle_seat: Option<i32>,
+    /// Heading a ped is turning towards.
+    pub desired_heading: Option<f32>,
+    /// Everything else the sync tree carries — vehicle state and appearance,
+    /// ped occupancy, tasks, attachment, visibility.
+    ///
+    /// Shared verbatim with the authoritative entity rather than restated
+    /// field by field, so a new node decoder reaches scripts without three
+    /// structs having to learn about it.
+    pub sync: EntityNodeState,
 }
 
 /// Seat indices on the wire are offset by two from the ones scripts use, so
@@ -314,7 +300,8 @@ mod tests {
             armour: None,
             model: None,
             heading: None,
-            sync: EntitySyncState::default(),
+            desired_heading: None,
+            sync: EntityNodeState::default(),
         }
     }
 
