@@ -183,7 +183,40 @@ Expected: the gateway refuses to open its game listeners if the official
 FXServer broker cannot validate the licence. Zone processes do not create
 additional licence identities. See `docs/licensing.md` for public-list mode.
 
-## 7. Useful endpoints
+## 7. displayinfo overlay
+
+In the config you launch with:
+
+```toml
+[debug]
+display_info = "everyone"
+refresh_hz = 5
+```
+
+Connect, then in the game console:
+
+```
+/displayinfo 3
+```
+
+Expected: a right-aligned readout appears. Level 3 needs section 3's two-zone
+mesh to show anything under `Mesh:`; on a single-process server it says so
+explicitly instead of drawing an empty block.
+
+What to check against the rest of the runbook:
+
+- walk toward a zone edge — `edge` counts down, and `HANDOFF ARMED` appears
+  inside `[meshing].boundary_margin`, before the handoff logged by section 3;
+- with OneSync on (section 5), `scope` should track the entities around you and
+  `lag` should stay near zero;
+- `ping` here is the server's measurement, so it will not always match the
+  client's own — a persistent gap is the interesting case, not a bug in the
+  overlay.
+
+If nothing appears, the server logs the refusal reason and the overlay prints
+it on screen for eight seconds.
+
+## 8. Useful endpoints
 
 ```powershell
 $Token = "<admin-token-from-your-local-toml>"
