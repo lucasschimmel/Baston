@@ -12,6 +12,37 @@
 //! sidecar. The core stays free of any FXServer/CFX dependency: it consumes a
 //! plain [`LicenseStatus`] and applies pure decision logic.
 
+use std::fmt;
+
+/// Authenticated CFX server token.
+///
+/// The inner value is intentionally excluded from [`Debug`] output so routine
+/// error context and structured traces cannot disclose it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct LicenseKeyToken(String);
+
+impl LicenseKeyToken {
+    /// Build a token from a non-empty value, trimming accidental surrounding
+    /// whitespace introduced by the local IPC boundary.
+    #[must_use]
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into().trim().to_owned();
+        (!value.is_empty()).then_some(Self(value))
+    }
+
+    /// Expose the token only at an explicit protocol boundary.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for LicenseKeyToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("LicenseKeyToken([REDACTED])")
+    }
+}
+
 /// Entitlements granted by the licence, as far as they are **locally
 /// determinable** from the official component.
 ///
@@ -45,6 +76,8 @@ pub struct LicenseStatus {
     /// this cannot always be distinguished from "invalid"; treat `!valid` as a
     /// hard stop regardless. Kept distinct for future richer signals.
     pub banned: bool,
+    /// Token issued by CFX after successful validation.
+    pub token: Option<LicenseKeyToken>,
     /// Entitlements, to the extent locally determinable.
     pub entitlements: Entitlements,
     /// Human-readable explanation for a non-valid verdict (never a secret).
@@ -52,11 +85,12 @@ pub struct LicenseStatus {
 }
 
 impl LicenseStatus {
-    /// A valid status with no extra entitlement signal.
-    pub fn valid() -> Self {
+    /// An authenticated status with no extra entitlement signal.
+    pub fn authenticated(token: LicenseKeyToken) -> Self {
         Self {
             valid: true,
             banned: false,
+            token: Some(token),
             entitlements: Entitlements::default(),
             reason: None,
         }
@@ -67,9 +101,17 @@ impl LicenseStatus {
         Self {
             valid: false,
             banned: false,
+            token: None,
             entitlements: Entitlements::default(),
             reason: Some(reason.into()),
         }
+    }
+
+    /// Whether this verdict contains every signal required to represent an
+    /// authenticated, usable CFX server identity.
+    #[must_use]
+    pub fn is_authenticated(&self) -> bool {
+        self.valid && !self.banned && self.token.is_some()
     }
 }
 
@@ -102,6 +144,11 @@ pub fn boot_decision(status: &LicenseStatus) -> BootDecision {
                 .unwrap_or_else(|| "licence not valid (reported by the CFX component)".to_owned()),
         );
     }
+    if status.token.is_none() {
+        return BootDecision::Deny(
+            "licence accepted without an authenticated CFX token".to_owned(),
+        );
+    }
     BootDecision::Allow
 }
 
@@ -126,6 +173,16 @@ pub fn feature_permitted(requested: bool, feature: &str, entitlements: &Entitlem
 mod tests {
     use super::*;
 
+    #[test]
+    fn licence_key_token_is_non_empty_and_redacted() {
+        assert!(LicenseKeyToken::new("   ").is_none());
+
+        let token = LicenseKeyToken::new("cfx-token-secret").expect("non-empty token");
+        assert_eq!(token.as_str(), "cfx-token-secret");
+        assert_eq!(format!("{token:?}"), "LicenseKeyToken([REDACTED])");
+        assert!(!format!("{token:?}").contains(token.as_str()));
+    }
+
     fn ent(max: Option<u32>, features: &[&str]) -> Entitlements {
         Entitlements {
             max_slots: max,
@@ -135,7 +192,24 @@ mod tests {
 
     #[test]
     fn valid_licence_allows_boot() {
-        assert_eq!(boot_decision(&LicenseStatus::valid()), BootDecision::Allow);
+        let token = LicenseKeyToken::new("authenticated").unwrap();
+        assert_eq!(
+            boot_decision(&LicenseStatus::authenticated(token)),
+            BootDecision::Allow
+        );
+    }
+
+    #[test]
+    fn nominally_valid_licence_without_token_denies_boot() {
+        let status = LicenseStatus {
+            valid: true,
+            banned: false,
+            token: None,
+            entitlements: Entitlements::default(),
+            reason: None,
+        };
+        assert!(!boot_decision(&status).is_allowed());
+        assert!(!status.is_authenticated());
     }
 
     #[test]
@@ -152,6 +226,7 @@ mod tests {
         let s = LicenseStatus {
             valid: true,
             banned: true,
+            token: LicenseKeyToken::new("revoked"),
             entitlements: Entitlements::default(),
             reason: Some("revoked".into()),
         };

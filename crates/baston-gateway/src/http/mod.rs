@@ -12,22 +12,48 @@ pub use packfile_cache::PackfileCache;
 pub use stream_cache::StreamCache;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::http::Method;
 use axum::routing::{get, post};
 use axum::Router;
 use baston_config::BastonConfig;
+use baston_core::license::LicenseKeyToken;
 use baston_scripting::ScriptHost;
 use baston_zone::resource_loader::ResourceManager;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::timeout::ResponseBodyTimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::auth::AuthService;
 use crate::players::PlayerRegistry;
 
+/// Runtime limits for resource delivery. Keeping the semaphore in the shared
+/// HTTP state makes the cap global across resources and clients.
+#[derive(Clone)]
+pub struct DownloadPolicy {
+    pub timeout: Duration,
+    pub chunk_size: usize,
+    pub semaphore: Arc<tokio::sync::Semaphore>,
+}
+
+impl DownloadPolicy {
+    pub fn new(config: &baston_config::ResourcesConfig) -> Self {
+        Self {
+            timeout: Duration::from_secs(config.file_download_timeout_secs),
+            chunk_size: config.file_download_chunk_bytes,
+            semaphore: Arc::new(tokio::sync::Semaphore::new(
+                config.file_download_concurrency,
+            )),
+        }
+    }
+}
+
 /// Shared state for all HTTP handlers.
 pub struct AppState {
     pub config: BastonConfig,
+    /// Authenticated CFX token published only through the client protocol.
+    pub license_token: std::sync::RwLock<Option<LicenseKeyToken>>,
     pub resource_manager: Arc<ResourceManager>,
     /// Shared with the script host so player natives see real data.
     pub players: Arc<PlayerRegistry>,
@@ -36,15 +62,26 @@ pub struct AppState {
     pub packfiles: PackfileCache,
     /// Streaming assets scanned from each resource's `stream/` folder.
     pub streams: StreamCache,
+    /// Bounded, timed resource delivery shared by every `/files` request.
+    pub downloads: DownloadPolicy,
     /// Phase D zone federation (None when `[meshing]` is disabled).
     pub mesh: Option<Arc<crate::mesh::GatewayMesh>>,
 }
 
 /// Build the gateway router.
 pub fn router(state: Arc<AppState>) -> Router {
+    let download_timeout = state.downloads.timeout;
     Router::new()
         .route("/info.json", get(info::info_json))
-        .route("/files/{resource}/{*path}", get(files::serve_resource_file))
+        .route(
+            "/files/{resource}/{*path}",
+            get(files::serve_resource_file)
+                .head(files::serve_resource_file)
+                // Unlike the disk-read timeout, this deadline also protects a
+                // semaphore permit when the remote peer stops consuming body
+                // frames. It resets after each successfully emitted frame.
+                .layer(ResponseBodyTimeoutLayer::new(download_timeout)),
+        )
         .route("/client", post(client::client_connect))
         .route(
             "/admin/player/{source}/drop",
@@ -54,11 +91,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Any origin, but only the methods we actually serve and no arbitrary
         // request headers — so a browser can't be tricked into a credentialed
         // cross-origin call to the authenticated drop route.
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods([Method::GET, Method::POST]),
-        )
+        .layer(CorsLayer::new().allow_origin(Any).allow_methods([
+            Method::GET,
+            Method::HEAD,
+            Method::POST,
+        ]))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

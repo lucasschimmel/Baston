@@ -70,7 +70,10 @@ async fn main() -> anyhow::Result<()> {
     raise_timer_resolution();
 
     let config_path = std::env::var("BASTON_CONFIG").unwrap_or_else(|_| "baston.toml".into());
-    let config = BastonConfig::load(Path::new(&config_path))?;
+    let mut config = BastonConfig::load(Path::new(&config_path))?;
+    // Authenticate and apply the licensed slot cap before opening metrics,
+    // voice, game, admin, or HTTP listeners.
+    let mut cfx_runtime = baston_gateway::cfx::bootstrap(&mut config).await?;
     tracing::info!(name = %config.server.name, port = config.server.port,
         "BASTON online — speaking the FiveM protocol, zero FXServer C++");
 
@@ -180,7 +183,7 @@ async fn main() -> anyhow::Result<()> {
                 });
             })),
         );
-        tokio::spawn(ownership.run());
+        tokio::spawn(Arc::new(ownership).run());
     }
 
     // Phase D: zone federation (gRPC registry + routing). Disabled by default;
@@ -191,6 +194,7 @@ async fn main() -> anyhow::Result<()> {
         ));
         let router = Arc::new(baston_gateway::ConnectionRouter::new());
         let mesh = baston_gateway::GatewayMesh::new(Arc::clone(&registry), Arc::clone(&router));
+        mesh.set_player_directory(Arc::clone(&players));
         let grpc_addr: std::net::SocketAddr = config.meshing.gateway_grpc_addr.parse()?;
         mesh.spawn_grpc_server(grpc_addr);
         // Zone failure recovery (D6): reroute orphans to surviving zones.
@@ -323,8 +327,13 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let port = config.server.port;
+    let bind_address = config.server.bind_address;
     let udp_port = config.udp.port.unwrap_or(port);
-    let udp = baston_gateway::udp::spawn_with_mesh(
+    let addr = std::net::SocketAddr::new(bind_address, port);
+    let tcp_listener = std::net::TcpListener::bind(addr)?;
+    tcp_listener.set_nonblocking(true)?;
+    let udp = baston_gateway::udp::spawn_with_mesh_on(
+        bind_address,
         udp_port,
         config.udp.poll_interval_ms,
         config.server.max_players,
@@ -333,9 +342,25 @@ async fn main() -> anyhow::Result<()> {
         Some(net_rx),
         Some(Arc::clone(&state_ingest)),
         mesh_forward,
-        config.state_sync.onesync,
+        config.state_sync.clone(),
+        // Clients are forced onto this build, so it is the one whose sync-tree
+        // node layouts the server must decode against.
+        baston_protocol::rage::sync_parse::GameBuild(
+            config
+                .server
+                .enforce_game_build
+                .parse()
+                .unwrap_or_else(|_| baston_protocol::rage::sync_parse::GameBuild::default().0),
+        ),
     )?;
-
+    // Entity creation from scripts: the control surface reserves network ids
+    // synchronously (a script needs its handle back immediately) and queues the
+    // creation for the UDP task's next sync tick, which owns the world.
+    {
+        let (world_control, world_commands) = baston_gateway::GatewayWorldControl::new();
+        script_host.set_world_control(world_control);
+        udp.set_world_commands(world_commands);
+    }
     // Voice teardown follows the game connection; clients learn the voice
     // endpoint through the replicated voice_external* convars.
     if let Some(voice) = &voice {
@@ -426,7 +451,7 @@ async fn main() -> anyhow::Result<()> {
                     match baston_protocol::events::json_args_to_msgpack(args_json) {
                         Ok(args) => {
                             let packet = baston_protocol::events::build_net_event(event, &args);
-                            udp.send_to_source(source as u32, 0, packet, true);
+                            udp.control().send(source as u32, 0, packet);
                         }
                         Err(e) => tracing::error!(target: "gateway", error = %e,
                             "zone outbound event encode failed"),
@@ -451,6 +476,10 @@ async fn main() -> anyhow::Result<()> {
 
     let auth = AuthService::new(&config.auth)?;
     let state = Arc::new(AppState {
+        license_token: std::sync::RwLock::new(
+            cfx_runtime.as_ref().map(|runtime| runtime.token().clone()),
+        ),
+        downloads: baston_gateway::http::DownloadPolicy::new(&config.resources),
         config,
         resource_manager,
         players,
@@ -461,22 +490,62 @@ async fn main() -> anyhow::Result<()> {
         mesh,
     });
 
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-    if let Some(tls) = state.config.tls.clone() {
-        let tls_config =
-            axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert_pem, &tls.key_pem)
-                .await?;
-        tracing::info!(%addr, "HTTPS gateway listening");
-        axum_server::bind_rustls(addr, tls_config)
-            .serve(router(state).into_make_service())
-            .await?;
+    let http_state = Arc::clone(&state);
+    let (http_ready_tx, http_ready_rx) = tokio::sync::oneshot::channel();
+    let mut http_server = tokio::spawn(async move {
+        if let Some(tls) = http_state.config.tls.clone() {
+            let tls_config =
+                axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert_pem, &tls.key_pem)
+                    .await?;
+            tracing::info!(%addr, "HTTPS gateway listening");
+            let server = axum_server::from_tcp_rustls(tcp_listener, tls_config);
+            let _ = http_ready_tx.send(());
+            server.serve(router(http_state).into_make_service()).await?;
+        } else {
+            // Plain HTTP is the Phase B-validated mode: the FiveM client sends
+            // some game-port requests in plaintext, and getConfiguration hands
+            // out a literal http://<host>/files URL so downloads stay plain.
+            let listener = tokio::net::TcpListener::from_std(tcp_listener)?;
+            tracing::info!(%addr, "HTTP gateway listening");
+            let _ = http_ready_tx.send(());
+            axum::serve(listener, router(http_state)).await?;
+        }
+        Ok::<(), anyhow::Error>(())
+    });
+    http_ready_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("HTTP gateway stopped before its accept loop was ready"))?;
+
+    if let Some(runtime) = &mut cfx_runtime {
+        tokio::select! {
+            result = runtime.activate_public_listing(&state.config) => {
+                if let Err(error) = result {
+                    http_server.abort();
+                    let _ = http_server.await;
+                    return Err(error.into());
+                }
+            }
+            result = &mut http_server => {
+                result??;
+                anyhow::bail!("HTTP gateway stopped during public CFX activation");
+            }
+        }
+        *state
+            .license_token
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(runtime.token().clone());
+
+        tokio::select! {
+            result = &mut http_server => result??,
+            reason = runtime.wait_for_failure() => {
+                http_server.abort();
+                anyhow::bail!(
+                    "authenticated CFX broker stopped; shutting down the gateway: {reason}"
+                );
+            }
+        }
     } else {
-        // Plain HTTP is the Phase B-validated mode: the FiveM client sends
-        // some game-port requests in plaintext, and getConfiguration hands
-        // out a literal http://<host>/files URL so downloads stay plain.
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        tracing::info!(%addr, "HTTP gateway listening");
-        axum::serve(listener, router(state)).await?;
+        http_server.await??;
     }
     Ok(())
 }

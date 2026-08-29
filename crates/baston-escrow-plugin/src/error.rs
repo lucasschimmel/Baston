@@ -1,8 +1,8 @@
-//! Error type for the escrow plugin.
+//! Escrow adapter errors.
 
+use baston_cfx_platform::CfxPlatformError;
 use thiserror::Error;
 
-/// Errors produced while installing or running the escrow/licence sidecar.
 #[derive(Debug, Error)]
 pub enum EscrowPluginError {
     #[error(
@@ -12,27 +12,12 @@ pub enum EscrowPluginError {
     )]
     DirectBackendUnsupported,
 
-    #[error("failed to spawn FXServer sidecar: {0}")]
-    SidecarSpawn(String),
-
-    #[error("sidecar did not become ready within the startup timeout")]
-    SidecarStartTimeout,
-
-    #[error("sidecar I/O error: {0}")]
-    SidecarIo(String),
-
-    #[error("sidecar process died: {0}")]
-    SidecarDied(String),
-
-    #[error("sidecar request timed out")]
-    SidecarRequestTimeout,
+    #[error(transparent)]
+    Platform(#[from] CfxPlatformError),
 
     #[error("sidecar protocol error: {0}")]
     SidecarProtocol(String),
 
     #[error("sidecar decrypt failed: {0}")]
     SidecarDecryptFailed(String),
-
-    #[error("licence query to the CFX component failed: {0}")]
-    LicenseQueryFailed(String),
 }

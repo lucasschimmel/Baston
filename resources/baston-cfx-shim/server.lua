@@ -20,7 +20,7 @@
 -- ## Two operations
 --
 --   op = "license_status"
---     reply : { id, valid, banned, entitlements = { features = {} }, reason? }
+--     reply : { id, valid, banned, token?, entitlements = { features = {} }, reason? }
 --     Reads sv_licenseKeyToken via GetConvar — a purely LOCAL signal populated by
 --     the official CFX component once it validated the operator's licence. No
 --     network call here. Ban vs plain-invalid is not locally distinguishable, so
@@ -33,7 +33,7 @@
 --     decrypted it on read via its VFS hook, so we return the (now plaintext)
 --     bytes, base64-encoded.
 --
--- This shim is materialised on disk by baston-escrow-plugin (kept in lockstep
+-- This shim is materialised on disk by baston-cfx-platform (kept in lockstep
 -- with the Rust `Sidecar`). It never contacts CFX.
 
 local RESOURCE = GetCurrentResourceName()
@@ -83,6 +83,7 @@ local function licenseStatus()
   return {
     valid = valid,
     banned = false, -- not locally distinguishable from invalid
+    token = valid and token or nil,
     entitlements = { features = {} }, -- no clean local entitlement signal (see docs)
     reason = (not valid)
         and 'sv_licenseKeyToken empty: licence key missing, invalid, or not yet validated by the CFX component'

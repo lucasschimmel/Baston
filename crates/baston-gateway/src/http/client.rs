@@ -179,6 +179,7 @@ pub async fn client_connect(
                     token,
                     &game_name,
                     state.config.server.max_players,
+                    state.config.state_sync.onesync.is_enabled(),
                 ))
                 .unwrap_or_else(|_| json!({}));
             // Non-FXServer extras (harmless to the client, used by our tests).

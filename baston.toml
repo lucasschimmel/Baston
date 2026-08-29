@@ -3,6 +3,7 @@
 [server]
 name = "BASTON Dev"
 port = 30120
+bind_address = "0.0.0.0"
 max_players = 32
 # All clients must run the same GTA build for non-OneSync P2P sync; the
 # client auto-switches builds pre-connect when this is advertised.
@@ -37,18 +38,23 @@ auth_bypass = false
 [license]
 # "off"      : no check (dev/LAN only — warns every boot). Default for this dev cfg.
 # "gate"     : require a well-formed sv_license_key in config (shape only, no sidecar).
-# "verified" : run the official FXServer sidecar to validate the key against CFX and
-#              enforce the verdict + entitlements locally (Windows + --features escrow).
+# "verified" : run the official FXServer broker to validate the key against CFX and
+#              enforce the verdict + entitlements locally (Windows).
 mode = "off"
 # Your CFX server licence, created at https://portal.cfx.re. Required for gate/verified.
 sv_license_key = ""
 # mode = "verified": path to an official FXServer.exe you downloaded from CFX.
-# BASTON never ships this binary. Shares one sidecar process with [escrow] when both on.
+# BASTON never ships this binary.
 # fxserver_path = "Artifacts/windows/31623/FXServer.exe"
 # Private, localhost-only port for the sidecar (verified/escrow). Nothing connects to
 # it (IPC is a local file-drop) — it only keeps the sidecar off BASTON's public port.
 # Give each BASTON instance on a host a distinct value if you run several.
 # sidecar_port = 30130
+# Let the genuine FXServer broker register this endpoint in the CFX server list.
+# Requires server.bind_address to be one concrete non-loopback local interface.
+public_listing = false
+# Public IP advertised to CFX; required when public_listing = true.
+# listing_ip_override = "203.0.113.10"
 
 # Monitoring/control HTTP API keys (served on meshing.admin_port, default
 # 8080). Each key is a named bearer token with explicit permissions; control

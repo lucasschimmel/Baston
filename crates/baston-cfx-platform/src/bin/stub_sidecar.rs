@@ -1,7 +1,7 @@
 //! Test-only stub implementing the **file-drop** sidecar protocol, so the
-//! transport and the [`baston_escrow_plugin::SidecarDecryptor`] /
-//! [`baston_escrow_plugin::LicenseOracle`] logic can be exercised in CI without a
-//! real FXServer install. Integration tests spawn it via `CARGO_BIN_EXE_stub_sidecar`.
+//! transport and licence-oracle logic can be exercised in CI without a real
+//! FXServer install. Integration tests spawn it via
+//! `CARGO_BIN_EXE_stub_sidecar`.
 //!
 //! Environment:
 //! - `BASTON_SIDECAR_IPC`  — the ipc dir to poll (required).
@@ -73,12 +73,16 @@ fn license_reply() -> serde_json::Value {
         Ok("banned") => {
             serde_json::json!({ "valid": false, "banned": true, "reason": "stub banned" })
         }
+        Ok("valid_no_token") => {
+            serde_json::json!({ "valid": true, "banned": false })
+        }
         Ok("slots48") => serde_json::json!({
-            "valid": true, "banned": false,
+            "valid": true, "banned": false, "token": "stub-token",
             "entitlements": { "max_slots": 48, "features": [] }
         }),
         _ => serde_json::json!({
-            "valid": true, "banned": false, "entitlements": { "features": [] }
+            "valid": true, "banned": false, "token": "stub-token",
+            "entitlements": { "features": [] }
         }),
     }
 }

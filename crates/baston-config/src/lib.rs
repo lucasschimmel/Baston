@@ -1,6 +1,8 @@
 //! Runtime configuration for BASTON, loaded from `baston.toml` with
 //! environment-variable overrides (`BASTON_PORT`, `BASTON_RESOURCES_PATH`).
 
+use std::fmt;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -292,7 +294,7 @@ impl ApiConfig {
 /// - `"verified"`: run the genuine, unmodified FXServer sidecar which validates
 ///   the key against CFX and lets BASTON enforce the verdict + entitlements
 ///   locally. Windows + `escrow` feature only.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct LicenseConfig {
     /// `off` | `gate` | `verified`.
     #[serde(default)]
@@ -311,6 +313,26 @@ pub struct LicenseConfig {
     /// port if you run several.
     #[serde(default = "default_sidecar_port")]
     pub sidecar_port: u16,
+    /// Let the official FXServer broker register and heartbeat this Baston
+    /// endpoint in the public CFX server list.
+    #[serde(default)]
+    pub public_listing: bool,
+    /// Public address advertised by the official broker.
+    #[serde(default)]
+    pub listing_ip_override: Option<IpAddr>,
+}
+
+impl fmt::Debug for LicenseConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LicenseConfig")
+            .field("mode", &self.mode)
+            .field("sv_license_key", &"[REDACTED]")
+            .field("fxserver_path", &self.fxserver_path)
+            .field("sidecar_port", &self.sidecar_port)
+            .field("public_listing", &self.public_listing)
+            .field("listing_ip_override", &self.listing_ip_override)
+            .finish()
+    }
 }
 
 impl Default for LicenseConfig {
@@ -320,6 +342,8 @@ impl Default for LicenseConfig {
             sv_license_key: String::new(),
             fxserver_path: None,
             sidecar_port: default_sidecar_port(),
+            public_listing: false,
+            listing_ip_override: None,
         }
     }
 }
@@ -555,6 +579,47 @@ pub struct StateSyncConfig {
     /// `On` makes the server parse entity clones authoritatively (OneSync-NG).
     #[serde(default)]
     pub onesync: OneSyncMode,
+    /// Dynamically adjust the authoritative outbound rate based on measured
+    /// work and transport pressure.
+    #[serde(default = "default_true")]
+    pub adaptive_tick_enabled: bool,
+    /// Lowest rate selected while overloaded.
+    #[serde(default = "default_tick_min_hz")]
+    pub tick_min_hz: u16,
+    /// Initial operating rate before measurements are available.
+    #[serde(default = "default_tick_default_hz")]
+    pub tick_default_hz: u16,
+    /// Hard ceiling. Validation rejects values above 120 Hz.
+    #[serde(default = "default_tick_max_hz")]
+    pub tick_max_hz: u16,
+    /// Utilization at which the controller immediately backs off.
+    #[serde(default = "default_tick_high_utilization")]
+    pub tick_high_utilization: f32,
+    /// Utilization below which a sample counts as headroom.
+    #[serde(default = "default_tick_low_utilization")]
+    pub tick_low_utilization: f32,
+    /// Consecutive headroom samples required before increasing the rate.
+    #[serde(default = "default_tick_recovery_window")]
+    pub tick_recovery_window: u32,
+    /// Multiplicative rate retained on overload (`0 < value < 1`).
+    #[serde(default = "default_tick_overload_backoff")]
+    pub tick_overload_backoff: f32,
+    /// Per-client clone payload budget for one outbound tick.
+    #[serde(default = "default_interest_budget_bytes")]
+    pub interest_budget_bytes: usize,
+    /// Maximum bytes spent on scope removals per client and tick.
+    #[serde(default = "default_interest_remove_budget_bytes")]
+    pub interest_remove_budget_bytes: usize,
+    #[serde(default = "default_interest_distance_weight")]
+    pub interest_distance_weight: f32,
+    #[serde(default = "default_interest_closing_weight")]
+    pub interest_closing_weight: f32,
+    #[serde(default = "default_interest_staleness_weight")]
+    pub interest_staleness_weight: f32,
+    /// Extra distance retained for entities already in scope, preventing
+    /// boundary jitter from causing create/remove churn.
+    #[serde(default = "default_interest_hysteresis_m")]
+    pub interest_hysteresis_m: f32,
 }
 
 /// Server entity-sync mode advertised to clients and driving the game-state
@@ -581,6 +646,65 @@ impl OneSyncMode {
             OneSyncMode::Off => "off",
             OneSyncMode::On => "on",
         }
+    }
+}
+
+impl StateSyncConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.tick_min_hz == 0
+            || self.tick_min_hz > self.tick_default_hz
+            || self.tick_default_hz > self.tick_max_hz
+            || self.tick_max_hz > 120
+        {
+            return Err(ConfigError::Invalid {
+                section: "state_sync",
+                reason: format!(
+                    "tick rates must satisfy 1 <= min ({}) <= default ({}) <= max ({}) <= 120 Hz",
+                    self.tick_min_hz, self.tick_default_hz, self.tick_max_hz
+                ),
+            });
+        }
+        if !(0.0..1.0).contains(&self.tick_low_utilization)
+            || !(0.0..=1.0).contains(&self.tick_high_utilization)
+            || self.tick_low_utilization >= self.tick_high_utilization
+        {
+            return Err(ConfigError::Invalid {
+                section: "state_sync",
+                reason: "tick utilization thresholds must satisfy 0 <= low < high <= 1".to_owned(),
+            });
+        }
+        if !(0.0..1.0).contains(&self.tick_overload_backoff) {
+            return Err(ConfigError::Invalid {
+                section: "state_sync",
+                reason: "tick_overload_backoff must be greater than 0 and less than 1".to_owned(),
+            });
+        }
+        if self.tick_recovery_window == 0
+            || self.interest_budget_bytes == 0
+            || self.interest_remove_budget_bytes == 0
+            || !self.aoi_radius.is_finite()
+            || self.aoi_radius <= 0.0
+            || !self.interest_hysteresis_m.is_finite()
+            || self.interest_hysteresis_m < 0.0
+        {
+            return Err(ConfigError::Invalid {
+                section: "state_sync",
+                reason: "recovery window, budgets and AoI must be positive; hysteresis must be finite and non-negative".to_owned(),
+            });
+        }
+        for (name, value) in [
+            ("interest_distance_weight", self.interest_distance_weight),
+            ("interest_closing_weight", self.interest_closing_weight),
+            ("interest_staleness_weight", self.interest_staleness_weight),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(ConfigError::Invalid {
+                    section: "state_sync",
+                    reason: format!("{name} must be finite and non-negative"),
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -612,6 +736,9 @@ pub struct ServerConfig {
     pub name: String,
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Local interface for the public HTTP and UDP game listeners.
+    #[serde(default = "default_bind_address")]
+    pub bind_address: IpAddr,
     #[serde(default = "default_max_players")]
     pub max_players: u32,
     /// Game build advertised as `sv_enforceGameBuild` in `info.json` vars.
@@ -640,6 +767,40 @@ pub struct AuthConfig {
 pub struct ResourcesConfig {
     #[serde(default = "default_resources_path")]
     pub path: PathBuf,
+    /// Idle timeout applied to each streamed resource-file read.
+    #[serde(default = "default_file_download_timeout_secs")]
+    pub file_download_timeout_secs: u64,
+    /// Disk read size for streamed resource responses.
+    #[serde(default = "default_file_download_chunk_bytes")]
+    pub file_download_chunk_bytes: usize,
+    /// Maximum number of concurrent resource-file streams.
+    #[serde(default = "default_file_download_concurrency")]
+    pub file_download_concurrency: usize,
+}
+
+impl ResourcesConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.file_download_timeout_secs == 0 {
+            return Err(ConfigError::Invalid {
+                section: "resources",
+                reason: "file_download_timeout_secs must be greater than zero".to_owned(),
+            });
+        }
+        if !(4 * 1024..=4 * 1024 * 1024).contains(&self.file_download_chunk_bytes) {
+            return Err(ConfigError::Invalid {
+                section: "resources",
+                reason: "file_download_chunk_bytes must be between 4096 and 4194304 bytes"
+                    .to_owned(),
+            });
+        }
+        if self.file_download_concurrency == 0 {
+            return Err(ConfigError::Invalid {
+                section: "resources",
+                reason: "file_download_concurrency must be greater than zero".to_owned(),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// `[connection]` section.
@@ -666,6 +827,9 @@ fn default_server_name() -> String {
 }
 fn default_port() -> u16 {
     30120
+}
+fn default_bind_address() -> IpAddr {
+    IpAddr::V4(Ipv4Addr::UNSPECIFIED)
 }
 fn default_max_players() -> u32 {
     32
@@ -712,6 +876,54 @@ fn default_max_speed() -> f32 {
 }
 fn default_ownership_interval() -> u64 {
     5
+}
+fn default_tick_min_hz() -> u16 {
+    20
+}
+fn default_tick_default_hz() -> u16 {
+    60
+}
+fn default_tick_max_hz() -> u16 {
+    120
+}
+fn default_tick_high_utilization() -> f32 {
+    0.85
+}
+fn default_tick_low_utilization() -> f32 {
+    0.50
+}
+fn default_tick_recovery_window() -> u32 {
+    180
+}
+fn default_tick_overload_backoff() -> f32 {
+    0.5
+}
+fn default_interest_budget_bytes() -> usize {
+    24 * 1024
+}
+fn default_interest_remove_budget_bytes() -> usize {
+    4 * 1024
+}
+fn default_interest_distance_weight() -> f32 {
+    10.0
+}
+fn default_interest_closing_weight() -> f32 {
+    0.5
+}
+fn default_interest_staleness_weight() -> f32 {
+    1.0
+}
+fn default_interest_hysteresis_m() -> f32 {
+    20.0
+}
+fn default_file_download_timeout_secs() -> u64 {
+    30
+}
+fn default_file_download_chunk_bytes() -> usize {
+    64 * 1024
+}
+fn default_file_download_concurrency() -> usize {
+    64
 }
 fn default_metrics_port() -> u16 {
     9090
@@ -781,6 +993,20 @@ impl Default for StateSyncConfig {
             max_speed_mps: default_max_speed(),
             ownership_interval_secs: default_ownership_interval(),
             onesync: OneSyncMode::default(),
+            adaptive_tick_enabled: true,
+            tick_min_hz: default_tick_min_hz(),
+            tick_default_hz: default_tick_default_hz(),
+            tick_max_hz: default_tick_max_hz(),
+            tick_high_utilization: default_tick_high_utilization(),
+            tick_low_utilization: default_tick_low_utilization(),
+            tick_recovery_window: default_tick_recovery_window(),
+            tick_overload_backoff: default_tick_overload_backoff(),
+            interest_budget_bytes: default_interest_budget_bytes(),
+            interest_remove_budget_bytes: default_interest_remove_budget_bytes(),
+            interest_distance_weight: default_interest_distance_weight(),
+            interest_closing_weight: default_interest_closing_weight(),
+            interest_staleness_weight: default_interest_staleness_weight(),
+            interest_hysteresis_m: default_interest_hysteresis_m(),
         }
     }
 }
@@ -805,6 +1031,9 @@ impl Default for ResourcesConfig {
     fn default() -> Self {
         Self {
             path: default_resources_path(),
+            file_download_timeout_secs: default_file_download_timeout_secs(),
+            file_download_chunk_bytes: default_file_download_chunk_bytes(),
+            file_download_concurrency: default_file_download_concurrency(),
         }
     }
 }
@@ -856,6 +1085,45 @@ impl BastonConfig {
         self.license.validate()?;
         self.escrow.validate()?;
         self.api.validate()?;
+        self.state_sync.validate()?;
+        self.resources.validate()?;
+        if self.license.public_listing {
+            if self.license.mode != LicenseMode::Verified {
+                return Err(ConfigError::Invalid {
+                    section: "license",
+                    reason: "public_listing requires mode = \"verified\"".to_owned(),
+                });
+            }
+            let listing_ip =
+                self.license
+                    .listing_ip_override
+                    .ok_or_else(|| ConfigError::Invalid {
+                        section: "license",
+                        reason: "public_listing requires listing_ip_override".to_owned(),
+                    })?;
+            if listing_ip.is_unspecified() || listing_ip.is_loopback() || listing_ip.is_multicast()
+            {
+                return Err(ConfigError::Invalid {
+                    section: "license",
+                    reason: "listing_ip_override must be a concrete unicast address".to_owned(),
+                });
+            }
+            if self.server.bind_address.is_unspecified()
+                || self.server.bind_address.is_loopback()
+                || self.server.bind_address.is_multicast()
+            {
+                return Err(ConfigError::Invalid {
+                    section: "server",
+                    reason: "public listing requires bind_address to select a concrete non-loopback interface".to_owned(),
+                });
+            }
+            if self.udp.port.unwrap_or(self.server.port) != self.server.port {
+                return Err(ConfigError::Invalid {
+                    section: "udp",
+                    reason: "public listing requires udp.port to equal server.port".to_owned(),
+                });
+            }
+        }
         if self.voice.enabled && self.voice.port == self.server.port {
             return Err(ConfigError::Invalid {
                 section: "voice",

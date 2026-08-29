@@ -9,12 +9,12 @@ use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use baston_cfx_platform::{Sidecar, SidecarParams};
 use baston_core::script_decryptor::{
     is_cfx_encrypted, DecryptError, EntitlementContext, ScriptDecryptor,
 };
 
 use crate::error::EscrowPluginError;
-use crate::sidecar::{Sidecar, SidecarParams};
 
 /// A [`ScriptDecryptor`] that delegates escrow decryption to the sidecar.
 pub struct SidecarDecryptor {

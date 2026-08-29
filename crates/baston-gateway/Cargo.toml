@@ -35,6 +35,8 @@ rustls = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
 baston-config = { workspace = true }
+baston-core = { workspace = true }
+baston-cfx-platform = { workspace = true }
 baston-protocol = { workspace = true }
 baston-scripting = { workspace = true }
 baston-zone = { workspace = true }

@@ -5,9 +5,10 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
-use baston_escrow_plugin::LicenseOracle;
+use baston_cfx_platform::{CfxPlatformError, LicenseOracle, Sidecar, SidecarParams};
 use tempfile::TempDir;
 
 struct Harness {
@@ -38,8 +39,13 @@ fn oracle(h: &Harness, mode: Option<&str>) -> LicenseOracle {
 #[test]
 fn valid_licence_is_reported_valid() {
     let h = harness();
-    let status = oracle(&h, None).query_once().expect("query");
+    let oracle = oracle(&h, None);
+    let status = oracle.query_once().expect("query");
     assert!(status.valid && !status.banned);
+    assert!(
+        !h.ipc.join("response.json").exists(),
+        "the authenticated token must not remain in the IPC response file"
+    );
 }
 
 #[test]
@@ -90,13 +96,64 @@ fn retry_fails_closed_on_persistent_invalid() {
     assert!(start.elapsed() < Duration::from_secs(3));
 }
 
+#[test]
+fn retry_does_not_accept_nominal_valid_without_token() {
+    let h = harness();
+    let start = Instant::now();
+    let status = oracle(&h, Some("valid_no_token"))
+        .query(Duration::from_millis(300), Duration::from_millis(50))
+        .expect("query");
+    assert!(!status.is_authenticated());
+    assert!(
+        start.elapsed() >= Duration::from_millis(250),
+        "an incomplete verdict must be retried until the startup budget expires"
+    );
+}
+
+#[test]
+fn cancellation_stops_an_in_flight_licence_query() {
+    let h = harness();
+    let oracle = oracle(&h, None);
+    let cancelled = AtomicBool::new(true);
+
+    let error = oracle
+        .query_with_cancellation(Duration::from_secs(20), Duration::from_secs(1), &cancelled)
+        .unwrap_err();
+
+    assert!(matches!(error, CfxPlatformError::SidecarCancelled));
+}
+
 /// Real end-to-end path: requires a Windows FXServer install with svadhesive.dll
 /// and a genuine CFX server licence. Excluded from CI; run manually on a
 /// configured dev box with `cargo test -- --ignored`.
 #[test]
 #[ignore = "needs a real FXServer install + a genuine CFX server licence"]
 fn real_fxserver_reports_licence_status() {
-    // Wiring left to the operator: start a SidecarHandle with SidecarParams against
-    // Artifacts/windows/<build>/FXServer.exe with a real sv_licenseKey, then assert
-    // oracle().query_once() reports valid = true.
+    let fxserver_path = std::env::var_os("BASTON_TEST_FXSERVER")
+        .map(PathBuf::from)
+        .expect("set BASTON_TEST_FXSERVER to an official FXServer.exe");
+    let license_key = std::env::var("BASTON_TEST_LICENSE_KEY")
+        .expect("set BASTON_TEST_LICENSE_KEY without committing or printing it");
+    let port = std::env::var("BASTON_TEST_SIDECAR_PORT")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(30_130);
+    let temp = tempfile::tempdir().expect("temporary sidecar resources");
+    let params = SidecarParams {
+        fxserver_path,
+        resources_dir: temp.path().join("resources"),
+        license_key: Some(license_key),
+        port,
+        public_listing: None,
+    };
+
+    let sidecar = Sidecar::start(&params).expect("official FXServer broker startup");
+    let status = LicenseOracle::from_sidecar(sidecar)
+        .query(Duration::from_secs(20), Duration::from_secs(1))
+        .expect("official broker licence query");
+
+    assert!(
+        status.is_authenticated(),
+        "official broker did not return an authenticated identity"
+    );
 }

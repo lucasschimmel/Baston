@@ -32,18 +32,22 @@
 //! `CreateComponent` export) — there is no flat symbol to call over FFI. The
 //! **sidecar** backend is therefore the only supported one; the `direct` (FFI)
 //! backend is rejected with an actionable error at the composition root.
+//!
+//! Platform operations now return [`CfxPlatformError`] directly; escrow
+//! operations retain [`EscrowPluginError`]. This crate is pre-1.0, so the split
+//! intentionally replaces the former mixed error enum with domain-specific
+//! errors.
 
 mod decryptor;
 mod error;
-mod license;
-mod sidecar;
 
 use std::sync::Arc;
 
+pub use baston_cfx_platform::{
+    CfxPlatformError, LicenseOracle, Sidecar, SidecarParams, SHIM_RESOURCE,
+};
 pub use decryptor::SidecarDecryptor;
 pub use error::EscrowPluginError;
-pub use license::LicenseOracle;
-pub use sidecar::{Sidecar, SidecarParams, SHIM_RESOURCE};
 
 use baston_core::script_decryptor::ScriptDecryptor;
 
@@ -67,7 +71,7 @@ impl SidecarHandle {
 
     /// A licence oracle backed by this sidecar.
     pub fn oracle(&self) -> LicenseOracle {
-        LicenseOracle::new(Arc::clone(&self.sidecar))
+        LicenseOracle::from_sidecar(Arc::clone(&self.sidecar))
     }
 
     /// A decryptor backed by this sidecar, ready for `set_script_decryptor`.

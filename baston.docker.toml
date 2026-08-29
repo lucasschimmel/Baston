@@ -4,6 +4,7 @@
 [server]
 name = "BASTON Mesh Dev"
 port = 30120
+bind_address = "0.0.0.0"
 max_players = 1500
 
 [resources]

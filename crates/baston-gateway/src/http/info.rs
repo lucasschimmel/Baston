@@ -10,6 +10,7 @@ use super::AppState;
 
 pub async fn info_json(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let resources = state.resource_manager.started_names().await;
+    let onesync_enabled = state.config.state_sync.onesync.is_enabled();
     // NetLibrary.cpp reads `vars.sv_enforceGameBuild` pre-connect and
     // build-switches the client; without it every client keeps its local
     // build and mixed-build non-OneSync sessions can't join each other.
@@ -20,14 +21,33 @@ pub async fn info_json(State(state): State<Arc<AppState>>) -> Json<serde_json::V
             json!(state.config.server.enforce_game_build),
         );
     }
+    let license_token = state
+        .license_token
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(token) = license_token.as_ref() {
+        vars.insert("sv_licenseKeyToken".to_owned(), json!(token.as_str()));
+    }
+    vars.insert(
+        "sv_maxClients".to_owned(),
+        json!(state.config.server.max_players.to_string()),
+    );
+    vars.insert(
+        "onesync_enabled".to_owned(),
+        json!(onesync_enabled.to_string()),
+    );
+    vars.insert(
+        "onesync".to_owned(),
+        json!(state.config.state_sync.onesync.convar_value()),
+    );
     Json(json!({
         "name": state.config.server.name,
         "players": state.players.count(),
         "maxPlayers": state.config.server.max_players,
         "gameType": "Roleplay",
         "mapName": "Los Santos",
-        "enhancedHostSupport": true,
-        "onesync": { "enabled": false },
+        "enhancedHostSupport": !onesync_enabled,
+        "onesync": { "enabled": onesync_enabled },
         "vars": vars,
         "version": 1,
         "resources": resources,

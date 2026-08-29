@@ -126,6 +126,76 @@ fn license_gate_accepts_well_formed_key() {
 }
 
 #[test]
+fn license_config_debug_redacts_server_key() {
+    let lic = LicenseConfig {
+        sv_license_key: "cfxk_super_secret_server_key".into(),
+        ..Default::default()
+    };
+    let debug = format!("{lic:?}");
+    assert!(debug.contains("[REDACTED]"));
+    assert!(!debug.contains("cfxk_super_secret_server_key"));
+}
+
+#[test]
+fn public_listing_defaults_off_on_any_interface() {
+    let config: BastonConfig = toml::from_str("[server]\nport = 30120\n").unwrap();
+    assert!(!config.license.public_listing);
+    assert!(config.license.listing_ip_override.is_none());
+    assert!(config.server.bind_address.is_unspecified());
+}
+
+#[test]
+fn public_listing_requires_verified_mode() {
+    let config: BastonConfig = toml::from_str(
+        "[server]\nbind_address = \"192.0.2.10\"\n\
+         [license]\npublic_listing = true\nlisting_ip_override = \"203.0.113.10\"\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        config.validate(),
+        Err(ConfigError::Invalid {
+            section: "license",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn public_listing_rejects_unspecified_gateway_bind() {
+    let mut config: BastonConfig = toml::from_str("[server]\nport = 30120\n").unwrap();
+    config.license.mode = LicenseMode::Verified;
+    config.license.sv_license_key = "cfxk_1a2b3c4d5e6f7g8h9i0j_realkey".into();
+    config.license.fxserver_path = Some(std::env::current_exe().unwrap());
+    config.license.public_listing = true;
+    config.license.listing_ip_override = Some("203.0.113.10".parse().unwrap());
+
+    assert!(matches!(
+        config.validate(),
+        Err(ConfigError::Invalid {
+            section: "server",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn public_listing_requires_udp_on_public_server_port() {
+    let mut config: BastonConfig =
+        toml::from_str("[server]\nport = 30120\nbind_address = \"192.0.2.10\"\n").unwrap();
+    config.license.mode = LicenseMode::Verified;
+    config.license.sv_license_key = "cfxk_1a2b3c4d5e6f7g8h9i0j_realkey".into();
+    config.license.fxserver_path = Some(std::env::current_exe().unwrap());
+    config.license.public_listing = true;
+    config.license.listing_ip_override = Some("203.0.113.10".parse().unwrap());
+    config.udp.port = Some(30121);
+
+    assert!(matches!(
+        config.validate(),
+        Err(ConfigError::Invalid { section: "udp", .. })
+    ));
+}
+
+#[test]
 fn license_verified_requires_fxserver_path() {
     let lic = LicenseConfig {
         mode: LicenseMode::Verified,
@@ -239,5 +309,53 @@ fn api_key_without_permissions_is_rejected() {
     assert!(matches!(
         api.validate(),
         Err(ConfigError::ApiKeyNoPermissions(name)) if name == "bot"
+    ));
+}
+
+#[test]
+fn sync_and_download_defaults_are_backward_compatible() {
+    let config: BastonConfig = toml::from_str("[server]\nport = 30120\n").unwrap();
+    assert_eq!(config.state_sync.tick_min_hz, 20);
+    assert_eq!(config.state_sync.tick_default_hz, 60);
+    assert_eq!(config.state_sync.tick_max_hz, 120);
+    assert_eq!(config.state_sync.interest_budget_bytes, 24 * 1024);
+    assert_eq!(config.resources.file_download_timeout_secs, 30);
+    assert_eq!(config.resources.file_download_chunk_bytes, 64 * 1024);
+    assert_eq!(config.resources.file_download_concurrency, 64);
+    config.validate().unwrap();
+}
+
+#[test]
+fn sync_tick_bounds_and_thresholds_are_validated() {
+    let mut sync = StateSyncConfig {
+        tick_max_hz: 121,
+        ..Default::default()
+    };
+    assert!(matches!(
+        sync.validate(),
+        Err(ConfigError::Invalid {
+            section: "state_sync",
+            ..
+        })
+    ));
+
+    sync.tick_max_hz = 120;
+    sync.tick_low_utilization = 0.9;
+    sync.tick_high_utilization = 0.8;
+    assert!(sync.validate().is_err());
+}
+
+#[test]
+fn download_policy_rejects_zero_and_unsafe_chunk_sizes() {
+    let resources = ResourcesConfig {
+        file_download_concurrency: 0,
+        ..Default::default()
+    };
+    assert!(matches!(
+        resources.validate(),
+        Err(ConfigError::Invalid {
+            section: "resources",
+            ..
+        })
     ));
 }

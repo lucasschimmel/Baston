@@ -1,122 +1,178 @@
-# CFX server-licence integration
+# CFX identity, entitlements, and public listing
 
-BASTON runs on the **official** FiveM/CFX licence system. It requires a real
-licence and honours whatever that licence grants — **without** reimplementing,
-spoofing, or bypassing anything.
+Baston integrates with the official CFX platform without copying or patching
+its closed authentication code. The operator supplies an official
+`FXServer.exe`; Baston runs it unmodified as a broker and consumes only the
+local identity result exposed by a small server resource.
 
-## Principle — how this stays 100% legal
+Asset Escrow is a separate, deferred capability. This document covers server
+identity, slot policy, client entitlements, and public server-list presence.
 
-The one piece the open-source FXServer does **not** ship is the licence
-validation itself: it lives in the closed CFX component (`svadhesive`, the
-server *adhesive*). BASTON does **not** reverse-engineer or reimplement it.
-Instead, in the strongest mode, BASTON runs a **genuine, unmodified FXServer**
-as a sidecar — the component's own native host — which validates the operator's
-key against CFX exactly as it always does. BASTON then **reads the local
-verdict** and enforces it. In short:
+## Security boundary
 
-- ✅ The official binary runs unmodified, in its intended host, with the
-  operator's own licence.
-- ✅ BASTON only *reads* the result and enforces it **restrictively** (it can
-  lower a limit or keep a feature off — never raise a limit or unlock a feature
-  that was not granted).
-- ⛔ BASTON never talks to a CFX service, never replays a token, never
-  impersonates FXServer, never patches or decompiles `svadhesive.dll`.
+- The genuine FXServer process owns Keymaster authentication and public-list
+  heartbeats.
+- Baston never loads `svadhesive.dll` through an invented FFI, patches it,
+  extracts its private listing token, or reimplements the closed handshake.
+- The licence key is written to a temporary launch configuration, never to the
+  command line or logs. The file is removed when the broker stops, including
+  startup failures.
+- The authenticated `sv_licenseKeyToken` uses a redacted Rust type. It is
+  published only where the FiveM client expects it: `info.json` under
+  `vars.sv_licenseKeyToken`.
+- Policy lookup uses the official public policy endpoint with redirects
+  disabled, a fixed timeout, and a 64 KiB response limit.
+- Authentication fails closed. Policy lookup fails conservatively at 48 slots
+  and never fabricates a paid grant.
 
-The only component that ever contacts CFX is the genuine FXServer, doing what it
-normally does. That is the whole compliance argument.
+## Runtime architecture
 
-## Prerequisites
+The gateway is the sole owner of the CFX server identity:
 
-- A CFX account and a **server licence key**, created at <https://portal.cfx.re>.
-- For `verified` mode: an **official FXServer** you downloaded yourself from CFX
-  (Windows). BASTON never ships `FXServer.exe` or `svadhesive.dll` — the
-  operator provides them, exactly like the `[escrow]` setup.
+1. It starts a private official FXServer broker and waits for a valid local
+   identity token before opening any public listener.
+2. It resolves the token's CFX policy and lowers `server.max_players` when
+   needed.
+3. Baston starts its HTTP accept loop and UDP game transport on the selected
+   interface.
+4. If public listing is enabled, it replaces the private broker with an
+   official broker carrying the already-capped public metadata. Registration
+   and heartbeats therefore begin only after the advertised endpoint is bound.
+5. FXServer binds
+   only `127.0.0.1` on the same numeric port, so it can own CFX registration
+   without proxying gameplay.
+6. If the broker exits, the authenticated gateway shuts down instead of
+   continuing with a stale identity.
 
-## The three modes (`baston.toml` → `[license]`)
+Zone processes never authenticate or register independently. A zone may run a
+separate, non-listing sidecar only when Asset Escrow is explicitly enabled.
+
+## Configuration
+
+Development and private verified mode:
 
 ```toml
+[server]
+name = "Baston"
+port = 30120
+bind_address = "0.0.0.0"
+max_players = 64
+
 [license]
-mode = "off"            # "off" | "gate" | "verified"
-sv_license_key = ""     # your key from https://portal.cfx.re
-# fxserver_path = "Artifacts/windows/31623/FXServer.exe"   # verified only
-# sidecar_port = 30130  # private, localhost-only port for the sidecar (verified/escrow)
+mode = "verified"
+sv_license_key = "cfxk_REPLACE_WITH_OPERATOR_SECRET"
+fxserver_path = "C:/FXServer/FXServer.exe"
+sidecar_port = 30130
+public_listing = false
 ```
 
-| Mode | What it does | Requires | Use when |
-|------|--------------|----------|----------|
-| `off` | No check. Warns every boot. | nothing | Local dev / LAN only. **Not** production. |
-| `gate` | Requires a well-formed `sv_license_key` in config (shape only — not validated, no sidecar). | a key | Cross-platform prod where you can't run the sidecar, as a minimum bar. |
-| `verified` | Runs the official FXServer sidecar, which validates the key against CFX; BASTON enforces the verdict + entitlements locally. | Windows + `--features escrow` + `fxserver_path` + a real key | Production on Windows. Recommended. |
+Public-list mode:
 
-In `verified` mode BASTON **fails closed**: an invalid or banned licence — or a
-sidecar that doesn't answer within the startup budget — **refuses to start**,
-with an actionable message. It never boots optimistically.
+```toml
+[server]
+name = "Baston Production"
+port = 30120
+# A concrete local interface assigned to this machine. Do not use 0.0.0.0 or
+# 127.0.0.1: FXServer needs 127.0.0.1:30120 for its listing endpoint.
+bind_address = "192.0.2.10"
+max_players = 128
 
-### One process for licence + escrow
+[udp]
+# Omit this field or keep it equal to server.port.
+port = 30120
 
-If both `[license] mode = "verified"` and `[escrow] enabled = true`, BASTON
-starts **one** FXServer sidecar and uses it for both — it never boots a second
-FXServer.
+[license]
+mode = "verified"
+sv_license_key = "cfxk_REPLACE_WITH_OPERATOR_SECRET"
+fxserver_path = "C:/FXServer/FXServer.exe"
+sidecar_port = 30130
+public_listing = true
+# The public address players use. NAT port forwarding must map TCP and UDP
+# 30120 to server.bind_address:30120.
+listing_ip_override = "203.0.113.10"
+```
 
-### How `verified` talks to the component (technical)
+`listing_ip_override` may equal `bind_address` on a directly addressed host. On
+a NAT deployment they are normally different.
 
-- BASTON writes a private launch config carrying your `sv_licenseKey` (kept off
-  the command line and out of every log) and starts the genuine `FXServer.exe`
-  **off the public server list** (`sv_master1 ""`, never `sv_lan` — LAN mode
-  would suppress the very licence validation we rely on), bound to a private
-  localhost port (`sidecar_port`) so it never clashes with BASTON's public port.
-- The component validates the key against CFX exactly as it always does, and
-  publishes the verdict locally as the `sv_licenseKeyToken` convar.
-- A tiny materialised resource (`baston-cfx-shim`) reads that convar and answers
-  BASTON over a **file-drop** channel (request/response files under its `ipc/`
-  dir). This is used because the CitizenFX server Lua sandbox exposes no
-  `io.read`; it runs only at boot (and, for escrow, at resource load) — never on
-  a hot path, so it does not affect BASTON's runtime performance.
-- BASTON reads the verdict and **fails closed**: no valid token within the
-  startup budget → it refuses to start.
+### Modes
 
-Run several BASTON instances on one host? Give each a distinct `sidecar_port`.
+| Mode | Behaviour | Production identity |
+|---|---|---|
+| `off` | No server-licence check; startup warning | No |
+| `gate` | Validates only the configured key's shape | No |
+| `verified` | Requires a genuine FXServer broker and a valid token | Yes |
 
-## What gets enforced
+`public_listing = true` is accepted only with `mode = "verified"`, a concrete
+unicast `listing_ip_override`, a concrete non-loopback `bind_address`, and the
+same TCP/UDP game port.
 
-- **Validity gate** — on a valid licence, BASTON starts; otherwise it refuses.
-  This is the clean, locally-readable signal (`sv_licenseKeyToken` present).
-- **Slot cap** — if the licence entitlement reports a maximum slot count,
-  `max_players` is capped to it (never raised). If no entitlement signal is
-  locally available, `max_players` is left as configured — BASTON presumes
-  **no** grant it can't confirm.
-- **Features** — a feature stays enabled only if it is both requested and
-  granted. Unconfirmed grants never enable anything.
+## Slots and client entitlements
 
-## Out of scope (deliberately not implemented) — the compliance boundary
+The policy names are mapped to the same slot ceilings used by the public CFX
+server code:
 
-The following are **not** done by BASTON, because doing them from a non-FXServer
-binary would require impersonating FXServer to CFX (spoofing) or replaying
-platform tokens — outside the legal line above:
+| Authenticated policy | Ceiling |
+|---|---:|
+| base | 48 |
+| `onesync` | 64 |
+| `onesync_plus` or `onesync_medium` | 128 |
+| `onesync_big` | 2048 |
 
-- **Public server-list presence** (registering on the CFX server list).
-- **Client policy features via `policy-live`** (e.g. custom-clothing streaming,
-  pool increases).
+Baston only lowers the configured value. It never raises `max_players` beyond
+the operator's setting.
 
-Realising these cleanly requires either running a **genuine FXServer as the
-network-facing front** (which *is* legitimately the holder of CFX's trust
-chain), or an **explicit authorisation / API from CFX**. If you need them,
-contact CFX or front BASTON with a real FXServer — BASTON will not synthesise
-them.
+The token in `info.json` lets the standard FiveM client query its normal CFX
+policy, including granted streaming/clothing features. Baston retains unknown
+policy names instead of guessing their meaning. Server-side feature switches
+must still be implemented explicitly before Baston can enforce a new grant
+locally.
 
-> The reverse-engineered platform handshake in
-> [`cfx-platform-handshake.md`](cfx-platform-handshake.md) documents *how* that
-> closed flow works, but it is a **NON-retained** approach (ToS risk). It is kept
-> for reference only; the retained path is this document.
+## Live validation
+
+Use a real key through a local, uncommitted configuration:
+
+```powershell
+$env:BASTON_CONFIG = "C:\secure\baston.production.toml"
+cargo run --release -p baston-gateway
+```
+
+The broker-only smoke test accepts the secret exclusively through the process
+environment:
+
+```powershell
+$env:BASTON_TEST_FXSERVER = "C:\FXServer\FXServer.exe"
+$env:BASTON_TEST_LICENSE_KEY = "<real-key>"
+cargo test -p baston-cfx-platform real_fxserver_reports_licence_status -- --ignored --exact
+Remove-Item Env:BASTON_TEST_LICENSE_KEY
+```
+
+Verify the local contract without printing the token:
+
+```powershell
+$Info = Invoke-RestMethod "http://203.0.113.10:30120/info.json"
+$Info.vars.sv_maxClients
+[bool]$Info.vars.sv_licenseKeyToken
+```
+
+Then verify:
+
+- the effective slot value matches or is below the Keymaster entitlement;
+- the endpoint is reachable externally on both TCP and UDP;
+- the server appears in the CFX list after the normal heartbeat delay;
+- stopping the official broker also stops the authenticated gateway;
+- an invalid key prevents every public game listener from starting.
+
+Never paste a real licence key into an issue, log capture, test fixture, or
+tracked TOML file.
 
 ## Troubleshooting
 
-| Symptom | Cause / fix |
+| Symptom | Resolution |
 |---|---|
-| `[license] mode = "gate" requires a licence key` | Set `sv_license_key`, or use `mode = "off"` for dev. |
-| `sv_license_key does not look like a real CFX key` | Empty, placeholder, or malformed — paste your real key from the Portal. |
-| `[license] mode = "verified" but fxserver_path is not set` | Point `fxserver_path` at a real `FXServer.exe`. |
-| `[license] fxserver_path "..." not found` | Wrong path, or use `mode = "gate"`. |
-| `CFX licence check failed — refusing to start: ...` | The official component rejected the key (missing/invalid/banned) — verify it at the Portal. |
-| `mode = "verified"` warns "not validated on this build" | You're on Linux or built without `--features escrow`; the key passed the gate but was not sidecar-validated. Build the Windows `escrow` variant for real verification. |
-| `max_players capped N -> M (CFX licence entitlement)` | Working as intended — your licence grants fewer slots than configured. |
+| `mode = "verified" but fxserver_path is not set` | Point to an official `FXServer.exe`. |
+| The broker returns no authenticated token | Check the key and outbound CFX connectivity. |
+| Policy lookup falls back to 48 slots | Restore access to the official policy endpoint; Baston intentionally remains conservative. |
+| Public listing rejects `0.0.0.0` | Select the machine's concrete LAN/public interface in `server.bind_address`. |
+| Address already in use | Ensure Baston uses the concrete interface and no other process owns either that interface or `127.0.0.1` on the game port. |
+| Server is authenticated but absent from the list | Check NAT/firewall forwarding, `listing_ip_override`, and that the official broker remains alive. |

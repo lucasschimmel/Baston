@@ -309,6 +309,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "baston-cfx-platform"
+version = "0.1.0-alpha"
+dependencies = [
+ "base64",
+ "baston-core",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "baston-config"
 version = "0.1.0-alpha"
 dependencies = [
@@ -331,11 +345,11 @@ name = "baston-escrow-plugin"
 version = "0.1.0-alpha"
 dependencies = [
  "base64",
+ "baston-cfx-platform",
  "baston-core",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]
@@ -347,7 +361,9 @@ dependencies = [
  "axum 0.8.9",
  "axum-server",
  "base64",
+ "baston-cfx-platform",
  "baston-config",
+ "baston-core",
  "baston-protocol",
  "baston-scripting",
  "baston-voice",
@@ -466,6 +482,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "notify",
  "prost",
+ "rayon",
  "serde",
  "serde_json",
  "tempfile",
@@ -3743,6 +3760,7 @@ dependencies = [
  "http-body",
  "percent-encoding",
  "pin-project-lite",
+ "tokio",
  "tower-layer",
  "tower-service",
  "tracing",

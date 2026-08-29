@@ -1,0 +1,17 @@
+[package]
+name = "baston-cfx-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+baston-core = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+base64 = { workspace = true }
+reqwest = { workspace = true }
+tempfile = "3"
+
+[dev-dependencies]
+tokio = { workspace = true }

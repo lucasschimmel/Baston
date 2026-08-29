@@ -30,7 +30,7 @@ fn harness() -> Harness {
 }
 
 fn stub_command(h: &Harness) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_stub_sidecar"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_escrow_stub_sidecar"));
     cmd.env("BASTON_SIDECAR_IPC", &h.ipc);
     cmd.env("BASTON_SIDECAR_RES", &h.res);
     cmd

@@ -158,34 +158,30 @@ mode = "gate"
 sv_license_key = "cfxk_FILL_ME"
 ```
 
-Real verified mode is already configured in the local zone files with:
+Verified mode belongs to the gateway, not to individual zones. Configure the
+gateway's local, untracked TOML with:
 
 ```toml
-fxserver_path = "D:/Dev/Fivem/Servers/WTF/Artifacts/windows/31623/FXServer.exe"
-```
+[server]
+bind_address = "0.0.0.0"
 
-Zone A uses `sidecar_port = 30130`; zone B uses `sidecar_port = 30131`.
-
-To change it later:
-
-Edit `baston.zone-a.local.toml` and `baston.zone-b.local.toml`:
-
-```toml
 [license]
 mode = "verified"
 sv_license_key = "cfxk_FILL_ME"
 fxserver_path = "C:/FXServer/FXServer.exe"
 sidecar_port = 30130
+public_listing = false
 ```
 
-Use a different `sidecar_port` per zone, then build:
+Then build and run the gateway:
 
 ```powershell
-cargo build --release -p baston-zone --features escrow
+cargo run --release -p baston-gateway
 ```
 
-Run the mesh. Expected: the zone refuses to start if the official FXServer
-sidecar cannot validate the licence.
+Expected: the gateway refuses to open its game listeners if the official
+FXServer broker cannot validate the licence. Zone processes do not create
+additional licence identities. See `docs/licensing.md` for public-list mode.
 
 ## 7. Useful endpoints
 
