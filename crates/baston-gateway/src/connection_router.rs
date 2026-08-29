@@ -49,6 +49,31 @@ impl ConnectionRouter {
         previous
     }
 
+    /// Commit many reroutes under a single acquisition of the handoff lock.
+    ///
+    /// Recovering a dead zone moves every one of its players at once. Doing
+    /// that through [`Self::commit_handoff`] would take the global lock — and
+    /// emit a log line — once per player, serialising the whole cluster's
+    /// handoffs behind a recovery and turning a burst into a stall.
+    pub async fn commit_batch(&self, assignments: &[(u32, String)]) {
+        if assignments.is_empty() {
+            return;
+        }
+        let _guard = self.handoff_lock.lock().await;
+        let start = std::time::Instant::now();
+        for (source, zone) in assignments {
+            self.routing_table.insert(*source, zone.clone());
+        }
+        let held = start.elapsed();
+        metrics::histogram!("handoff_routing_lock_held_us").record(held.as_micros() as f64);
+        tracing::info!(
+            target: "gateway",
+            players = assignments.len(),
+            "routing_table batch updated (lock held {:.1}ms)",
+            held.as_secs_f64() * 1000.0
+        );
+    }
+
     pub fn remove(&self, source: u32) -> Option<String> {
         self.routing_table.remove(&source).map(|(_, z)| z)
     }

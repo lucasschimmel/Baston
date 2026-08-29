@@ -55,12 +55,19 @@ impl OwnershipMonitor {
     }
 
     /// Periodic task: reassign ownership at most once per interval.
-    pub async fn run(self) {
+    pub async fn run(self: Arc<Self>) {
         let mut interval = tokio::time::interval(self.interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
-            self.scan();
+            // The scan is CPU-bound and proportional to entities × players.
+            // Running it inline would block a tokio worker for the whole pass,
+            // which on a busy zone is long enough to delay the heartbeat and
+            // have the gateway declare this healthy zone dead.
+            let monitor = Arc::clone(&self);
+            if let Err(e) = tokio::task::spawn_blocking(move || monitor.scan()).await {
+                tracing::error!(target: "zone", error = %e, "ownership scan task failed");
+            }
         }
     }
 
@@ -68,14 +75,19 @@ impl OwnershipMonitor {
     /// on player disconnect.
     pub fn scan(&self) {
         let players = self.ingest.player_positions();
-        for entity in self.entity_manager.snapshot() {
-            // Player peds are always owned by their own client.
-            if entity.entity_type == EntityType::Player {
-                continue;
-            }
+        // Connection lookup is per entity, so it must not be a linear scan of
+        // the player list.
+        let connected: std::collections::HashSet<u32> =
+            players.iter().map(|(source, _)| *source).collect();
+        // Player peds are always owned by their own client, so they never take
+        // part in a reassignment — filtering here avoids cloning them at all.
+        for entity in self
+            .entity_manager
+            .snapshot_filtered(|entity| entity.entity_type != EntityType::Player)
+        {
             let owner_connected = entity
                 .network_owner
-                .is_some_and(|o| players.iter().any(|(s, _)| *s == o));
+                .is_some_and(|owner| connected.contains(&owner));
             let best = assign_network_owner(&entity, &players);
             // Reassign when the owner vanished, or when a closer player
             // exists (cadence-limited by the scan interval).

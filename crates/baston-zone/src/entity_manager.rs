@@ -160,6 +160,18 @@ impl EntityManager {
     }
 
     /// Snapshot of all live entities (used by ownership reassignment scans).
+    /// Clone only the entities matching `predicate`.
+    ///
+    /// A caller that discards most of the world — the ownership scan skips
+    /// every player ped — should not pay for cloning it first.
+    pub fn snapshot_filtered(&self, predicate: impl Fn(&EntityState) -> bool) -> Vec<EntityState> {
+        self.entities
+            .iter()
+            .filter(|entry| predicate(entry.value()))
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
     pub fn snapshot(&self) -> Vec<EntityState> {
         self.entities.iter().map(|e| e.value().clone()).collect()
     }

@@ -178,6 +178,25 @@ impl ZoneRegistry {
             .map(|z| z.zone_id.clone())
     }
 
+    /// Surviving zones and their capacity, for a one-shot rebalance.
+    ///
+    /// Recovery must not call [`Self::find_least_loaded_zone_excluding`] once
+    /// per player: `player_count` only refreshes on the 5-second heartbeat, so
+    /// every player in the burst would pick the same "least loaded" zone and
+    /// pile onto it. Callers take this list once and balance against their own
+    /// live tally instead.
+    pub async fn survivors(&self, exclude: Option<&str>) -> Vec<(String, u32)> {
+        let zones = self.zones.read().await;
+        let mut survivors: Vec<(String, u32)> = zones
+            .values()
+            .filter(|zone| Some(zone.zone_id.as_str()) != exclude)
+            .map(|zone| (zone.zone_id.clone(), zone.max_players))
+            .collect();
+        // Deterministic order so a rebalance is reproducible across runs.
+        survivors.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        survivors
+    }
+
     /// Clone of a zone's gRPC client (cheap: channels are ref-counted).
     pub async fn zone_client(&self, zone_id: &str) -> Option<ZoneServiceClient<Channel>> {
         self.zones

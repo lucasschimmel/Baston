@@ -127,8 +127,32 @@ impl StateAggregator {
             "StateAggregator: subscribed to {STATE_SUBJECT_WILDCARD}"
         );
         let mut messages = consumer.messages().await?;
+        // The consumer's filter matches every subject in the stream, so stream
+        // sequence numbers arrive contiguously. A jump therefore means the
+        // stream evicted batches before we read them — which is not a
+        // performance detail: a lost `DELETED` marker leaves a ghost entity in
+        // the aggregated world that nothing ever removes.
+        let mut last_sequence: Option<u64> = None;
         while let Some(message) = messages.next().await {
             let message = message?;
+            if let Ok(info) = message.info() {
+                if let Some(previous) = last_sequence {
+                    let expected = previous + 1;
+                    if info.stream_sequence > expected {
+                        let lost = info.stream_sequence - expected;
+                        tracing::error!(
+                            target: "nats",
+                            lost,
+                            expected,
+                            got = info.stream_sequence,
+                            "state batches were evicted before the aggregator read them — \
+                             deleted entities may linger in the aggregated world"
+                        );
+                        metrics::counter!("state_batches_lost_total").increment(lost);
+                    }
+                }
+                last_sequence = Some(info.stream_sequence);
+            }
             match bincode::serde::decode_from_slice::<Vec<DirtyEntity>, _>(
                 &message.payload,
                 bincode::config::standard(),
@@ -236,8 +260,11 @@ impl StateAggregator {
         let reliable = ops.iter().any(|op| !matches!(op, EntityOp::Delta(_)));
         let entity_count = ops.len();
         let packet = build_snapshot(&EntitySnapshot { tick, ops });
-        metrics::gauge!("entities_per_client", "source" => source.to_string())
-            .set(entity_count as f64);
+        // Deliberately unlabelled: a `source` label would make the series
+        // cardinality equal to the player count, so a 2000-slot server would
+        // create 2000 time series that churn on every reconnect. The
+        // distribution is what operators actually read.
+        metrics::histogram!("entities_per_client").record(entity_count as f64);
         metrics::counter!("snapshot_bytes_sent").increment(packet.len() as u64);
         tracing::trace!(
             target: "baston-gateway",
@@ -246,7 +273,13 @@ impl StateAggregator {
             bytes = packet.len(),
             "push loop"
         );
-        self.udp.send_to_source(source, 1, packet, reliable);
+        if reliable {
+            // Scope lifecycle changes must reach ENet; pure deltas are
+            // supersedable and use the independently bounded sync plane.
+            self.udp.control().send(source, 1, packet);
+        } else {
+            self.udp.sync().send(source, 1, packet);
+        }
     }
 }
 

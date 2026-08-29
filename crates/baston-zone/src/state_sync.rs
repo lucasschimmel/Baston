@@ -16,6 +16,23 @@ pub const STATE_STREAM_NAME: &str = "BASTON_STATE";
 /// Wildcard subject covering every zone's state topic.
 pub const STATE_SUBJECT_WILDCARD: &str = "baston.zone.*.state";
 
+/// How far back a lagging consumer may replay.
+const RETENTION: Duration = Duration::from_secs(5);
+/// Fastest cadence a zone is allowed to emit at (`tick_max_hz`).
+const MAX_EMIT_HZ: u64 = 120;
+/// Message ceiling per subject.
+///
+/// This must cover the whole [`RETENTION`] window at the fastest emit rate, or
+/// the age limit is decorative: the count limit evicts first and a consumer
+/// that falls behind by a fraction of a second silently loses batches. Losing
+/// one matters far more than the memory it costs, because a lost `DELETED`
+/// marker leaves a **permanent** ghost entity in the aggregated world — nothing
+/// downstream ever re-deletes it.
+const MAX_MESSAGES_PER_SUBJECT: i64 = (RETENTION.as_secs() * MAX_EMIT_HZ) as i64;
+/// Hard memory ceiling for the whole stream, so a pathological batch size or a
+/// zone count nobody planned for cannot exhaust the NATS server.
+const MAX_STREAM_BYTES: i64 = 256 * 1024 * 1024;
+
 /// Subject a given zone publishes on.
 pub fn state_subject(zone_id: &str) -> String {
     format!("baston.zone.{zone_id}.state")
@@ -27,8 +44,9 @@ pub async fn setup_nats_stream(client: &async_nats::Client) -> Result<(), ZoneEr
     js.get_or_create_stream(async_nats::jetstream::stream::Config {
         name: STATE_STREAM_NAME.to_string(),
         subjects: vec![STATE_SUBJECT_WILDCARD.to_string()],
-        max_age: Duration::from_secs(5),
-        max_messages_per_subject: 10,
+        max_age: RETENTION,
+        max_messages_per_subject: MAX_MESSAGES_PER_SUBJECT,
+        max_bytes: MAX_STREAM_BYTES,
         storage: async_nats::jetstream::stream::StorageType::Memory,
         ..Default::default()
     })
