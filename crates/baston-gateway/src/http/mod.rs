@@ -6,6 +6,7 @@ mod configuration;
 mod files;
 mod info;
 mod packfile_cache;
+mod resource_endpoint;
 mod stream_cache;
 
 pub use packfile_cache::PackfileCache;
@@ -15,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::Method;
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use axum::Router;
 use baston_config::BastonConfig;
 use baston_core::license::LicenseKeyToken;
@@ -86,6 +87,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/admin/player/{source}/drop",
             post(client::admin_drop_player),
+        )
+        // Resource-owned endpoints (SetHttpHandler). Last, and matched only
+        // when no static gateway route claims the path.
+        .route("/{resource}", any(resource_endpoint::serve_resource_root))
+        .route(
+            "/{resource}/{*path}",
+            any(resource_endpoint::serve_resource_path),
         )
         // CORS for the FiveM CEF browser and cross-origin info.json reads.
         // Any origin, but only the methods we actually serve and no arbitrary

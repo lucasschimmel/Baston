@@ -94,6 +94,22 @@ pub struct SharedEntityWorld(pub Arc<crate::EntityWorldView>);
 #[derive(Clone)]
 pub struct SharedWorldControl(pub Arc<dyn crate::WorldControl>);
 
+/// Persistent per-resource key/value store (`*ResourceKvp*` natives).
+#[derive(Clone)]
+pub struct SharedKvp(pub Arc<crate::KvpStore>);
+
+/// Outbound HTTP bridge (`PerformHttpRequest`).
+///
+/// `None` means no worker is wired, in which case the natives refuse instead
+/// of handing back a token nobody will ever resolve.
+#[derive(Clone)]
+pub struct SharedHttp(pub Option<crate::HttpBridge>);
+
+/// Inbound HTTP handler registry (`SetHttpHandler`). Shared with the gateway,
+/// which owns the route that feeds it.
+#[derive(Clone)]
+pub struct SharedHttpHandlers(pub Arc<crate::HttpHandlerRegistry>);
+
 /// Server-side voice control surface backing the `MUMBLE_*` natives. The
 /// gateway implements this on the baston-voice handle so baston-scripting
 /// stays decoupled from the voice crate. `None` = voice disabled: the natives
@@ -604,6 +620,79 @@ deno_core::extension!(
     ]
 );
 
+// --- 8. inbound HTTP (`SetHttpHandler`) ---
+
+/// `SetHttpHandler(handler)` — the callback stays JS-side; Rust only needs to
+/// know this resource answers requests, so the gateway route can 404 the
+/// others instead of dispatching an event nobody handles.
+#[op2(fast)]
+fn op_set_http_handler(state: &mut OpState) {
+    let resource = state.borrow::<RuntimeContext>().resource_name.clone();
+    state.borrow::<SharedHttpHandlers>().0.register(&resource);
+    tracing::debug!(target: "http", %resource, "resource registered an HTTP handler");
+}
+
+/// `response.send()` — resolve the parked request. Headers arrive as a JSON
+/// object because a header map is not an op-native type; a malformed one costs
+/// the headers, not the response.
+#[op2(fast)]
+fn op_http_response(
+    state: &mut OpState,
+    id: u32,
+    status: u32,
+    #[string] headers_json: String,
+    #[string] body: String,
+) {
+    let headers = serde_json::from_str::<serde_json::Value>(&headers_json)
+        .ok()
+        .and_then(|v| v.as_object().cloned())
+        .map(|map| {
+            map.into_iter()
+                .map(|(name, value)| {
+                    let value = match value {
+                        serde_json::Value::String(s) => s,
+                        // `writeHead` accepts an array for repeated headers.
+                        serde_json::Value::Array(items) => items
+                            .iter()
+                            .map(|item| match item {
+                                serde_json::Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        other => other.to_string(),
+                    };
+                    (name, value)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let status = u16::try_from(status).unwrap_or(500);
+    let delivered = state.borrow::<SharedHttpHandlers>().0.complete(
+        id,
+        crate::ScriptHttpResponse {
+            status,
+            headers,
+            body,
+        },
+    );
+    if !delivered {
+        // Either a double send() or an answer past the gateway's deadline.
+        // Both are silent in FXServer; say it once here rather than leaving it
+        // undiagnosable.
+        let resource = &state.borrow::<RuntimeContext>().resource_name;
+        tracing::debug!(
+            target: "http",
+            resource,
+            id,
+            "HTTP response discarded: the request is no longer waiting"
+        );
+    }
+}
+
+deno_core::extension!(baston_http, ops = [op_set_http_handler, op_http_response]);
+
 deno_core::extension!(
     baston_deferrals,
     ops = [
@@ -625,5 +714,6 @@ pub fn all_extensions() -> Vec<deno_core::Extension> {
         baston_players::init(),
         baston_deferrals::init(),
         baston_mesh::init(),
+        baston_http::init(),
     ]
 }

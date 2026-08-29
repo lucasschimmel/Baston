@@ -122,6 +122,15 @@ pub struct ScriptHost {
     /// Resources loaded before then get the inert control, which refuses
     /// entity creation rather than pretending to succeed.
     world_control: Arc<std::sync::RwLock<Arc<dyn crate::WorldControl>>>,
+    /// Persistent KVP store, set by the composition root once its path is
+    /// known. Resources loaded before then get an in-memory store.
+    kvp: Arc<std::sync::RwLock<Arc<crate::KvpStore>>>,
+    /// Outbound HTTP bridge, set by the composition root that owns the worker.
+    http: Arc<std::sync::RwLock<Option<crate::HttpBridge>>>,
+    /// Inbound HTTP handlers (`SetHttpHandler`). Always present: registration
+    /// is driven by the resources themselves, and the gateway reads it to
+    /// decide whether a request has anywhere to go.
+    http_handlers: Arc<crate::HttpHandlerRegistry>,
     started_at: Instant,
     cross_zone: Arc<std::sync::RwLock<Option<CrossZonePublisher>>>,
     voice: Arc<std::sync::RwLock<Option<Arc<dyn crate::extensions::VoiceControl>>>>,
@@ -188,6 +197,11 @@ impl ScriptHost {
             routing,
             entity_world: Arc::new(crate::EntityWorldView::new()),
             world_control: Arc::new(std::sync::RwLock::new(Arc::new(crate::NoWorldControl))),
+            kvp: Arc::new(std::sync::RwLock::new(Arc::new(
+                crate::KvpStore::in_memory(),
+            ))),
+            http: Arc::new(std::sync::RwLock::new(None)),
+            http_handlers: Arc::new(crate::HttpHandlerRegistry::new()),
             started_at: Instant::now(),
             cross_zone: Arc::new(std::sync::RwLock::new(None)),
             voice: Arc::new(std::sync::RwLock::new(None)),
@@ -211,6 +225,67 @@ impl ScriptHost {
 
     fn world_control(&self) -> Arc<dyn crate::WorldControl> {
         Arc::clone(&self.world_control.read().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// Install the persistent KVP store. Applies to resources loaded
+    /// afterwards, so the composition root must call this before the first
+    /// `load_resource` or a resource will write to a store nobody persists.
+    pub fn set_kvp_store(&self, kvp: Arc<crate::KvpStore>) {
+        *self.kvp.write().unwrap_or_else(|e| e.into_inner()) = kvp;
+    }
+
+    /// The store shared by every resource isolate.
+    pub fn kvp(&self) -> Arc<crate::KvpStore> {
+        Arc::clone(&self.kvp.read().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// Install the outbound HTTP bridge. Applies to resources loaded
+    /// afterwards.
+    pub fn set_http_bridge(&self, bridge: crate::HttpBridge) {
+        *self.http.write().unwrap_or_else(|e| e.into_inner()) = Some(bridge);
+    }
+
+    fn http(&self) -> Option<crate::HttpBridge> {
+        self.http.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// The inbound HTTP handler registry, shared with the gateway route that
+    /// feeds it.
+    pub fn http_handlers(&self) -> Arc<crate::HttpHandlerRegistry> {
+        Arc::clone(&self.http_handlers)
+    }
+
+    /// Dispatch an event into one resource only.
+    ///
+    /// Broadcasting would work — the token in the payload is meaningless to
+    /// anyone else — but an HTTP reply is addressed to exactly one resource,
+    /// and waking every isolate for it would put a slow endpoint's latency on
+    /// the whole server.
+    pub async fn trigger_event_on(
+        &self,
+        resource: &str,
+        event: &str,
+        args: &[serde_json::Value],
+    ) -> Result<(), ScriptError> {
+        let args_json =
+            serde_json::to_string(args).map_err(|e| ScriptError::HostStart(e.to_string()))?;
+        let queued = {
+            let runtimes = self.runtimes.read().await;
+            let Some(handle) = runtimes.get(resource) else {
+                // The resource stopped while the request was in flight. Not an
+                // error: there is simply nobody left to tell.
+                return Ok(());
+            };
+            handle
+                .send(|reply| RuntimeCommand::DispatchEvent {
+                    event: event.to_owned(),
+                    args_json,
+                    reply,
+                })
+                .await?
+        };
+        self.rebroadcast(queued).await;
+        Ok(())
     }
 
     pub fn observability(&self) -> Arc<Observability> {
@@ -363,6 +438,9 @@ impl ScriptHost {
         // normal path; this keeps load idempotent regardless).
         self.runtimes.write().await.remove(name);
         self.state_bags.cleanup_resource(name);
+        // A reload starts from no handler: the new isolate re-registers only
+        // if it still calls SetHttpHandler.
+        self.http_handlers.unregister(name);
 
         let handle = spawn_runtime_thread(RuntimeThreadParams {
             resource_name: name,
@@ -377,6 +455,9 @@ impl ScriptHost {
             routing: Arc::clone(&self.routing),
             entity_world: Arc::clone(&self.entity_world),
             world_control: self.world_control(),
+            kvp: self.kvp(),
+            http: self.http(),
+            http_handlers: Arc::clone(&self.http_handlers),
             voice: self.voice.read().unwrap_or_else(|e| e.into_inner()).clone(),
         })?;
         let mut queued = handle
@@ -408,6 +489,9 @@ impl ScriptHost {
         .await?;
         self.runtimes.write().await.remove(name);
         self.state_bags.cleanup_resource(name);
+        // Its route must stop answering with the isolate gone, or the next
+        // request parks a waiter nobody can ever resolve.
+        self.http_handlers.unregister(name);
         tracing::info!(target: "scripting", resource = %name, "resource unloaded");
         Ok(())
     }
@@ -641,6 +725,9 @@ struct RuntimeThreadParams<'a> {
     routing: Arc<dyn RoutingControl>,
     entity_world: Arc<crate::EntityWorldView>,
     world_control: Arc<dyn crate::WorldControl>,
+    kvp: Arc<crate::KvpStore>,
+    http: Option<crate::HttpBridge>,
+    http_handlers: Arc<crate::HttpHandlerRegistry>,
     voice: Option<Arc<dyn crate::extensions::VoiceControl>>,
 }
 
@@ -662,6 +749,9 @@ fn spawn_runtime_thread(
         routing,
         entity_world,
         world_control,
+        kvp,
+        http,
+        http_handlers,
         voice,
         ..
     } = params;
@@ -692,7 +782,15 @@ fn spawn_runtime_thread(
                     }
                 };
             runtime.install_server_state(convars, resources);
-            runtime.install_shared_game_state(state_bags, routing, entity_world, world_control);
+            runtime.install_shared_game_state(crate::runtime::SharedGameState {
+                state_bags,
+                routing,
+                entity_world,
+                world_control,
+                kvp,
+                http,
+                http_handlers,
+            });
             runtime.install_voice(crate::extensions::SharedVoice(voice));
             let _ = init_tx.send(Ok(()));
 

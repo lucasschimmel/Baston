@@ -774,3 +774,178 @@ async fn set_entity_coords_updates_server_state_and_propagates_to_the_owner() {
     assert_eq!(hash, "0x06843DA7060A026B");
     assert_eq!(args[0], serde_json::json!(4243));
 }
+
+// --- HTTP natives ---
+
+/// `SetHttpHandler` end to end: the JS registers, Rust dispatches a request
+/// through the internal event, and the handler's `response.send()` resolves the
+/// parked waiter with the status, headers and body it wrote.
+#[tokio::test]
+async fn set_http_handler_answers_a_dispatched_request() {
+    let (host, _) = host();
+    host.load_resource(
+        "panel",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                SetHttpHandler((req, res) => {
+                    req.setDataHandler((body) => {
+                        res.writeHead(201, { 'Content-Type': 'application/json' })
+                        res.send(JSON.stringify({
+                            method: req.method,
+                            path: req.path,
+                            address: req.address,
+                            body,
+                        }))
+                    })
+                })
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load");
+
+    let registry = host.http_handlers();
+    assert!(registry.has_handler("panel"), "the resource registered");
+
+    let (id, reply) = registry.begin();
+    let request = serde_json::json!({
+        "id": id,
+        "method": "POST",
+        "path": "/callback",
+        "address": "203.0.113.7:52000",
+        "headers": { "x-test": "1" },
+        "body": "payload",
+    });
+    host.trigger_event_on("panel", baston_scripting::HTTP_REQUEST_EVENT, &[request])
+        .await
+        .expect("dispatch");
+
+    let response = tokio::time::timeout(Duration::from_secs(5), reply)
+        .await
+        .expect("the handler answered in time")
+        .expect("the waiter was not dropped");
+    assert_eq!(response.status, 201);
+    assert_eq!(
+        response.headers,
+        vec![("Content-Type".to_owned(), "application/json".to_owned())]
+    );
+    let body: serde_json::Value = serde_json::from_str(&response.body).expect("json body");
+    assert_eq!(body["method"], "POST");
+    assert_eq!(body["path"], "/callback");
+    assert_eq!(body["address"], "203.0.113.7:52000");
+    assert_eq!(body["body"], "payload", "setDataHandler received the body");
+}
+
+/// A stopped resource must stop answering, or the next request parks a waiter
+/// nobody can resolve.
+#[tokio::test]
+async fn unloading_a_resource_drops_its_http_handler() {
+    let (host, _) = host();
+    host.load_resource(
+        "panel",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: "SetHttpHandler(() => {})".into(),
+        }],
+    )
+    .await
+    .expect("load");
+    assert!(host.http_handlers().has_handler("panel"));
+
+    host.unload_resource("panel").await.expect("unload");
+    assert!(!host.http_handlers().has_handler("panel"));
+}
+
+/// The full `PerformHttpRequest` round trip minus the socket: the JS queues a
+/// request onto the bridge, and the reply event resolves its callback.
+#[tokio::test]
+async fn perform_http_request_queues_and_resolves_its_callback() {
+    let (host, _) = host();
+    let (bridge, mut requests) = baston_scripting::HttpBridge::new();
+    host.set_http_bridge(bridge);
+
+    host.load_resource(
+        "caller",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                const token = PerformHttpRequest(
+                    'https://api.test/v1/thing',
+                    (status, body, headers, err) => {
+                        SetResourceKvp('reply', `${status}|${body}|${headers['x-kind']}|${err}`)
+                    },
+                    'POST',
+                    { hello: 'world' },
+                    { 'Content-Type': 'application/json' }
+                )
+                SetResourceKvp('token', String(token))
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load");
+
+    let request = tokio::time::timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("the request reached the worker queue")
+        .expect("bridge open");
+    assert_eq!(request.resource, "caller");
+    assert_eq!(request.url, "https://api.test/v1/thing");
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.body, r#"{"hello":"world"}"#);
+    assert_eq!(
+        request.headers,
+        vec![("Content-Type".to_owned(), "application/json".to_owned())]
+    );
+
+    assert_eq!(
+        host.kvp().get("caller", "token"),
+        Some(request.token.to_string()),
+        "the script holds the same token the worker sees"
+    );
+
+    host.trigger_event_on(
+        "caller",
+        baston_scripting::HTTP_RESPONSE_EVENT,
+        &[
+            serde_json::json!(request.token),
+            serde_json::json!(200),
+            serde_json::json!("pong"),
+            serde_json::json!({ "x-kind": "test" }),
+            serde_json::Value::Null,
+        ],
+    )
+    .await
+    .expect("dispatch the reply");
+
+    assert_eq!(
+        host.kvp().get("caller", "reply"),
+        Some("200|pong|test|null".to_owned()),
+        "the callback ran with the worker's result"
+    );
+}
+
+/// Without a worker the native must refuse rather than hand back a token that
+/// never resolves — a script waiting on that callback would hang forever.
+#[tokio::test]
+async fn perform_http_request_without_a_worker_refuses() {
+    let (host, _) = host();
+    host.load_resource(
+        "caller",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                const token = PerformHttpRequest('https://api.test/', () => {})
+                SetResourceKvp('token', String(token))
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load");
+
+    assert_eq!(host.kvp().get("caller", "token"), Some("0".to_owned()));
+}

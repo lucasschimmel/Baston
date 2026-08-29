@@ -119,6 +119,30 @@ async fn main() -> anyhow::Result<()> {
     if let Some(voice) = &voice {
         script_host.set_voice_control(Arc::new(GatewayVoice(voice.clone())));
     }
+    // Resource KVP is durable storage from a script's point of view, so it has
+    // to be loaded before the first resource runs and swept afterwards: a
+    // deferred write must not sit in memory until a crash takes it.
+    {
+        let kvp = Arc::new(baston_scripting::KvpStore::open(
+            config.resources.kvp_path.clone(),
+        ));
+        script_host.set_kvp_store(Arc::clone(&kvp));
+        baston_scripting::KvpStore::spawn_periodic_flush(
+            kvp,
+            std::time::Duration::from_secs(config.resources.kvp_flush_interval_secs.max(1)),
+        );
+    }
+    // Outbound HTTP (`PerformHttpRequest`). Wired before the first resource
+    // starts, because a resource's onResourceStart routinely calls out.
+    {
+        let (bridge, requests) = baston_scripting::HttpBridge::new();
+        script_host.set_http_bridge(bridge);
+        baston_gateway::script_http::spawn_worker(
+            requests,
+            script_host.clone(),
+            baston_gateway::script_http::OutboundHttpPolicy::new(&config.resources),
+        );
+    }
     let resource_manager = ResourceManager::new(script_host.clone(), config.resources.path.clone());
 
     resource_manager.discover().await?;
@@ -500,7 +524,14 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!(%addr, "HTTPS gateway listening");
             let server = axum_server::from_tcp_rustls(tcp_listener, tls_config);
             let _ = http_ready_tx.send(());
-            server.serve(router(http_state).into_make_service()).await?;
+            // Connect info, so a resource's HTTP handler sees the peer address
+            // the way FXServer reports `request.address`.
+            server
+                .serve(
+                    router(http_state)
+                        .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .await?;
         } else {
             // Plain HTTP is the Phase B-validated mode: the FiveM client sends
             // some game-port requests in plaintext, and getConfiguration hands
@@ -508,7 +539,11 @@ async fn main() -> anyhow::Result<()> {
             let listener = tokio::net::TcpListener::from_std(tcp_listener)?;
             tracing::info!(%addr, "HTTP gateway listening");
             let _ = http_ready_tx.send(());
-            axum::serve(listener, router(http_state)).await?;
+            axum::serve(
+                listener,
+                router(http_state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await?;
         }
         Ok::<(), anyhow::Error>(())
     });

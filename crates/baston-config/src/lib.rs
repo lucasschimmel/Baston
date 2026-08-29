@@ -776,6 +776,66 @@ pub struct ResourcesConfig {
     /// Maximum number of concurrent resource-file streams.
     #[serde(default = "default_file_download_concurrency")]
     pub file_download_concurrency: usize,
+    /// Where the persistent resource KVP lives.
+    ///
+    /// Scripts treat `SetResourceKvp` as durable storage, so this file holds
+    /// real player data: back it up with the rest of the server state.
+    #[serde(default = "default_kvp_path")]
+    pub kvp_path: PathBuf,
+    /// How often a KVP store with pending `_NO_SYNC` writes is flushed.
+    ///
+    /// Bounds what a crash can cost: at most this much deferred data, never
+    /// the whole session.
+    #[serde(default = "default_kvp_flush_interval_secs")]
+    pub kvp_flush_interval_secs: u64,
+    /// Deadline for one outbound `PerformHttpRequest`.
+    ///
+    /// A resource's callback fires with an error once it expires, so a dead
+    /// endpoint costs a slot for this long rather than forever.
+    #[serde(default = "default_http_request_timeout_secs")]
+    pub http_request_timeout_secs: u64,
+    /// How many outbound requests may be in flight at once. Beyond this they
+    /// queue; the queue itself is bounded inside the bridge.
+    #[serde(default = "default_http_concurrency")]
+    pub http_concurrency: usize,
+    /// Cap on an outbound response body. A larger response is refused rather
+    /// than buffered, because the whole body crosses into a V8 isolate.
+    #[serde(default = "default_http_response_max_bytes")]
+    pub http_response_max_bytes: usize,
+    /// Deadline for a resource's `SetHttpHandler` callback to answer.
+    #[serde(default = "default_http_handler_timeout_secs")]
+    pub http_handler_timeout_secs: u64,
+    /// Cap on an inbound request body handed to a resource handler.
+    #[serde(default = "default_http_request_max_bytes")]
+    pub http_request_max_bytes: usize,
+}
+
+fn default_http_request_timeout_secs() -> u64 {
+    30
+}
+
+fn default_http_concurrency() -> usize {
+    32
+}
+
+fn default_http_response_max_bytes() -> usize {
+    5 * 1024 * 1024
+}
+
+fn default_http_handler_timeout_secs() -> u64 {
+    15
+}
+
+fn default_http_request_max_bytes() -> usize {
+    1024 * 1024
+}
+
+fn default_kvp_path() -> PathBuf {
+    PathBuf::from("baston-kvp.json")
+}
+
+fn default_kvp_flush_interval_secs() -> u64 {
+    30
 }
 
 impl ResourcesConfig {
@@ -797,6 +857,30 @@ impl ResourcesConfig {
             return Err(ConfigError::Invalid {
                 section: "resources",
                 reason: "file_download_concurrency must be greater than zero".to_owned(),
+            });
+        }
+        // Zero here would mean "give up before starting"; a resource would see
+        // every request fail with a timeout it never asked for.
+        if self.http_request_timeout_secs == 0 || self.http_handler_timeout_secs == 0 {
+            return Err(ConfigError::Invalid {
+                section: "resources",
+                reason: "http_request_timeout_secs and http_handler_timeout_secs must be greater \
+                         than zero"
+                    .to_owned(),
+            });
+        }
+        if self.http_concurrency == 0 {
+            return Err(ConfigError::Invalid {
+                section: "resources",
+                reason: "http_concurrency must be greater than zero".to_owned(),
+            });
+        }
+        if self.http_response_max_bytes == 0 || self.http_request_max_bytes == 0 {
+            return Err(ConfigError::Invalid {
+                section: "resources",
+                reason: "http_response_max_bytes and http_request_max_bytes must be greater than \
+                         zero"
+                    .to_owned(),
             });
         }
         Ok(())
@@ -1034,6 +1118,13 @@ impl Default for ResourcesConfig {
             file_download_timeout_secs: default_file_download_timeout_secs(),
             file_download_chunk_bytes: default_file_download_chunk_bytes(),
             file_download_concurrency: default_file_download_concurrency(),
+            kvp_path: default_kvp_path(),
+            kvp_flush_interval_secs: default_kvp_flush_interval_secs(),
+            http_request_timeout_secs: default_http_request_timeout_secs(),
+            http_concurrency: default_http_concurrency(),
+            http_response_max_bytes: default_http_response_max_bytes(),
+            http_handler_timeout_secs: default_http_handler_timeout_secs(),
+            http_request_max_bytes: default_http_request_max_bytes(),
         }
     }
 }

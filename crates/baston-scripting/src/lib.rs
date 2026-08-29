@@ -11,6 +11,9 @@ mod entity_world;
 mod error;
 mod extensions;
 mod host;
+mod http_bridge;
+mod http_handler;
+mod kvp;
 pub mod net_bridge;
 pub mod observability;
 mod resource_registry;
@@ -24,13 +27,19 @@ pub use entity_world::{
 pub use error::ScriptError;
 pub use extensions::{SharedVoice, VoiceControl};
 pub use host::{ScriptHost, ScriptSource};
+pub use http_bridge::{
+    parse_request as parse_http_request, HttpBridge, HttpReply, HttpRequest, HttpRequestSpec,
+    HTTP_RESPONSE_EVENT,
+};
+pub use http_handler::{HttpHandlerRegistry, ScriptHttpResponse, HTTP_REQUEST_EVENT};
+pub use kvp::KvpStore;
 pub use net_bridge::{NetBridge, NetOutbound};
 pub use observability::{
     DispatchKind, HandlerPerfStats, Observability, ProfilerRecordOptions, ProfilerStatus,
     ResMonSnapshot, ResourcePerfStats,
 };
 pub use resource_registry::{ResourceRegistry, ScriptResourceState};
-pub use runtime::ScriptRuntime;
+pub use runtime::{ScriptRuntime, SharedGameState};
 pub use state_bag::{
     entity_from_state_bag_name, entity_state_bag_name, player_from_state_bag_name,
     player_state_bag_name, InMemoryRoutingControl, RoutingControl, RoutingLockdownMode,

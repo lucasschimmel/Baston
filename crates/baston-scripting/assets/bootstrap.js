@@ -1104,6 +1104,132 @@
   globalThis.SetPedHeadOverlayColor = (...args) =>
     InvokeCfxServerNative("_SET_PED_HEAD_OVERLAY_COLOR", "void", args);
 
+  // --- HTTP ---
+  //
+  // Defined after the generated native table on purpose: SetHttpHandler has a
+  // raw entry there, and the friendly object-based version below must win.
+
+  // Outbound: token -> callback, filled by PerformHttpRequest and drained by
+  // the __cfx_internal:httpResponse event the Rust worker dispatches.
+  const httpCallbacks = new Map();
+
+  function normalizeHeaders(headers) {
+    if (!headers || typeof headers !== "object") return {};
+    const out = {};
+    for (const [name, value] of Object.entries(headers)) {
+      out[name] = Array.isArray(value) ? value.join(", ") : String(value);
+    }
+    return out;
+  }
+
+  /**
+   * PerformHttpRequest(url, cb, method, data, headers)
+   *
+   * cb is called as (statusCode, responseText, responseHeaders, errorData).
+   * A request that could not be queued calls back immediately with status 0
+   * rather than silently never resolving.
+   */
+  globalThis.PerformHttpRequest = (url, cb, method, data, headers) => {
+    const request = {
+      url: String(url),
+      method: method ? String(method) : "GET",
+      data: data == null ? "" : typeof data === "string" ? data : JSON.stringify(data),
+      headers: normalizeHeaders(headers),
+    };
+    const token = InvokeCfxServerNative(
+      "PERFORM_HTTP_REQUEST_INTERNAL",
+      "int",
+      [JSON.stringify(request), 0]
+    );
+    if (!token) {
+      if (typeof cb === "function") {
+        Promise.resolve().then(() =>
+          cb(0, "", {}, "the HTTP request could not be queued")
+        );
+      }
+      return 0;
+    }
+    if (typeof cb === "function") httpCallbacks.set(token, cb);
+    return token;
+  };
+
+  AddEventHandler(
+    "__cfx_internal:httpResponse",
+    (token, status, body, headers, errorData) => {
+      const cb = httpCallbacks.get(token);
+      if (!cb) return;
+      httpCallbacks.delete(token);
+      cb(status, body, headers || {}, errorData ?? null);
+    }
+  );
+
+  // Inbound: the resource's own HTTP endpoint.
+  let httpHandler = null;
+
+  globalThis.SetHttpHandler = (handler) => {
+    if (typeof handler !== "function") {
+      throw new TypeError("SetHttpHandler: handler must be a function");
+    }
+    httpHandler = handler;
+    ops.op_set_http_handler();
+  };
+
+  function makeHttpResponse(id) {
+    let status = 200;
+    let headers = {};
+    const chunks = [];
+    let sent = false;
+    return {
+      writeHead(code, responseHeaders) {
+        status = code | 0;
+        if (responseHeaders) headers = normalizeHeaders(responseHeaders);
+      },
+      // Buffered until send(): the gateway answers the socket in one shot.
+      write(chunk) {
+        if (chunk != null) chunks.push(String(chunk));
+      },
+      send(chunk) {
+        if (sent) return;
+        sent = true;
+        if (chunk != null) chunks.push(String(chunk));
+        ops.op_http_response(id, status, JSON.stringify(headers), chunks.join(""));
+      },
+    };
+  }
+
+  AddEventHandler("__cfx_internal:httpRequest", (incoming) => {
+    const response = makeHttpResponse(incoming.id);
+    if (!httpHandler) {
+      // The registration was dropped between routing and dispatch.
+      response.writeHead(404, {});
+      response.send("");
+      return;
+    }
+    const request = {
+      address: incoming.address,
+      headers: incoming.headers,
+      method: incoming.method,
+      path: incoming.path,
+      // The body is already whole; hand it over on the microtask queue so a
+      // handler registering the callback after this returns still receives it.
+      setDataHandler(cb) {
+        if (typeof cb === "function") {
+          Promise.resolve().then(() => cb(incoming.body));
+        }
+      },
+      // Nothing cancels a buffered request, but resources call this
+      // unconditionally and must not crash on it.
+      setCancelHandler() {},
+    };
+    try {
+      httpHandler(request, response);
+    } catch (e) {
+      console.error(`[baston] error in HTTP handler: ${stringify(e)}`);
+      response.writeHead(500, {});
+      response.send("");
+    }
+  });
+
   // Phase A timer stubs: fire on the microtask queue, ignoring the delay.
   globalThis.setTimeout = (fn) => {
     Promise.resolve().then(fn);

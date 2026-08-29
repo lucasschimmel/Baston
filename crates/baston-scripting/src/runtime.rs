@@ -14,9 +14,9 @@ use dashmap::DashMap;
 use crate::deferrals::DeferralRegistry;
 use crate::error::ScriptError;
 use crate::extensions::{
-    all_extensions, RuntimeContext, SharedConvars, SharedDeferrals, SharedEntityWorld, SharedNet,
-    SharedObservability, SharedPlayers, SharedResources, SharedRouting, SharedStateBags,
-    SharedWorldControl,
+    all_extensions, RuntimeContext, SharedConvars, SharedDeferrals, SharedEntityWorld, SharedHttp,
+    SharedHttpHandlers, SharedKvp, SharedNet, SharedObservability, SharedPlayers, SharedResources,
+    SharedRouting, SharedStateBags, SharedWorldControl,
 };
 use crate::net_bridge::NetBridge;
 use crate::observability::{DispatchKind, DispatchMeasurement, Observability, V8MemoryStats};
@@ -191,6 +191,22 @@ pub struct DispatchTicket {
     pub meta: DispatchMeta,
 }
 
+/// The authoritative surfaces every resource isolate shares, installed once
+/// per isolate before any resource script runs.
+///
+/// All of it is cheap to clone (`Arc` handles or handles over one) — the host
+/// builds a fresh value per resource thread.
+pub struct SharedGameState {
+    pub state_bags: StateBagStore,
+    pub routing: Arc<dyn RoutingControl>,
+    pub entity_world: Arc<crate::EntityWorldView>,
+    pub world_control: Arc<dyn crate::WorldControl>,
+    pub kvp: Arc<crate::KvpStore>,
+    /// `None` until a composition root wires an outbound HTTP worker.
+    pub http: Option<crate::HttpBridge>,
+    pub http_handlers: Arc<crate::HttpHandlerRegistry>,
+}
+
 /// A single resource's V8 isolate with the BASTON extensions and bootstrap
 /// polyfills loaded. `!Send` — lives on the script-host thread only.
 pub struct ScriptRuntime {
@@ -263,6 +279,11 @@ impl ScriptRuntime {
             op_state.put(SharedRouting(Arc::new(InMemoryRoutingControl::default())));
             op_state.put(SharedEntityWorld(Arc::new(crate::EntityWorldView::new())));
             op_state.put(SharedWorldControl(Arc::new(crate::NoWorldControl)));
+            op_state.put(SharedKvp(Arc::new(crate::KvpStore::in_memory())));
+            op_state.put(SharedHttp(None));
+            op_state.put(SharedHttpHandlers(Arc::new(
+                crate::HttpHandlerRegistry::new(),
+            )));
         }
 
         js.execute_script("baston:bootstrap.js", BOOTSTRAP_JS)
@@ -297,19 +318,20 @@ impl ScriptRuntime {
     /// Install process-wide authoritative state shared by all resource
     /// isolates. The bootstrap is already loaded, but no resource script has
     /// run when the host calls this method.
-    pub fn install_shared_game_state(
-        &mut self,
-        state_bags: StateBagStore,
-        routing: Arc<dyn RoutingControl>,
-        entity_world: Arc<crate::EntityWorldView>,
-        world_control: Arc<dyn crate::WorldControl>,
-    ) {
+    ///
+    /// Grouped into [`SharedGameState`] rather than passed one by one: every
+    /// new authoritative surface lands here, and a growing positional
+    /// parameter list is how two of them end up swapped.
+    pub fn install_shared_game_state(&mut self, shared: SharedGameState) {
         let op_state = self.js.op_state();
         let mut op_state = op_state.borrow_mut();
-        op_state.put(SharedStateBags(state_bags));
-        op_state.put(SharedRouting(routing));
-        op_state.put(SharedEntityWorld(entity_world));
-        op_state.put(SharedWorldControl(world_control));
+        op_state.put(SharedStateBags(shared.state_bags));
+        op_state.put(SharedRouting(shared.routing));
+        op_state.put(SharedEntityWorld(shared.entity_world));
+        op_state.put(SharedWorldControl(shared.world_control));
+        op_state.put(SharedKvp(shared.kvp));
+        op_state.put(SharedHttp(shared.http));
+        op_state.put(SharedHttpHandlers(shared.http_handlers));
     }
 
     /// Install the voice control surface backing the `MUMBLE_*` natives.

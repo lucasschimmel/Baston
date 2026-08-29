@@ -11,6 +11,7 @@ pub mod mesh;
 pub mod mesh_forward;
 pub mod players;
 pub mod quadtree;
+pub mod script_http;
 pub mod state_aggregator;
 pub mod udp;
 pub mod voice;

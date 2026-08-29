@@ -10,19 +10,14 @@ use dashmap::DashMap;
 use deno_core::{op2, OpState};
 
 use super::{
-    rpc_natives, RuntimeContext, SharedEntityWorld, SharedPlayers, SharedRouting, SharedStateBags,
-    SharedVoice, SharedWorldControl, VoiceControl,
+    rpc_natives, RuntimeContext, SharedEntityWorld, SharedHttp, SharedKvp,
+    SharedPlayers, SharedRouting, SharedStateBags, SharedVoice, SharedWorldControl, VoiceControl,
 };
 use crate::ScriptEntityType;
 use crate::{
     entity_from_state_bag_name, entity_state_bag_name, player_from_state_bag_name, RoutingControl,
     RoutingLockdownMode, StateBagSource,
 };
-
-fn resource_kvp() -> &'static DashMap<String, String> {
-    static KVP: OnceLock<DashMap<String, String>> = OnceLock::new();
-    KVP.get_or_init(DashMap::new)
-}
 
 fn synthetic_entities() -> &'static DashMap<u32, serde_json::Value> {
     static ENTITIES: OnceLock<DashMap<u32, serde_json::Value>> = OnceLock::new();
@@ -32,10 +27,6 @@ fn synthetic_entities() -> &'static DashMap<u32, serde_json::Value> {
 fn next_synthetic_entity() -> u32 {
     static NEXT_ENTITY: AtomicU32 = AtomicU32::new(10_000);
     NEXT_ENTITY.fetch_add(1, Ordering::Relaxed)
-}
-
-fn kvp_key(resource: &str, key: &str) -> String {
-    format!("{resource}\0{key}")
 }
 
 fn json_args(args_json: &str) -> Vec<serde_json::Value> {
@@ -53,7 +44,7 @@ fn json_arg_f64(args: &[serde_json::Value], index: usize) -> f64 {
     args.get(index).and_then(|v| v.as_f64()).unwrap_or_default()
 }
 
-fn json_arg_i64(args: &[serde_json::Value], index: usize) -> i64 {
+pub(super) fn json_arg_i64(args: &[serde_json::Value], index: usize) -> i64 {
     args.get(index).and_then(|v| v.as_i64()).unwrap_or_default()
 }
 
@@ -70,7 +61,7 @@ pub(super) fn json_arg_netid(args: &[serde_json::Value], index: usize) -> u32 {
     }
 }
 
-fn json_arg_bool(args: &[serde_json::Value], index: usize) -> bool {
+pub(super) fn json_arg_bool(args: &[serde_json::Value], index: usize) -> bool {
     match args.get(index) {
         Some(serde_json::Value::Bool(b)) => *b,
         Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or_default() != 0,
@@ -87,7 +78,7 @@ pub(super) fn op_cfx_shared_native(
 ) -> String {
     let args = json_args(&args_json);
     let resource = state.borrow::<RuntimeContext>().resource_name.clone();
-    let kvp = resource_kvp();
+    let kvp = Arc::clone(&state.borrow::<SharedKvp>().0);
 
     let value = match name.as_str() {
         "ADD_CONVAR_CHANGE_LISTENER" => serde_json::json!(0),
@@ -126,7 +117,11 @@ pub(super) fn op_cfx_shared_native(
         }
         "DELETE_FUNCTION_REFERENCE" => serde_json::Value::Null,
         "DELETE_RESOURCE_KVP" | "DELETE_RESOURCE_KVP_NO_SYNC" => {
-            kvp.remove(&kvp_key(&resource, &json_arg_string(&args, 0)));
+            kvp.remove(
+                &resource,
+                &json_arg_string(&args, 0),
+                !name.ends_with("_NO_SYNC"),
+            );
             serde_json::Value::Null
         }
         "DUPLICATE_FUNCTION_REFERENCE" => serde_json::json!(json_arg_string(&args, 0)),
@@ -140,16 +135,13 @@ pub(super) fn op_cfx_shared_native(
             serde_json::Value::Null
         }
         "FIND_KVP" => {
-            let prefix = json_arg_string(&args, 0);
-            let mut keys: Vec<_> = kvp
-                .iter()
-                .filter_map(|entry| {
-                    let (res, key) = entry.key().split_once('\0')?;
-                    (res == resource.as_str() && key.starts_with(&prefix)).then(|| key.to_owned())
-                })
-                .collect();
-            keys.sort();
-            serde_json::json!(keys)
+            serde_json::json!(kvp.keys_with_prefix(&resource, &json_arg_string(&args, 0)))
+        }
+        // Force every deferred `_NO_SYNC` write out to disk. Blocking on
+        // purpose: the contract is that the data is durable when this returns.
+        "FLUSH_RESOURCE_KVP" => {
+            kvp.flush();
+            serde_json::Value::Null
         }
         "FORMAT_STACK_TRACE" => serde_json::json!(json_arg_string(&args, 0)),
         "GET_ENTITIES_IN_RADIUS"
@@ -175,18 +167,18 @@ pub(super) fn op_cfx_shared_native(
         )
         .unwrap_or_default()),
         "GET_RESOURCE_KVP_FLOAT" => kvp
-            .get(&kvp_key(&resource, &json_arg_string(&args, 0)))
+            .get(&resource, &json_arg_string(&args, 0))
             .and_then(|v| v.parse::<f64>().ok())
             .map(serde_json::Value::from)
             .unwrap_or_else(|| serde_json::json!(0.0)),
         "GET_RESOURCE_KVP_INT" => kvp
-            .get(&kvp_key(&resource, &json_arg_string(&args, 0)))
+            .get(&resource, &json_arg_string(&args, 0))
             .and_then(|v| v.parse::<i64>().ok())
             .map(serde_json::Value::from)
             .unwrap_or_else(|| serde_json::json!(0)),
         "GET_RESOURCE_KVP_STRING" => kvp
-            .get(&kvp_key(&resource, &json_arg_string(&args, 0)))
-            .map(|v| serde_json::json!(v.value().clone()))
+            .get(&resource, &json_arg_string(&args, 0))
+            .map(serde_json::Value::from)
             .unwrap_or(serde_json::Value::Null),
         "GET_STATE_BAG_VALUE" => state
             .borrow::<SharedStateBags>()
@@ -203,23 +195,29 @@ pub(super) fn op_cfx_shared_native(
             .contains_key(&json_arg_string(&args, 0), &json_arg_string(&args, 1))),
         "IS_DUPLICITY_VERSION" => serde_json::json!(true),
         "SET_RESOURCE_KVP" | "SET_RESOURCE_KVP_NO_SYNC" => {
-            kvp.insert(
-                kvp_key(&resource, &json_arg_string(&args, 0)),
+            kvp.set(
+                &resource,
+                &json_arg_string(&args, 0),
                 json_arg_string(&args, 1),
+                !name.ends_with("_NO_SYNC"),
             );
             serde_json::Value::Null
         }
         "SET_RESOURCE_KVP_FLOAT" | "SET_RESOURCE_KVP_FLOAT_NO_SYNC" => {
-            kvp.insert(
-                kvp_key(&resource, &json_arg_string(&args, 0)),
+            kvp.set(
+                &resource,
+                &json_arg_string(&args, 0),
                 json_arg_f64(&args, 1).to_string(),
+                !name.ends_with("_NO_SYNC"),
             );
             serde_json::Value::Null
         }
         "SET_RESOURCE_KVP_INT" | "SET_RESOURCE_KVP_INT_NO_SYNC" => {
-            kvp.insert(
-                kvp_key(&resource, &json_arg_string(&args, 0)),
+            kvp.set(
+                &resource,
+                &json_arg_string(&args, 0),
                 json_arg_i64(&args, 1).to_string(),
+                !name.ends_with("_NO_SYNC"),
             );
             serde_json::Value::Null
         }
@@ -492,10 +490,22 @@ pub(super) fn op_cfx_server_native(
         "GET_PLAYER_LAST_MSG" => serde_json::json!(0),
         "GET_PLAYER_TIME_IN_PURSUIT" => serde_json::json!(0),
         "GET_PLAYER_WANTED_LEVEL" => serde_json::json!(0),
-        "GET_SELECTED_PED_WEAPON" | "GET_CURRENT_PED_WEAPON" => serde_json::json!(0),
         "HAS_ENTITY_BEEN_MARKED_AS_NO_LONGER_NEEDED" => serde_json::json!(false),
         "IS_PLAYER_ACE_ALLOWED" => serde_json::json!(false),
         "IS_PLAYER_USING_SUPER_JUMP" => serde_json::json!(false),
+        // Outbound HTTP. Both forms carry the same JSON request object; the
+        // length argument of the non-Ex variant is redundant here because the
+        // string already arrived whole. Returns the correlation token the
+        // script matches its callback against, or 0 when the request could not
+        // be queued at all.
+        "PERFORM_HTTP_REQUEST_INTERNAL" | "PERFORM_HTTP_REQUEST_INTERNAL_EX" => {
+            let resource = state.borrow::<RuntimeContext>().resource_name.clone();
+            serde_json::json!(perform_http_request(
+                state,
+                &resource,
+                &json_arg_string(&args, 0)
+            ))
+        }
         "PRINT_STRUCTURED_TRACE" => {
             tracing::info!(target: "structured-trace", "{}", json_arg_string(&args, 0));
             serde_json::Value::Null
@@ -587,6 +597,30 @@ pub(super) fn op_cfx_server_native(
     };
 
     value.to_string()
+}
+
+/// Queue an outbound HTTP request and return its token.
+///
+/// `0` means the request never left: either no worker is wired, the request
+/// object was malformed, or the queue is saturated. Each case is logged, so a
+/// callback that never fires has a cause in the log rather than being a
+/// mystery.
+fn perform_http_request(state: &OpState, resource: &str, raw: &str) -> u32 {
+    let Some(bridge) = state.borrow::<SharedHttp>().0.clone() else {
+        unimplemented_native("PERFORM_HTTP_REQUEST_INTERNAL", "int", resource);
+        return 0;
+    };
+    let Some(spec) = crate::parse_http_request(resource, raw) else {
+        tracing::warn!(
+            target: "http",
+            resource,
+            "PerformHttpRequest called with a malformed request object"
+        );
+        return 0;
+    };
+    bridge
+        .submit(|token| spec.with_token(token))
+        .unwrap_or_default()
 }
 
 fn shared_world(state: &OpState) -> Arc<crate::EntityWorldView> {
