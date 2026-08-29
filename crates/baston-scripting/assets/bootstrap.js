@@ -34,6 +34,8 @@
   // event name -> Map<callbackId, fn>
   const eventHandlers = new Map();
   const commandHandlers = new Map();
+  const stateBagHandlers = new Map();
+  const stateBagCookies = new Map();
 
   function AddEventHandler(name, cb) {
     if (typeof cb !== "function") {
@@ -241,6 +243,62 @@
     if (pending.length) return Promise.all(pending);
   }
 
+  function AddStateBagChangeHandler(keyFilter, bagFilter, handler) {
+    if (typeof handler !== "function") {
+      throw new TypeError(
+        "AddStateBagChangeHandler: callback must be a function"
+      );
+    }
+    const callbackId = nextCallbackId++;
+    stateBagHandlers.set(callbackId, handler);
+    const cookie = ops.op_add_state_bag_change_handler(
+      keyFilter == null ? "" : String(keyFilter),
+      bagFilter == null ? "" : String(bagFilter),
+      callbackId
+    );
+    stateBagCookies.set(cookie, callbackId);
+    return cookie;
+  }
+
+  function RemoveStateBagChangeHandler(cookie) {
+    const numericCookie = Number(cookie) >>> 0;
+    if (ops.op_remove_state_bag_change_handler(numericCookie)) {
+      const callbackId = stateBagCookies.get(numericCookie);
+      stateBagCookies.delete(numericCookie);
+      if (callbackId !== undefined) stateBagHandlers.delete(callbackId);
+    }
+  }
+
+  function dispatchStateBagChanges() {
+    const deliveries = JSON.parse(ops.op_poll_state_bag_changes());
+    if (!deliveries.length) return;
+    const pending = [];
+    for (const delivery of deliveries) {
+      const handler = stateBagHandlers.get(delivery.callback_id);
+      if (!handler) continue;
+      const change = delivery.change;
+      try {
+        settleHandlerResult(
+          "stateBagChange",
+          handler(
+            change.bag,
+            change.key,
+            change.value,
+            0,
+            change.replicated
+          ),
+          pending
+        );
+      } catch (e) {
+        ops.op_report_handler_error();
+        console.error(
+          `[baston] error in state bag handler: ${stringify(e)}`
+        );
+      }
+    }
+    if (pending.length) return Promise.all(pending);
+  }
+
   // --- Zone transfer state (Phase D handoffs) ---
   // Resources register callbacks returning the state BASTON must carry to the
   // next zone. Collection merges all callbacks of this resource into one
@@ -270,6 +328,7 @@
     dispatchWithSource,
     dispatchPlayerConnecting,
     dispatchCommand,
+    dispatchStateBagChanges,
     collectZoneTransferState,
   };
   globalThis.RegisterZoneTransferState = RegisterZoneTransferState;
@@ -288,8 +347,7 @@
   globalThis.InvokeNativeOnClient = InvokeNativeOnClient;
   globalThis.AddConvarChangeListener = (conVarFilter, handler) =>
     InvokeCfxSharedNative("ADD_CONVAR_CHANGE_LISTENER", [conVarFilter, handler]);
-  globalThis.AddStateBagChangeHandler = (keyFilter, bagFilter, handler) =>
-    InvokeCfxSharedNative("ADD_STATE_BAG_CHANGE_HANDLER", [keyFilter, bagFilter, handler]);
+  globalThis.AddStateBagChangeHandler = AddStateBagChangeHandler;
   globalThis.CancelEvent = () => InvokeCfxSharedNative("CANCEL_EVENT", []);
   globalThis.DeleteFunctionReference = (referenceIdentity) =>
     InvokeCfxSharedNative("DELETE_FUNCTION_REFERENCE", [referenceIdentity]);
@@ -349,8 +407,7 @@
     InvokeCfxSharedNative("REGISTER_RESOURCE_AS_EVENT_HANDLER", [eventName]);
   globalThis.RemoveConvarChangeListener = (cookie) =>
     InvokeCfxSharedNative("REMOVE_CONVAR_CHANGE_LISTENER", [cookie]);
-  globalThis.RemoveStateBagChangeHandler = (cookie) =>
-    InvokeCfxSharedNative("REMOVE_STATE_BAG_CHANGE_HANDLER", [cookie]);
+  globalThis.RemoveStateBagChangeHandler = RemoveStateBagChangeHandler;
   globalThis.SetResourceKvp = (key, value) =>
     InvokeCfxSharedNative("SET_RESOURCE_KVP", [key, value]);
   globalThis.SetResourceKvpFloat = (key, value) =>
@@ -414,7 +471,12 @@
   globalThis.GetVehicleType = (vehicle) => "";
   globalThis.IsEntityPositionFrozen = (entity) => false;
   globalThis.IsVehicleEngineStarting = (vehicle) => false;
-  globalThis.NetworkGetEntityOwner = (entity) => 0;
+  // Backed by the authoritative entity mirror: it answers the net id of the
+  // client simulating the entity, or 0 when nothing does. Scripts use it the
+  // same way BASTON does internally — to know which client a context-routed
+  // native would reach.
+  globalThis.NetworkGetEntityOwner = (...args) =>
+    InvokeCfxServerNative("NETWORK_GET_ENTITY_OWNER", "Player", args);
   globalThis.GetConvar = (name, defaultValue) =>
     ops.op_get_convar(String(name), String(defaultValue ?? ""));
   globalThis.GetConvarInt = (name, defaultValue) =>
@@ -427,9 +489,15 @@
     ops.op_set_convar(String(name), String(value ?? ""));
   globalThis.SetConvarReplicated = globalThis.SetConvar;
   globalThis.SetConvarServerInfo = globalThis.SetConvar;
-  // GetPlayerPed(source): round trip to the player's client (Phase B).
+  // GetPlayerPed(source): answered from the server's own world mirror.
+  //
+  // Round-tripping to the client would return that client's *local* handle,
+  // which means nothing on the server, and would stall the calling resource
+  // for up to a second waiting on it. The mirror already knows which network
+  // id each player's ped is, and a network id is exactly what a server-side
+  // handle is here.
   globalThis.GetPlayerPed = (source) =>
-    InvokeNativeOnClient(source, "0x43A66C31C68491C0", [-1], true);
+    InvokeCfxServerNative("GET_PLAYER_PED", "Entity", [source]);
   globalThis.RegisterNetEvent = function () {}; // net events auto-registered
   globalThis.exports = exportsProxy;
   globalThis.GetCurrentResourceName = () => ops.op_get_current_resource_name();

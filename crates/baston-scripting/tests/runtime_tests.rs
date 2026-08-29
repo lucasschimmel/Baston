@@ -589,3 +589,188 @@ async fn stalled_client_native_does_not_block_other_events() {
 
     let _ = slow.await.expect("slow join");
 }
+
+// --- context-routed (RPC) natives ---
+
+/// Build a host whose outbound traffic the test can inspect.
+fn host_with_net() -> (
+    ScriptHost,
+    tokio::sync::mpsc::Receiver<baston_scripting::NetOutbound>,
+) {
+    let deferrals = Arc::new(DeferralRegistry::new());
+    let players = Arc::new(baston_protocol::PlayerDirectory::new());
+    let (net, net_rx) = baston_scripting::NetBridge::new();
+    let host = ScriptHost::spawn_with_net(deferrals, players, net).expect("host spawn");
+    (host, net_rx)
+}
+
+/// One entity the mirror reports as simulated by `owner`.
+fn owned_entity(network_id: u32, owner: u32) -> baston_scripting::EntitySummary {
+    baston_scripting::EntitySummary {
+        network_id,
+        owner,
+        entity_type: baston_scripting::ScriptEntityType::Ped,
+        position: [0.0; 3],
+        velocity: [0.0; 3],
+        routing_bucket: 0,
+        health: None,
+        armour: None,
+        model: None,
+    }
+}
+
+/// Decompose an `__baston:invokeNative` message into `(target, hash, args)`.
+fn invoke_native_call(outbound: baston_scripting::NetOutbound) -> (u32, String, serde_json::Value) {
+    let baston_scripting::NetOutbound::ClientEvent {
+        source,
+        event,
+        args_json,
+    } = outbound;
+    assert_eq!(event, "__baston:invokeNative");
+    let payload: serde_json::Value = serde_json::from_str(&args_json).expect("payload is JSON");
+    let call = payload[0].clone();
+    let hash = call["hash"].as_str().expect("hash").to_owned();
+    (source, hash, call["args"].clone())
+}
+
+/// A context-routed native whose entity has no owner must stay on the server:
+/// with no sync state published, nobody can execute it, and a server in that
+/// state must not spray undeliverable calls at clients.
+#[tokio::test]
+async fn entity_ctx_native_without_a_known_owner_is_not_dispatched() {
+    let (host, mut net_rx) = host_with_net();
+    host.load_resource(
+        "rpc-test",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            // SET_PED_ARMOUR is a pure client native: ctx = owner of args[0].
+            code: "AddEventHandler('armour', () => { SetPedArmour(4242, 50) })".into(),
+        }],
+    )
+    .await
+    .expect("load");
+
+    host.trigger_event("armour", &[]).await.expect("event");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), net_rx.recv())
+            .await
+            .is_err(),
+        "an unowned entity must not produce a client dispatch"
+    );
+
+    // Same call, same handle — but now a client owns it.
+    host.entity_world().publish([owned_entity(4242, 9)]);
+    host.trigger_event("armour", &[]).await.expect("event");
+
+    let outbound = tokio::time::timeout(Duration::from_secs(5), net_rx.recv())
+        .await
+        .expect("the owning client must receive the native")
+        .expect("net bridge open");
+    let (target, hash, args) = invoke_native_call(outbound);
+    assert_eq!(target, 9, "routed to the owner, not to the caller");
+    assert_eq!(hash, "0xCEA04D83135264CC");
+    // A script handle IS the network id, so the entity argument travels
+    // verbatim — there is no translation table on either side.
+    assert_eq!(args, serde_json::json!([4242, 50]));
+}
+
+/// `ctx.type == "Player"` natives address the player argument directly: the
+/// net id in `args[ctx.idx]` is already the target, no owner lookup involved.
+#[tokio::test]
+async fn player_ctx_native_is_dispatched_to_that_player() {
+    let (host, mut net_rx) = host_with_net();
+    host.load_resource(
+        "rpc-test",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: "AddEventHandler('wanted', () => { SetPlayerWantedLevel(7, 3, false) })".into(),
+        }],
+    )
+    .await
+    .expect("load");
+
+    host.trigger_event("wanted", &[]).await.expect("event");
+
+    let outbound = tokio::time::timeout(Duration::from_secs(5), net_rx.recv())
+        .await
+        .expect("player natives dispatch without any entity state")
+        .expect("net bridge open");
+    let (target, hash, args) = invoke_native_call(outbound);
+    assert_eq!(target, 7);
+    assert_eq!(hash, "0x39FF19C64EF7DA5B");
+    assert_eq!(args, serde_json::json!([7, 3, false]));
+}
+
+/// `NETWORK_GET_ENTITY_OWNER` is how a script predicts where a context native
+/// will land, so the JS global must read the real mirror instead of the
+/// pre-mirror stub that always answered 0.
+#[tokio::test]
+async fn network_get_entity_owner_reads_the_entity_mirror() {
+    let (host, mut net_rx) = host_with_net();
+    host.entity_world().publish([owned_entity(77, 3)]);
+    host.load_resource(
+        "owner-test",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                AddEventHandler('check', () => {
+                  if (NetworkGetEntityOwner(77) !== 3) throw new Error('owner not read')
+                  if (NetworkGetEntityOwner(78) !== 0) throw new Error('unknown handle must be 0')
+                  SetPlayerWantedLevel(NetworkGetEntityOwner(77), 1, false)
+                })
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load");
+
+    host.trigger_event("check", &[]).await.expect("event");
+
+    let outbound = tokio::time::timeout(Duration::from_secs(5), net_rx.recv())
+        .await
+        .expect("the handler must have run to completion")
+        .expect("net bridge open");
+    let (target, _, _) = invoke_native_call(outbound);
+    assert_eq!(target, 3);
+}
+
+/// `SET_ENTITY_COORDS` has real server-side behaviour (the synthetic store) and
+/// is a context native. Both must happen: the store keeps answering for
+/// script-created handles, and a networked entity's owner is told to move it.
+#[tokio::test]
+async fn set_entity_coords_updates_server_state_and_propagates_to_the_owner() {
+    let (host, mut net_rx) = host_with_net();
+    host.entity_world().publish([owned_entity(4243, 5)]);
+    host.load_resource(
+        "coords-test",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                AddEventHandler('move', () => {
+                  // A script-created handle: server-side store only, no owner.
+                  const obj = CreateObject(1, 1.0, 2.0, 3.0, false, false, false)
+                  SetEntityCoords(obj, 9.0, 8.0, 7.0, false, false, false, false)
+                  const [x] = GetEntityCoords(obj)
+                  if (x !== 9.0) throw new Error('server state was not updated')
+                  // A networked handle: must reach its owner.
+                  SetEntityCoords(4243, 1.0, 2.0, 3.0, false, false, false, false)
+                })
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load");
+
+    host.trigger_event("move", &[]).await.expect("event");
+
+    let outbound = tokio::time::timeout(Duration::from_secs(5), net_rx.recv())
+        .await
+        .expect("the owner must be told to move the entity")
+        .expect("net bridge open");
+    let (target, hash, args) = invoke_native_call(outbound);
+    assert_eq!(target, 5, "only the networked handle has an owner");
+    assert_eq!(hash, "0x06843DA7060A026B");
+    assert_eq!(args[0], serde_json::json!(4243));
+}

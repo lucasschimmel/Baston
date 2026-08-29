@@ -10,11 +10,14 @@
 //!
 //! Module layout: the heavyweight `Citizen.invokeNative` op groups live in
 //! [`natives_server`] (server-side natives + synthetic entity store) and
-//! [`natives_client`] (server → client native dispatch); everything else —
-//! shared context types and the smaller op groups — lives here.
+//! [`natives_client`] (server → client native dispatch); [`rpc_natives`] holds
+//! the CFX context-routing table that decides which client a "server" native is
+//! really executed on. Everything else — shared context types and the smaller
+//! op groups — lives here.
 
 mod natives_client;
 mod natives_server;
+mod rpc_natives;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -25,6 +28,7 @@ use deno_core::{op2, OpState};
 
 use crate::deferrals::DeferralRegistry;
 use crate::observability::Observability;
+use crate::{RoutingControl, StateBagStore};
 
 use natives_client::op_invoke_native_on_client;
 use natives_server::{op_cfx_server_native, op_cfx_shared_native};
@@ -71,6 +75,24 @@ pub struct SharedConvars(pub Arc<DashMap<String, String>>);
 
 /// Shared resource snapshot (`GetResourceState`, `LoadResourceFile`, ...).
 pub struct SharedResources(pub crate::resource_registry::ResourceRegistry);
+
+/// Shared state-bag store (one per script host).
+#[derive(Clone)]
+pub struct SharedStateBags(pub StateBagStore);
+
+/// Shared routing-bucket control surface.
+#[derive(Clone)]
+pub struct SharedRouting(pub Arc<dyn RoutingControl>);
+
+/// Shared read-only mirror of the authoritative networked world, backing the
+/// entity natives. Empty until a game state publishes into it, in which case
+/// entity natives report "no such entity" rather than fabricating an answer.
+#[derive(Clone)]
+pub struct SharedEntityWorld(pub Arc<crate::EntityWorldView>);
+
+/// Write side of the world: entity creation and deletion from scripts.
+#[derive(Clone)]
+pub struct SharedWorldControl(pub Arc<dyn crate::WorldControl>);
 
 /// Server-side voice control surface backing the `MUMBLE_*` natives. The
 /// gateway implements this on the baston-voice handle so baston-scripting
@@ -158,6 +180,45 @@ fn op_report_handler_error(state: &mut OpState) {
     state.borrow_mut::<RuntimeContext>().handler_errors += 1;
 }
 
+#[op2(fast)]
+fn op_add_state_bag_change_handler(
+    state: &mut OpState,
+    #[string] key_filter: String,
+    #[string] bag_filter: String,
+    callback_id: u32,
+) -> u32 {
+    let resource = state.borrow::<RuntimeContext>().resource_name.clone();
+    state.borrow::<SharedStateBags>().0.add_handler(
+        resource,
+        Some(key_filter),
+        Some(bag_filter),
+        callback_id,
+    )
+}
+
+#[op2(fast)]
+fn op_remove_state_bag_change_handler(state: &mut OpState, cookie: u32) -> bool {
+    let resource = state.borrow::<RuntimeContext>().resource_name.clone();
+    state
+        .borrow::<SharedStateBags>()
+        .0
+        .remove_handler(&resource, cookie)
+}
+
+#[op2]
+#[string]
+fn op_poll_state_bag_changes(state: &mut OpState) -> String {
+    const MAX_DELIVERIES_PER_POLL: usize = 4096;
+    let resource = state.borrow::<RuntimeContext>().resource_name.clone();
+    serde_json::to_string(
+        &state
+            .borrow::<SharedStateBags>()
+            .0
+            .drain_deliveries(&resource, MAX_DELIVERIES_PER_POLL),
+    )
+    .unwrap_or_else(|_| "[]".to_owned())
+}
+
 deno_core::extension!(
     baston_events,
     ops = [
@@ -167,6 +228,9 @@ deno_core::extension!(
         op_trigger_client_event,
         op_invoke_native_on_client,
         op_report_handler_error,
+        op_add_state_bag_change_handler,
+        op_remove_state_bag_change_handler,
+        op_poll_state_bag_changes,
     ]
 );
 

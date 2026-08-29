@@ -9,7 +9,15 @@ use std::sync::OnceLock;
 use dashmap::DashMap;
 use deno_core::{op2, OpState};
 
-use super::{RuntimeContext, SharedPlayers, SharedVoice, VoiceControl};
+use super::{
+    rpc_natives, RuntimeContext, SharedEntityWorld, SharedPlayers, SharedRouting, SharedStateBags,
+    SharedVoice, SharedWorldControl, VoiceControl,
+};
+use crate::ScriptEntityType;
+use crate::{
+    entity_from_state_bag_name, entity_state_bag_name, player_from_state_bag_name, RoutingControl,
+    RoutingLockdownMode, StateBagSource,
+};
 
 fn resource_kvp() -> &'static DashMap<String, String> {
     static KVP: OnceLock<DashMap<String, String>> = OnceLock::new();
@@ -51,7 +59,10 @@ fn json_arg_i64(args: &[serde_json::Value], index: usize) -> i64 {
 
 /// Player/net-id argument: natives pass server ids as numbers or numeric
 /// strings (`source` is stringly-typed in much of the FiveM ecosystem).
-fn json_arg_netid(args: &[serde_json::Value], index: usize) -> u32 {
+///
+/// Shared with [`super::rpc_natives`], which reads the same kind of argument to
+/// resolve a context native's target.
+pub(super) fn json_arg_netid(args: &[serde_json::Value], index: usize) -> u32 {
     match args.get(index) {
         Some(serde_json::Value::Number(n)) => n.as_u64().unwrap_or_default() as u32,
         Some(serde_json::Value::String(s)) => s.trim().parse().unwrap_or_default(),
@@ -79,19 +90,40 @@ pub(super) fn op_cfx_shared_native(
     let kvp = resource_kvp();
 
     let value = match name.as_str() {
-        "ADD_CONVAR_CHANGE_LISTENER" | "ADD_STATE_BAG_CHANGE_HANDLER" => {
-            // Callback dispatch is not wired yet; return a stable no-op cookie.
-            serde_json::json!(0)
+        "ADD_CONVAR_CHANGE_LISTENER" => serde_json::json!(0),
+        // Kept for direct native callers. The public JS helper uses a
+        // dedicated op because functions cannot be serialized through JSON.
+        "ADD_STATE_BAG_CHANGE_HANDLER" => {
+            let callback_id = json_arg_i64(&args, 2) as u32;
+            let cookie = state.borrow::<SharedStateBags>().0.add_handler(
+                resource.clone(),
+                Some(json_arg_string(&args, 0)),
+                Some(json_arg_string(&args, 1)),
+                callback_id,
+            );
+            serde_json::json!(cookie)
         }
         "CANCEL_EVENT"
         | "END_FIND_KVP"
-        | "ENSURE_ENTITY_STATE_BAG"
         | "PROFILER_ENTER_SCOPE"
         | "PROFILER_EXIT_SCOPE"
         | "REGISTER_RESOURCE_AS_EVENT_HANDLER"
         | "REMOVE_CONVAR_CHANGE_LISTENER"
-        | "REMOVE_STATE_BAG_CHANGE_HANDLER"
         | "TRIGGER_EVENT_INTERNAL" => serde_json::Value::Null,
+        "ENSURE_ENTITY_STATE_BAG" => {
+            state
+                .borrow::<SharedStateBags>()
+                .0
+                .ensure_bag(entity_state_bag_name(json_arg_netid(&args, 0)));
+            serde_json::Value::Null
+        }
+        "REMOVE_STATE_BAG_CHANGE_HANDLER" => {
+            state
+                .borrow::<SharedStateBags>()
+                .0
+                .remove_handler(&resource, json_arg_i64(&args, 0) as u32);
+            serde_json::Value::Null
+        }
         "DELETE_FUNCTION_REFERENCE" => serde_json::Value::Null,
         "DELETE_RESOURCE_KVP" | "DELETE_RESOURCE_KVP_NO_SYNC" => {
             kvp.remove(&kvp_key(&resource, &json_arg_string(&args, 0)));
@@ -123,14 +155,25 @@ pub(super) fn op_cfx_shared_native(
         "GET_ENTITIES_IN_RADIUS"
         | "GET_GAME_POOL"
         | "GET_REGISTERED_COMMANDS"
-        | "GET_RESOURCE_COMMANDS"
-        | "GET_STATE_BAG_KEYS" => serde_json::json!([]),
-        "GET_ENTITY_FROM_STATE_BAG_NAME" => serde_json::json!(0),
+        | "GET_RESOURCE_COMMANDS" => serde_json::json!([]),
+        "GET_STATE_BAG_KEYS" => {
+            serde_json::json!(state
+                .borrow::<SharedStateBags>()
+                .0
+                .keys(&json_arg_string(&args, 0)))
+        }
+        "GET_ENTITY_FROM_STATE_BAG_NAME" => serde_json::json!(entity_from_state_bag_name(
+            &json_arg_string(&args, 0)
+        )
+        .unwrap_or_default()),
         "GET_GAME_BUILD_NUMBER" => serde_json::json!(0),
         "GET_GAME_NAME" => serde_json::json!("gta5"),
         "GET_INSTANCE_ID" => serde_json::json!(0),
         "GET_INVOKING_RESOURCE" => serde_json::json!(resource),
-        "GET_PLAYER_FROM_STATE_BAG_NAME" => serde_json::json!(0),
+        "GET_PLAYER_FROM_STATE_BAG_NAME" => serde_json::json!(player_from_state_bag_name(
+            &json_arg_string(&args, 0)
+        )
+        .unwrap_or_default()),
         "GET_RESOURCE_KVP_FLOAT" => kvp
             .get(&kvp_key(&resource, &json_arg_string(&args, 0)))
             .and_then(|v| v.parse::<f64>().ok())
@@ -145,12 +188,19 @@ pub(super) fn op_cfx_shared_native(
             .get(&kvp_key(&resource, &json_arg_string(&args, 0)))
             .map(|v| serde_json::json!(v.value().clone()))
             .unwrap_or(serde_json::Value::Null),
-        "GET_STATE_BAG_VALUE" => serde_json::Value::Null,
+        "GET_STATE_BAG_VALUE" => state
+            .borrow::<SharedStateBags>()
+            .0
+            .get(&json_arg_string(&args, 0), &json_arg_string(&args, 1))
+            .unwrap_or(serde_json::Value::Null),
         "IS_ACE_ALLOWED"
         | "IS_PRINCIPAL_ACE_ALLOWED"
         | "PROFILER_IS_RECORDING"
-        | "STATE_BAG_HAS_KEY"
         | "WAS_EVENT_CANCELED" => serde_json::json!(false),
+        "STATE_BAG_HAS_KEY" => serde_json::json!(state
+            .borrow::<SharedStateBags>()
+            .0
+            .contains_key(&json_arg_string(&args, 0), &json_arg_string(&args, 1))),
         "IS_DUPLICITY_VERSION" => serde_json::json!(true),
         "SET_RESOURCE_KVP" | "SET_RESOURCE_KVP_NO_SYNC" => {
             kvp.insert(
@@ -173,11 +223,21 @@ pub(super) fn op_cfx_shared_native(
             );
             serde_json::Value::Null
         }
-        "SET_STATE_BAG_VALUE" => serde_json::Value::Null,
+        "SET_STATE_BAG_VALUE" => {
+            state.borrow::<SharedStateBags>().0.set(
+                json_arg_string(&args, 0),
+                json_arg_string(&args, 1),
+                args.get(2).cloned().unwrap_or(serde_json::Value::Null),
+                json_arg_bool(&args, 4),
+                StateBagSource::resource(resource),
+            );
+            serde_json::Value::Null
+        }
         // Shared train/vehicle/entity accessors that need the future entity
         // state-bag bridge. Return neutral values instead of throwing so
-        // resources can feature-detect safely.
-        _ => serde_json::Value::Null,
+        // resources can feature-detect safely — but report the gap, because a
+        // silent `null` is indistinguishable from a genuine empty answer.
+        _ => unimplemented_native(&name, "void", &resource),
     };
 
     value.to_string()
@@ -196,7 +256,14 @@ pub(super) fn op_cfx_server_native(
 
     let value = match name.as_str() {
         "CREATE_OBJECT" | "CREATE_OBJECT_NO_OFFSET" => {
-            let id = next_synthetic_entity();
+            let id = create_entity_handle(
+                state,
+                ScriptEntityType::Object,
+                json_arg_i64(&args, 0) as u32,
+                json_arg_position(&args, 1),
+                0.0,
+                json_arg_bool(&args, 5),
+            );
             entities.insert(
                 id,
                 serde_json::json!({
@@ -205,12 +272,21 @@ pub(super) fn op_cfx_server_native(
                     "coords": [json_arg_f64(&args, 1), json_arg_f64(&args, 2), json_arg_f64(&args, 3)],
                     "heading": 0.0,
                     "health": 1000,
+                    "routing_bucket": 0,
                 }),
             );
+            shared_routing(state).set_entity_bucket(id, 0);
             serde_json::json!(id)
         }
         "CREATE_PED" => {
-            let id = next_synthetic_entity();
+            let id = create_entity_handle(
+                state,
+                ScriptEntityType::Ped,
+                json_arg_i64(&args, 1) as u32,
+                json_arg_position(&args, 2),
+                json_arg_f64(&args, 5) as f32,
+                false,
+            );
             entities.insert(
                 id,
                 serde_json::json!({
@@ -219,8 +295,10 @@ pub(super) fn op_cfx_server_native(
                     "coords": [json_arg_f64(&args, 2), json_arg_f64(&args, 3), json_arg_f64(&args, 4)],
                     "heading": json_arg_f64(&args, 5),
                     "health": 200,
+                    "routing_bucket": 0,
                 }),
             );
+            shared_routing(state).set_entity_bucket(id, 0);
             serde_json::json!(id)
         }
         "CREATE_PED_INSIDE_VEHICLE" => {
@@ -235,17 +313,26 @@ pub(super) fn op_cfx_server_native(
                     "coords": [0.0, 0.0, 0.0],
                     "heading": 0.0,
                     "health": 200,
+                    "routing_bucket": 0,
                 }),
             );
+            shared_routing(state).set_entity_bucket(id, 0);
             serde_json::json!(id)
         }
         "CREATE_VEHICLE" | "CREATE_VEHICLE_SERVER_SETTER" => {
-            let id = next_synthetic_entity();
             let coord_offset = if name == "CREATE_VEHICLE_SERVER_SETTER" {
                 2
             } else {
                 1
             };
+            let id = create_entity_handle(
+                state,
+                ScriptEntityType::Vehicle,
+                json_arg_i64(&args, 0) as u32,
+                json_arg_position(&args, coord_offset),
+                json_arg_f64(&args, coord_offset + 3) as f32,
+                false,
+            );
             entities.insert(
                 id,
                 serde_json::json!({
@@ -259,38 +346,89 @@ pub(super) fn op_cfx_server_native(
                     "heading": json_arg_f64(&args, coord_offset + 3),
                     "health": 1000,
                     "engine_health": 1000.0,
+                    "routing_bucket": 0,
                 }),
             );
+            shared_routing(state).set_entity_bucket(id, 0);
             serde_json::json!(id)
         }
         "DELETE_ENTITY" | "DELETE_TRAIN" => {
-            entities.remove(&(json_arg_i64(&args, 0) as u32));
+            let id = json_arg_i64(&args, 0) as u32;
+            entities.remove(&id);
+            state
+                .borrow::<SharedWorldControl>()
+                .0
+                .submit(crate::WorldCommand::Despawn { network_id: id });
+            shared_routing(state).remove_entity(id);
+            state
+                .borrow::<SharedStateBags>()
+                .0
+                .remove_bag(&entity_state_bag_name(id));
             serde_json::Value::Null
         }
         "DOES_ENTITY_EXIST" => {
-            serde_json::json!(entities.contains_key(&(json_arg_i64(&args, 0) as u32)))
+            let id = json_arg_i64(&args, 0) as u32;
+            serde_json::json!(shared_world(state).exists(id) || entities.contains_key(&id))
         }
-        "GET_ALL_OBJECTS" => entity_ids_by_type("object"),
-        "GET_ALL_PEDS" => entity_ids_by_type("ped"),
-        "GET_ALL_VEHICLES" => entity_ids_by_type("vehicle"),
-        "GET_ENTITY_COORDS" => entity_field(json_arg_i64(&args, 0) as u32, "coords")
-            .unwrap_or_else(|| serde_json::json!([0.0, 0.0, 0.0])),
+        "GET_ALL_OBJECTS" => all_entities(state, ScriptEntityType::Object, "object"),
+        "GET_ALL_PEDS" => all_entities(state, ScriptEntityType::Ped, "ped"),
+        "GET_ALL_VEHICLES" => all_entities(state, ScriptEntityType::Vehicle, "vehicle"),
+        "GET_ENTITY_COORDS" => {
+            let id = json_arg_i64(&args, 0) as u32;
+            shared_world(state)
+                .get(id)
+                .map(|entity| serde_json::json!(entity.position))
+                .or_else(|| entity_field(id, "coords"))
+                .unwrap_or_else(|| serde_json::json!([0.0, 0.0, 0.0]))
+        }
+        "GET_ENTITY_VELOCITY" => {
+            let id = json_arg_i64(&args, 0) as u32;
+            shared_world(state)
+                .get(id)
+                .map(|entity| serde_json::json!(entity.velocity))
+                .unwrap_or_else(|| serde_json::json!([0.0, 0.0, 0.0]))
+        }
+        // A script handle IS the network id (see `entity_world`), so both
+        // translations are the identity — but scripts must still be able to
+        // call them, and an unknown handle must resolve to 0.
+        "NETWORK_GET_NETWORK_ID_FROM_ENTITY" | "NETWORK_GET_ENTITY_FROM_NETWORK_ID" => {
+            let id = json_arg_i64(&args, 0) as u32;
+            let known = shared_world(state).exists(id) || entities.contains_key(&id);
+            serde_json::json!(if known { id } else { 0 })
+        }
+        "GET_PLAYER_PED" => {
+            serde_json::json!(shared_world(state)
+                .player_ped(json_arg_netid(&args, 0))
+                .unwrap_or(0))
+        }
         "GET_ENTITY_HEADING" => entity_field(json_arg_i64(&args, 0) as u32, "heading")
             .unwrap_or_else(|| serde_json::json!(0.0)),
         "GET_ENTITY_HEALTH" => entity_field(json_arg_i64(&args, 0) as u32, "health")
             .unwrap_or_else(|| serde_json::json!(0)),
         "GET_ENTITY_MODEL" => entity_field(json_arg_i64(&args, 0) as u32, "model")
             .unwrap_or_else(|| serde_json::json!(0)),
+        "GET_ENTITY_ROUTING_BUCKET" => {
+            serde_json::json!(shared_routing(state).entity_bucket(json_arg_netid(&args, 0)))
+        }
         "GET_ENTITY_TYPE" => {
             let id = json_arg_i64(&args, 0) as u32;
-            let ty = entity_field(id, "type").and_then(|v| v.as_str().map(str::to_owned));
-            serde_json::json!(match ty.as_deref() {
-                Some("ped") => 1,
-                Some("vehicle") => 2,
-                Some("object") => 3,
-                _ => 0,
-            })
+            if let Some(entity) = shared_world(state).get(id) {
+                serde_json::json!(entity.entity_type.as_native())
+            } else {
+                let ty = entity_field(id, "type").and_then(|v| v.as_str().map(str::to_owned));
+                serde_json::json!(match ty.as_deref() {
+                    Some("ped") => 1,
+                    Some("vehicle") => 2,
+                    Some("object") => 3,
+                    _ => 0,
+                })
+            }
         }
+        // The two natives that are both server state *and* a client mutation:
+        // the synthetic store must record the new value for a script-created
+        // handle, and a networked entity's owner must actually be told to move
+        // it. Doing only one of the two would silently drop half the effect,
+        // so both run (the RPC no-ops when no client owns the handle).
         "SET_ENTITY_COORDS" => {
             entity_update(
                 json_arg_i64(&args, 0) as u32,
@@ -301,6 +439,7 @@ pub(super) fn op_cfx_server_native(
                     json_arg_f64(&args, 3),
                 ]),
             );
+            rpc_natives::try_dispatch(state, &name, &args);
             serde_json::Value::Null
         }
         "SET_ENTITY_HEADING" => {
@@ -309,6 +448,7 @@ pub(super) fn op_cfx_server_native(
                 "heading",
                 serde_json::json!(json_arg_f64(&args, 1)),
             );
+            rpc_natives::try_dispatch(state, &name, &args);
             serde_json::Value::Null
         }
         "SET_ENTITY_HEALTH" => {
@@ -319,7 +459,22 @@ pub(super) fn op_cfx_server_native(
             );
             serde_json::Value::Null
         }
-        "NETWORK_GET_ENTITY_OWNER" => serde_json::json!(0),
+        "SET_ENTITY_ROUTING_BUCKET" => {
+            let entity = json_arg_netid(&args, 0);
+            let bucket = json_arg_netid(&args, 1);
+            shared_routing(state).set_entity_bucket(entity, bucket);
+            entity_update(entity, "routing_bucket", serde_json::json!(bucket));
+            serde_json::Value::Null
+        }
+        // The owning client is what decides where a context-routed native is
+        // dispatched, so this is the keystone of the whole entity surface.
+        // `0` means "no owner known" (server-owned or unknown handle), which
+        // is the same answer FXServer gives for an unowned entity.
+        "NETWORK_GET_ENTITY_OWNER" => {
+            serde_json::json!(shared_world(state)
+                .owner(json_arg_i64(&args, 0) as u32)
+                .unwrap_or(0))
+        }
         "DROP_PLAYER" => {
             let source = json_arg_i64(&args, 0) as u32;
             state.borrow::<SharedPlayers>().0.remove(source);
@@ -331,6 +486,9 @@ pub(super) fn op_cfx_server_native(
             serde_json::json!(state.borrow::<SharedPlayers>().0.count() as u32)
         }
         "GET_PLAYER_INVINCIBLE" => serde_json::json!(false),
+        "GET_PLAYER_ROUTING_BUCKET" => {
+            serde_json::json!(shared_routing(state).player_bucket(json_arg_netid(&args, 0)))
+        }
         "GET_PLAYER_LAST_MSG" => serde_json::json!(0),
         "GET_PLAYER_TIME_IN_PURSUIT" => serde_json::json!(0),
         "GET_PLAYER_WANTED_LEVEL" => serde_json::json!(0),
@@ -340,6 +498,31 @@ pub(super) fn op_cfx_server_native(
         "IS_PLAYER_USING_SUPER_JUMP" => serde_json::json!(false),
         "PRINT_STRUCTURED_TRACE" => {
             tracing::info!(target: "structured-trace", "{}", json_arg_string(&args, 0));
+            serde_json::Value::Null
+        }
+        "SET_PLAYER_ROUTING_BUCKET" => {
+            shared_routing(state)
+                .set_player_bucket(json_arg_netid(&args, 0), json_arg_netid(&args, 1));
+            serde_json::Value::Null
+        }
+        "SET_ROUTING_BUCKET_ENTITY_LOCKDOWN_MODE" => {
+            let bucket = json_arg_netid(&args, 0);
+            let mode = json_arg_string(&args, 1);
+            if let Some(mode) = RoutingLockdownMode::parse(&mode) {
+                shared_routing(state).set_lockdown_mode(bucket, mode);
+            } else {
+                tracing::warn!(
+                    target: "routing-bucket",
+                    bucket,
+                    %mode,
+                    "ignored invalid routing bucket lockdown mode"
+                );
+            }
+            serde_json::Value::Null
+        }
+        "SET_ROUTING_BUCKET_POPULATION_ENABLED" => {
+            shared_routing(state)
+                .set_population_enabled(json_arg_netid(&args, 0), json_arg_bool(&args, 1));
             serde_json::Value::Null
         }
         // --- voice (baston-voice via the gateway's VoiceControl impl) ---
@@ -388,10 +571,97 @@ pub(super) fn op_cfx_server_native(
                 .unwrap_or([0.0; 3]);
             serde_json::json!([pos[0], pos[1], pos[2]])
         }
-        _ => default_native_value(&result_kind),
+        _ => {
+            // Much of the "server" native surface is really a client mutation
+            // the server routes to one client (see [`rpc_natives`]). Try that
+            // before declaring the native unimplemented: a native in the CFX
+            // context table *is* implemented, it just executes elsewhere. Every
+            // one of them returns void, hence the null.
+            if rpc_natives::try_dispatch(state, &name, &args) {
+                serde_json::Value::Null
+            } else {
+                let resource = state.borrow::<RuntimeContext>().resource_name.clone();
+                unimplemented_native(&name, &result_kind, &resource)
+            }
+        }
     };
 
     value.to_string()
+}
+
+fn shared_world(state: &OpState) -> Arc<crate::EntityWorldView> {
+    Arc::clone(&state.borrow::<SharedEntityWorld>().0)
+}
+
+/// Create a real networked entity, or `None` when no authoritative world is
+/// wired (OneSync off).
+///
+/// The network id is reserved synchronously — a script needs its handle back
+/// from `CreateVehicle` immediately — while the entity itself is authored by
+/// the game state on its next tick.
+fn spawn_networked(
+    state: &OpState,
+    entity_type: ScriptEntityType,
+    model: u32,
+    position: [f32; 3],
+    heading: f32,
+    dynamic: bool,
+) -> Option<u32> {
+    let control = &state.borrow::<SharedWorldControl>().0;
+    let network_id = control.reserve_network_id()?;
+    control.submit(crate::WorldCommand::Spawn {
+        network_id,
+        entity_type,
+        model,
+        position,
+        heading,
+        dynamic,
+    });
+    Some(network_id)
+}
+
+/// The handle a create native returns.
+///
+/// With an authoritative world, the entity is networked and its handle is its
+/// network id. Without one, the entity stays a server-local record so scripts
+/// that only read back what they created keep working.
+fn create_entity_handle(
+    state: &OpState,
+    entity_type: ScriptEntityType,
+    model: u32,
+    position: [f32; 3],
+    heading: f32,
+    dynamic: bool,
+) -> u32 {
+    spawn_networked(state, entity_type, model, position, heading, dynamic)
+        .unwrap_or_else(next_synthetic_entity)
+}
+
+fn json_arg_position(args: &[serde_json::Value], first: usize) -> [f32; 3] {
+    [
+        json_arg_f64(args, first) as f32,
+        json_arg_f64(args, first + 1) as f32,
+        json_arg_f64(args, first + 2) as f32,
+    ]
+}
+
+/// Union of the networked world and the synthetic (script-created) store.
+///
+/// The two are distinct populations: the world holds entities clients actually
+/// simulate, the synthetic store holds handles a server script created that no
+/// client owns yet. A script asking for "all vehicles" means both.
+fn all_entities(
+    state: &OpState,
+    networked: ScriptEntityType,
+    synthetic: &str,
+) -> serde_json::Value {
+    let mut ids = shared_world(state).ids_of_type(networked);
+    if let serde_json::Value::Array(extra) = entity_ids_by_type(synthetic) {
+        ids.extend(extra.iter().filter_map(|v| v.as_u64().map(|id| id as u32)));
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    serde_json::json!(ids)
 }
 
 fn entity_ids_by_type(entity_type: &str) -> serde_json::Value {
@@ -427,6 +697,43 @@ fn shared_voice(state: &OpState) -> Option<Arc<dyn VoiceControl>> {
         .and_then(|v| v.0.as_ref().map(Arc::clone))
 }
 
+fn shared_routing(state: &OpState) -> Arc<dyn RoutingControl> {
+    Arc::clone(&state.borrow::<SharedRouting>().0)
+}
+
+/// Natives already reported as unimplemented, so the warning fires once per
+/// name instead of once per call — a script polling an unimplemented native in
+/// a tick loop would otherwise drown the log.
+fn reported_unimplemented() -> &'static DashMap<String, ()> {
+    static REPORTED: OnceLock<DashMap<String, ()>> = OnceLock::new();
+    REPORTED.get_or_init(DashMap::new)
+}
+
+/// Fallback for a native BASTON does not implement.
+///
+/// Returning a neutral value rather than throwing is deliberate: a resource
+/// that calls one unimplemented native should degrade, not die. But a silent
+/// neutral value is indistinguishable from a real answer, so every distinct
+/// native is reported once and counted forever — an unimplemented native is
+/// now a visible fact instead of a plausible zero.
+fn unimplemented_native(name: &str, result_kind: &str, resource: &str) -> serde_json::Value {
+    if reported_unimplemented()
+        .insert(name.to_owned(), ())
+        .is_none()
+    {
+        tracing::warn!(
+            target: "natives",
+            native = name,
+            resource,
+            returns = result_kind,
+            "native is not implemented — returning a neutral value"
+        );
+    }
+    metrics::counter!("script_native_unimplemented_total", "native" => name.to_owned())
+        .increment(1);
+    default_native_value(result_kind)
+}
+
 fn default_native_value(result_kind: &str) -> serde_json::Value {
     match result_kind.to_ascii_lowercase().as_str() {
         "void" => serde_json::Value::Null,
@@ -434,6 +741,12 @@ fn default_native_value(result_kind: &str) -> serde_json::Value {
         "char*" | "const char*" | "string" => serde_json::json!(""),
         "float" | "double" => serde_json::json!(0.0),
         "object" => serde_json::json!([]),
+        // The JS side destructures a vector result (`const [x, y, z] = ...`).
+        // Falling through to a scalar would make every unimplemented vector
+        // getter a type error at the call site rather than a neutral answer.
+        "vector3" => serde_json::json!([0.0, 0.0, 0.0]),
+        "vector2" => serde_json::json!([0.0, 0.0]),
+        "vector4" => serde_json::json!([0.0, 0.0, 0.0, 0.0]),
         _ => serde_json::json!(0),
     }
 }

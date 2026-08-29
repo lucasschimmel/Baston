@@ -14,12 +14,14 @@ use dashmap::DashMap;
 use crate::deferrals::DeferralRegistry;
 use crate::error::ScriptError;
 use crate::extensions::{
-    all_extensions, RuntimeContext, SharedConvars, SharedDeferrals, SharedNet, SharedObservability,
-    SharedPlayers, SharedResources,
+    all_extensions, RuntimeContext, SharedConvars, SharedDeferrals, SharedEntityWorld, SharedNet,
+    SharedObservability, SharedPlayers, SharedResources, SharedRouting, SharedStateBags,
+    SharedWorldControl,
 };
 use crate::net_bridge::NetBridge;
 use crate::observability::{DispatchKind, DispatchMeasurement, Observability, V8MemoryStats};
 use crate::resource_registry::ResourceRegistry;
+use crate::{InMemoryRoutingControl, RoutingControl, StateBagStore};
 
 const BOOTSTRAP_JS: &str = include_str!("../assets/bootstrap.js");
 
@@ -257,6 +259,10 @@ impl ScriptRuntime {
             op_state.put(SharedPlayers(players));
             op_state.put(SharedNet(net));
             op_state.put(SharedObservability(observability.clone()));
+            op_state.put(SharedStateBags(StateBagStore::default()));
+            op_state.put(SharedRouting(Arc::new(InMemoryRoutingControl::default())));
+            op_state.put(SharedEntityWorld(Arc::new(crate::EntityWorldView::new())));
+            op_state.put(SharedWorldControl(Arc::new(crate::NoWorldControl)));
         }
 
         js.execute_script("baston:bootstrap.js", BOOTSTRAP_JS)
@@ -286,6 +292,24 @@ impl ScriptRuntime {
         let mut op_state = op_state.borrow_mut();
         op_state.put(SharedConvars(convars));
         op_state.put(SharedResources(resources));
+    }
+
+    /// Install process-wide authoritative state shared by all resource
+    /// isolates. The bootstrap is already loaded, but no resource script has
+    /// run when the host calls this method.
+    pub fn install_shared_game_state(
+        &mut self,
+        state_bags: StateBagStore,
+        routing: Arc<dyn RoutingControl>,
+        entity_world: Arc<crate::EntityWorldView>,
+        world_control: Arc<dyn crate::WorldControl>,
+    ) {
+        let op_state = self.js.op_state();
+        let mut op_state = op_state.borrow_mut();
+        op_state.put(SharedStateBags(state_bags));
+        op_state.put(SharedRouting(routing));
+        op_state.put(SharedEntityWorld(entity_world));
+        op_state.put(SharedWorldControl(world_control));
     }
 
     /// Install the voice control surface backing the `MUMBLE_*` natives.
@@ -466,6 +490,18 @@ impl ScriptRuntime {
             serde_json::to_string(raw).unwrap_or_else(|_| "\"\"".into()),
         );
         Some(self.start_dispatch_raw(code, command, DispatchKind::Command, Some(source)))
+    }
+
+    /// Dispatch all state-bag deliveries currently queued for this resource.
+    /// Callback IDs and values are pulled by the bootstrap through an op; no
+    /// JS function crosses the Rust boundary.
+    pub fn start_state_bag_dispatch(&mut self) -> DispatchTicket {
+        self.start_dispatch_raw(
+            "globalThis.__baston.dispatchStateBagChanges();".to_owned(),
+            "__stateBagChange",
+            DispatchKind::Event,
+            None,
+        )
     }
 
     /// Start a resource script load (plain script semantics). The host waits

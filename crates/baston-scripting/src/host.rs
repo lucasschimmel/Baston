@@ -18,6 +18,7 @@ use crate::error::ScriptError;
 use crate::observability::Observability;
 use crate::resource_registry::ResourceRegistry;
 use crate::runtime::ScriptRuntime;
+use crate::{InMemoryRoutingControl, RoutingControl, StateBagChange, StateBagStore};
 
 /// A script file to load into a resource's isolate.
 #[derive(Debug)]
@@ -61,6 +62,9 @@ enum RuntimeCommand {
     CollectTransferState {
         source: u32,
         reply: oneshot::Sender<Result<Option<String>, ScriptError>>,
+    },
+    DispatchStateBagChanges {
+        reply: oneshot::Sender<Result<QueuedEvents, ScriptError>>,
     },
 }
 
@@ -111,6 +115,13 @@ pub struct ScriptHost {
     observability: Arc<Observability>,
     convars: Arc<DashMap<String, String>>,
     resources: ResourceRegistry,
+    state_bags: StateBagStore,
+    routing: Arc<dyn RoutingControl>,
+    entity_world: Arc<crate::EntityWorldView>,
+    /// Set by the composition root once the authoritative world exists.
+    /// Resources loaded before then get the inert control, which refuses
+    /// entity creation rather than pretending to succeed.
+    world_control: Arc<std::sync::RwLock<Arc<dyn crate::WorldControl>>>,
     started_at: Instant,
     cross_zone: Arc<std::sync::RwLock<Option<CrossZonePublisher>>>,
     voice: Arc<std::sync::RwLock<Option<Arc<dyn crate::extensions::VoiceControl>>>>,
@@ -146,6 +157,25 @@ impl ScriptHost {
         players: Arc<PlayerDirectory>,
         net: crate::net_bridge::NetBridge,
     ) -> Result<Self, ScriptError> {
+        Self::spawn_with_net_and_game_state(
+            deferrals,
+            players,
+            net,
+            StateBagStore::default(),
+            Arc::new(InMemoryRoutingControl::default()),
+        )
+    }
+
+    /// Create a host with externally supplied authoritative state. This is
+    /// the integration point for a zone-owned routing registry and for a
+    /// networking layer that needs to share the exact state-bag store.
+    pub fn spawn_with_net_and_game_state(
+        deferrals: Arc<DeferralRegistry>,
+        players: Arc<PlayerDirectory>,
+        net: crate::net_bridge::NetBridge,
+        state_bags: StateBagStore,
+        routing: Arc<dyn RoutingControl>,
+    ) -> Result<Self, ScriptError> {
         Ok(Self {
             runtimes: Arc::new(RwLock::new(HashMap::new())),
             deferrals,
@@ -154,6 +184,10 @@ impl ScriptHost {
             observability: Observability::shared(),
             convars: Arc::new(DashMap::new()),
             resources: ResourceRegistry::default(),
+            state_bags,
+            routing,
+            entity_world: Arc::new(crate::EntityWorldView::new()),
+            world_control: Arc::new(std::sync::RwLock::new(Arc::new(crate::NoWorldControl))),
             started_at: Instant::now(),
             cross_zone: Arc::new(std::sync::RwLock::new(None)),
             voice: Arc::new(std::sync::RwLock::new(None)),
@@ -166,12 +200,48 @@ impl ScriptHost {
         *self.voice.write().unwrap_or_else(|e| e.into_inner()) = Some(voice);
     }
 
+    /// Install the authoritative world's write side, backing entity creation
+    /// and deletion. Applies to resources loaded afterwards.
+    pub fn set_world_control(&self, control: Arc<dyn crate::WorldControl>) {
+        *self
+            .world_control
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = control;
+    }
+
+    fn world_control(&self) -> Arc<dyn crate::WorldControl> {
+        Arc::clone(&self.world_control.read().unwrap_or_else(|e| e.into_inner()))
+    }
+
     pub fn observability(&self) -> Arc<Observability> {
         Arc::clone(&self.observability)
     }
 
     pub fn resources(&self) -> ResourceRegistry {
         self.resources.clone()
+    }
+
+    /// Shared state-bag store used by every resource isolate.
+    pub fn state_bags(&self) -> StateBagStore {
+        self.state_bags.clone()
+    }
+
+    /// Routing-bucket control shared by scripting and future zone adapters.
+    pub fn routing_control(&self) -> Arc<dyn RoutingControl> {
+        Arc::clone(&self.routing)
+    }
+
+    /// The world mirror the entity natives read.
+    ///
+    /// The authoritative game state publishes into this once per sync tick;
+    /// until it does, entity natives correctly report an empty world.
+    pub fn entity_world(&self) -> Arc<crate::EntityWorldView> {
+        Arc::clone(&self.entity_world)
+    }
+
+    /// Drain explicitly replicated state-bag changes for the networking layer.
+    pub fn drain_replicated_state_bags(&self, limit: usize) -> Vec<StateBagChange> {
+        self.state_bags.drain_replicated(limit)
     }
 
     /// Install the Phase D cross-zone event publisher (zone processes only).
@@ -238,6 +308,8 @@ impl ScriptHost {
             }
         }
         self.rebroadcast(queued).await;
+        self.rebroadcast(self.flush_state_bag_callbacks().await)
+            .await;
         Ok(())
     }
 
@@ -290,6 +362,7 @@ impl ScriptHost {
         // Replace an existing runtime (ResourceManager stops first in the
         // normal path; this keeps load idempotent regardless).
         self.runtimes.write().await.remove(name);
+        self.state_bags.cleanup_resource(name);
 
         let handle = spawn_runtime_thread(RuntimeThreadParams {
             resource_name: name,
@@ -300,13 +373,18 @@ impl ScriptHost {
             observability: Arc::clone(&self.observability),
             convars: Arc::clone(&self.convars),
             resources: self.resources.clone(),
+            state_bags: self.state_bags.clone(),
+            routing: Arc::clone(&self.routing),
+            entity_world: Arc::clone(&self.entity_world),
+            world_control: self.world_control(),
             voice: self.voice.read().unwrap_or_else(|e| e.into_inner()).clone(),
         })?;
-        let queued = handle
+        let mut queued = handle
             .send(|reply| RuntimeCommand::ExecuteScripts { scripts, reply })
             .await?;
 
         self.runtimes.write().await.insert(name.to_owned(), handle);
+        queued.extend(self.flush_state_bag_callbacks().await);
         self.rebroadcast(queued).await;
 
         self.trigger_event(
@@ -329,6 +407,7 @@ impl ScriptHost {
         )
         .await?;
         self.runtimes.write().await.remove(name);
+        self.state_bags.cleanup_resource(name);
         tracing::info!(target: "scripting", resource = %name, "resource unloaded");
         Ok(())
     }
@@ -384,6 +463,8 @@ impl ScriptHost {
             }
         }
         self.rebroadcast(queued).await;
+        self.rebroadcast(self.flush_state_bag_callbacks().await)
+            .await;
         self.deferrals.resolve_if_not_deferred(source);
         Ok(())
     }
@@ -426,6 +507,8 @@ impl ScriptHost {
             }
         }
         self.rebroadcast(queued).await;
+        self.rebroadcast(self.flush_state_bag_callbacks().await)
+            .await;
         Ok(())
     }
 
@@ -492,7 +575,56 @@ impl ScriptHost {
                     }
                 }
             }
+            drop(runtimes);
+            pending.extend(self.flush_state_bag_callbacks().await);
         }
+    }
+
+    /// Poll queued state-bag callbacks at a host/event-loop boundary. A
+    /// bounded number of rounds allows handlers to write another bag while
+    /// preventing a recursive handler pair from monopolizing the host.
+    async fn flush_state_bag_callbacks(&self) -> QueuedEvents {
+        const MAX_CALLBACK_ROUNDS: usize = 64;
+        let mut queued_events = Vec::new();
+        for _ in 0..MAX_CALLBACK_ROUNDS {
+            if self.state_bags.pending_deliveries() == 0 {
+                return queued_events;
+            }
+            let runtimes = self.runtimes.read().await;
+            let mut replies = Vec::with_capacity(runtimes.len());
+            for (resource, handle) in runtimes.iter() {
+                match handle
+                    .begin(|reply| RuntimeCommand::DispatchStateBagChanges { reply })
+                    .await
+                {
+                    Ok(rx) => replies.push((resource.clone(), rx)),
+                    Err(error) => tracing::error!(
+                        target: "scripting",
+                        %resource,
+                        %error,
+                        "state bag callback dispatch failed"
+                    ),
+                }
+            }
+            drop(runtimes);
+            for (resource, rx) in replies {
+                match rx.await.map_err(|_| ScriptError::HostGone).and_then(|r| r) {
+                    Ok(mut events) => queued_events.append(&mut events),
+                    Err(error) => tracing::error!(
+                        target: "scripting",
+                        %resource,
+                        %error,
+                        "state bag callback dispatch failed"
+                    ),
+                }
+            }
+        }
+        tracing::warn!(
+            target: "scripting",
+            pending = self.state_bags.pending_deliveries(),
+            "state bag callback chain exceeded {MAX_CALLBACK_ROUNDS} rounds"
+        );
+        queued_events
     }
 }
 
@@ -505,6 +637,10 @@ struct RuntimeThreadParams<'a> {
     observability: Arc<Observability>,
     convars: Arc<DashMap<String, String>>,
     resources: ResourceRegistry,
+    state_bags: StateBagStore,
+    routing: Arc<dyn RoutingControl>,
+    entity_world: Arc<crate::EntityWorldView>,
+    world_control: Arc<dyn crate::WorldControl>,
     voice: Option<Arc<dyn crate::extensions::VoiceControl>>,
 }
 
@@ -522,6 +658,10 @@ fn spawn_runtime_thread(
         observability,
         convars,
         resources,
+        state_bags,
+        routing,
+        entity_world,
+        world_control,
         voice,
         ..
     } = params;
@@ -552,6 +692,7 @@ fn spawn_runtime_thread(
                     }
                 };
             runtime.install_server_state(convars, resources);
+            runtime.install_shared_game_state(state_bags, routing, entity_world, world_control);
             runtime.install_voice(crate::extensions::SharedVoice(voice));
             let _ = init_tx.send(Ok(()));
 
@@ -668,6 +809,10 @@ async fn run_isolate_loop(runtime: ScriptRuntime, mut rx: mpsc::Receiver<Runtime
                 let result = rt.borrow_mut().collect_zone_transfer_state_sync(source);
                 shared.wake.notify_one();
                 let _ = reply.send(result);
+            }
+            RuntimeCommand::DispatchStateBagChanges { reply } => {
+                let ticket = rt.borrow_mut().start_state_bag_dispatch();
+                spawn_settle(&rt, &shared, ticket, reply);
             }
         }
     }

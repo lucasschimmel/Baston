@@ -7,6 +7,7 @@
 //!   HTTP gateway.
 
 mod deferrals;
+mod entity_world;
 mod error;
 mod extensions;
 mod host;
@@ -14,8 +15,12 @@ pub mod net_bridge;
 pub mod observability;
 mod resource_registry;
 mod runtime;
+mod state_bag;
 
 pub use deferrals::{DeferralOutcome, DeferralRegistry};
+pub use entity_world::{
+    EntitySummary, EntityWorldView, NoWorldControl, ScriptEntityType, WorldCommand, WorldControl,
+};
 pub use error::ScriptError;
 pub use extensions::{SharedVoice, VoiceControl};
 pub use host::{ScriptHost, ScriptSource};
@@ -26,3 +31,8 @@ pub use observability::{
 };
 pub use resource_registry::{ResourceRegistry, ScriptResourceState};
 pub use runtime::ScriptRuntime;
+pub use state_bag::{
+    entity_from_state_bag_name, entity_state_bag_name, player_from_state_bag_name,
+    player_state_bag_name, InMemoryRoutingControl, RoutingControl, RoutingLockdownMode,
+    StateBagChange, StateBagDelivery, StateBagSource, StateBagStore,
+};
