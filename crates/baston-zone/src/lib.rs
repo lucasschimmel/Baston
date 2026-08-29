@@ -1,6 +1,7 @@
 //! Zone server: resource loader + lifecycle. Phase A runs in-process with the
 //! gateway; the standalone binary split comes in Phase D.
 
+pub mod adaptive_tick;
 pub mod boundary_detector;
 pub mod boundary_loop;
 pub mod entity_manager;
@@ -11,6 +12,7 @@ pub mod onesync;
 pub mod ownership;
 pub mod packfile;
 pub mod resource_loader;
+pub mod routing_bucket;
 pub mod state_ingest;
 pub mod state_sync;
 

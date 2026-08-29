@@ -204,8 +204,8 @@ async fn msg_route_is_relayed_between_clients() {
         // Retry: the relay is unreliable and B's peer may still be settling.
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            a.send(0, &packet);
-            a.send(0, &self_packet);
+            a.send(1, &packet);
+            a.send(1, &self_packet);
             a.pump();
             if let Some((channel, payload)) =
                 b.wait_for_message(MSG_ROUTE, Duration::from_millis(300))

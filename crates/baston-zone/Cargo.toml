@@ -21,6 +21,7 @@ bincode = { workspace = true }
 uuid = { workspace = true }
 metrics = { workspace = true }
 futures = { workspace = true }
+rayon = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
 anyhow = { workspace = true }
