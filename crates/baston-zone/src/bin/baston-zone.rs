@@ -8,78 +8,37 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use baston_config::{BastonConfig, LicenseMode};
+use baston_config::BastonConfig;
 use baston_protocol::Aabb;
 use baston_scripting::{DeferralRegistry, ScriptHost};
 use baston_zone::mesh::{ZoneMesh, ZoneMeshHooks};
 use baston_zone::resource_loader::{spawn_hot_reload, ResourceManager};
 
-/// Log the outcome of the cross-platform licence modes (`off`/`gate`). The
-/// `verified` mode is handled by the sidecar in [`wire_cfx_sidecar`]; unknown
-/// modes are already rejected by `LicenseConfig::validate`.
-fn apply_simple_license_modes(config: &BastonConfig) {
-    match config.license.mode {
-        LicenseMode::Off => tracing::warn!(target: "zone",
-            "[license] mode = \"off\" — CFX server-licence verification disabled \
-             (dev/LAN only; not for production)"),
-        LicenseMode::Gate => tracing::info!(target: "zone",
-            "[license] gate: sv_license_key present and well-formed \
-             (shape only — not validated; use mode = \"verified\" for real validation)"),
-        LicenseMode::Verified => {}
-    }
-}
-
-/// Minimal resources dir for a licence-only sidecar (holds just the materialised
-/// shim), sited next to the operator's resources so it shares the same volume.
-#[cfg(all(feature = "escrow", windows))]
-fn sidecar_scratch_dir(resources_path: &Path) -> std::path::PathBuf {
-    resources_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(".baston-sidecar-res")
-}
-
-/// Wire the optional CFX component (genuine, unmodified FXServer sidecar) for
-/// **licence verification** and/or **escrow decryption** — sharing ONE process.
-///
-/// - `[license] mode = "verified"`: query the sidecar for the CFX verdict and
-///   **fail closed** — refuse to start on an invalid/banned licence; cap
-///   `max_players` to the entitlement (restrictive, never raises it).
-/// - `[escrow] enabled`: install the decryptor backed by the same sidecar.
-///
-/// Returns the sidecar handle so `main` keeps the process alive. On a non-Windows
-/// build, or one without the `escrow` feature, `verified`/escrow degrade to a
-/// clear warning and never silently claim to be verified.
+/// Wire the optional escrow bridge. Global CFX identity belongs exclusively to
+/// the public gateway, so zone processes never authenticate, register, or
+/// heartbeat independently.
 #[cfg(all(feature = "escrow", windows))]
 fn wire_cfx_sidecar(
     manager: &Arc<ResourceManager>,
-    config: &mut BastonConfig,
+    config: &BastonConfig,
 ) -> anyhow::Result<Option<baston_escrow_plugin::SidecarHandle>> {
-    let need_license = config.license.mode == LicenseMode::Verified;
-    let need_escrow = config.escrow.enabled;
-    if !need_license && !need_escrow {
-        tracing::info!(target: "zone",
-            "no CFX sidecar needed (licence mode = {:?}, escrow off)", config.license.mode);
+    if !config.escrow.enabled {
         return Ok(None);
     }
-    if need_escrow && config.escrow.backend == baston_config::EscrowBackend::Direct {
+    if config.escrow.backend == baston_config::EscrowBackend::Direct {
         anyhow::bail!(
             "[escrow] backend = \"direct\" is unsupported (svadhesive exposes no FFI \
              decrypt symbol); use backend = \"sidecar\""
         );
     }
 
-    // One genuine FXServer for both capabilities. Prefer the licence path, then
-    // the escrow path (validate() already ensured the relevant one exists).
     let fxserver_path = config
-        .license
+        .escrow
         .fxserver_path
         .clone()
-        .or_else(|| config.escrow.fxserver_path.clone())
-        .ok_or_else(|| anyhow::anyhow!("verified licence / escrow needs an fxserver_path"))?;
+        .or_else(|| config.license.fxserver_path.clone())
+        .ok_or_else(|| anyhow::anyhow!("escrow needs an fxserver_path"))?;
 
-    // The operator's CFX server key (`cfxk_…`) is what the component validates and
-    // what escrow decryption is keyed on. Fed to the sidecar as `sv_licenseKey`.
     let license_key = {
         let key = config.license.sv_license_key.trim();
         if key.is_empty() {
@@ -88,71 +47,27 @@ fn wire_cfx_sidecar(
             Some(key.to_owned())
         }
     };
-    if need_escrow && license_key.is_none() {
+    if license_key.is_none() {
         tracing::warn!(target: "zone",
             "escrow is enabled but [license] sv_license_key is empty — svadhesive needs the \
              CFX server key to derive escrow decryption keys, so decryption will fail. Set \
              [license] sv_license_key to your key from https://portal.cfx.re");
     }
 
-    // Escrow needs the operator's resources reachable by the sidecar; a
-    // licence-only sidecar boots faster against a minimal dir holding just the shim.
-    let resources_dir = if need_escrow {
-        config.resources.path.clone()
-    } else {
-        let dir = sidecar_scratch_dir(&config.resources.path);
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| anyhow::anyhow!("creating sidecar resources dir {dir:?}: {e}"))?;
-        dir
-    };
-
     let params = baston_escrow_plugin::SidecarParams {
         fxserver_path,
-        resources_dir,
+        resources_dir: config.resources.path.clone(),
         license_key,
-        port: config.license.sidecar_port,
+        // Zone-local escrow brokers allocate distinct private endpoints and
+        // never compete with the gateway's authenticated identity broker.
+        port: 0,
+        public_listing: None,
     };
     let handle = baston_escrow_plugin::SidecarHandle::start(&params)
         .map_err(|e| anyhow::anyhow!("failed to start the FXServer sidecar: {e}"))?;
 
-    if need_license {
-        // Bounded retry to absorb the boot-time validation race; fail closed.
-        let status = handle
-            .oracle()
-            .query(
-                std::time::Duration::from_secs(20),
-                std::time::Duration::from_secs(1),
-            )
-            .map_err(|e| anyhow::anyhow!("licence verification failed: {e}"))?;
-        match baston_core::license::boot_decision(&status) {
-            baston_core::license::BootDecision::Deny(reason) => {
-                anyhow::bail!(
-                    "CFX licence check failed — refusing to start: {reason}\n  \
-                     → create or verify your key at https://portal.cfx.re"
-                );
-            }
-            baston_core::license::BootDecision::Allow => {
-                let (effective, capped) = baston_core::license::effective_max_players(
-                    config.server.max_players,
-                    &status.entitlements,
-                );
-                if capped {
-                    tracing::warn!(target: "zone",
-                        "max_players capped {} -> {} (CFX licence entitlement)",
-                        config.server.max_players, effective);
-                    config.server.max_players = effective;
-                }
-                tracing::info!(target: "zone",
-                    "CFX licence verified by the official component — startup authorised \
-                     (max_players = {})", config.server.max_players);
-            }
-        }
-    }
-
-    if need_escrow {
-        manager.set_script_decryptor(handle.decryptor());
-        tracing::info!(target: "zone", "escrow plugin active (shared CFX sidecar)");
-    }
+    manager.set_script_decryptor(handle.decryptor());
+    tracing::info!(target: "zone", "escrow plugin active (zone-local CFX sidecar)");
 
     Ok(Some(handle))
 }
@@ -160,15 +75,9 @@ fn wire_cfx_sidecar(
 #[cfg(not(all(feature = "escrow", windows)))]
 fn wire_cfx_sidecar(
     manager: &Arc<ResourceManager>,
-    config: &mut BastonConfig,
+    config: &BastonConfig,
 ) -> anyhow::Result<Option<()>> {
     let _ = manager;
-    if config.license.mode == LicenseMode::Verified {
-        tracing::warn!(target: "zone",
-            "[license] mode = \"verified\" needs a Windows build with --features escrow. \
-             The key is well-formed (gate-level) but was NOT validated by the CFX component \
-             on this build — do not treat this as verified");
-    }
     if config.escrow.enabled {
         #[cfg(not(feature = "escrow"))]
         tracing::warn!(target: "zone",
@@ -206,12 +115,8 @@ async fn main() -> anyhow::Result<()> {
     raise_timer_resolution();
 
     let config_path = std::env::var("BASTON_CONFIG").unwrap_or_else(|_| "baston.toml".into());
-    let mut config = BastonConfig::load(Path::new(&config_path))?;
+    let config = BastonConfig::load(Path::new(&config_path))?;
     let zone_id = config.nats.zone_id.clone();
-
-    // Licence/escrow shape is validated inside `BastonConfig::load`. `verified`
-    // licence is enforced later, once the sidecar runs.
-    apply_simple_license_modes(&config);
 
     let bounds_str = config
         .meshing
@@ -263,9 +168,9 @@ async fn main() -> anyhow::Result<()> {
     let script_host =
         ScriptHost::spawn_with_net(Arc::clone(&deferrals), Arc::clone(&players), net_bridge)?;
     let resource_manager = ResourceManager::new(script_host.clone(), config.resources.path.clone());
-    // Shared genuine-FXServer sidecar for licence verification and/or escrow.
-    // Kept alive for the whole process; a denied licence bails here (fail-closed).
-    let _cfx_sidecar = wire_cfx_sidecar(&resource_manager, &mut config)?;
+    // Optional zone-local escrow bridge. Gateway owns global CFX identity.
+    // Keep the handle alive for resource decryptions.
+    let _cfx_sidecar = wire_cfx_sidecar(&resource_manager, &config)?;
     resource_manager.discover().await?;
     resource_manager.start_all().await?;
     let _watcher = if config.dev.hot_reload {
@@ -457,7 +362,7 @@ async fn main() -> anyhow::Result<()> {
             });
         })),
     );
-    tokio::spawn(ownership.run());
+    tokio::spawn(Arc::new(ownership).run());
 
     // ── Federation: ZoneService gRPC + registration + heartbeats ──
     let em_for_count = Arc::clone(&entity_manager);
@@ -472,12 +377,17 @@ async fn main() -> anyhow::Result<()> {
         on_activate_player: {
             let players = Arc::clone(&players);
             let host = script_host.clone();
+            let activate_ingest = Arc::clone(&state_ingest);
             Arc::new(move |player_id, snapshot| {
                 players.insert(baston_protocol::PlayerInfo {
                     source: player_id,
                     name: snapshot.name.clone(),
                     identifiers: snapshot.identifiers.clone(),
                 });
+                // Resurrect the ped and everything the player owned BEFORE
+                // scripts observe the join, so a `playerJoining` handler that
+                // inspects the player's vehicle or health sees the real state.
+                activate_ingest.restore_player_state(snapshot);
                 // script_state: resource → JSON text, decoded for the event.
                 let state_obj: serde_json::Map<String, serde_json::Value> = snapshot
                     .script_state
@@ -504,8 +414,15 @@ async fn main() -> anyhow::Result<()> {
         on_release_player: {
             let players = Arc::clone(&players);
             let ingest = Arc::clone(&state_ingest);
+            let release_em = Arc::clone(&entity_manager);
             Arc::new(move |player_id, reason| {
                 tracing::info!(target: "zone", player = player_id, reason, "release hook");
+                // Everything the player was authoritative for goes with it —
+                // its ped via the ingest, its vehicles and props here.
+                // Otherwise each disconnect leaves permanent ghost entities.
+                for entity in release_em.entities_owned_by(player_id) {
+                    release_em.remove_entity(entity.entity_id);
+                }
                 ingest.on_player_dropped(player_id);
                 players.remove(player_id);
             })
@@ -534,6 +451,7 @@ async fn main() -> anyhow::Result<()> {
         mesh.gateway_client(),
         config.meshing.handoff_cooldown_secs,
     );
+    mesh.set_handoff_manager(Arc::clone(&handoff_manager));
     let cleanup_ingest = Arc::clone(&state_ingest);
     let cleanup_em = Arc::clone(&entity_manager);
     let cleanup_players = Arc::clone(&players);

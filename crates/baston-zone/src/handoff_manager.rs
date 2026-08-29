@@ -136,6 +136,66 @@ impl HandoffManager {
         }
     }
 
+    /// Undo a committed crossing by re-pointing the gateway's routing table
+    /// back at this zone.
+    ///
+    /// `ConfirmHandoff` moves the player's route before the target zone is
+    /// asked to activate. If that activation then fails, the player is routed
+    /// to a zone that never woke it up — its updates land nowhere and it is
+    /// invisible to every script. Committing back to ourselves restores a
+    /// consistent world: the player never left, and the mesh forwarder's held
+    /// packets flush here.
+    ///
+    /// Returns `true` when the gateway accepted the rollback.
+    pub async fn rollback_crossing(&self, player_id: u32) -> bool {
+        let req = ConfirmHandoffRequest {
+            player_id,
+            from_zone: self.zone_id.clone(),
+            to_zone: self.zone_id.clone(),
+        };
+        let accepted = matches!(
+            tokio::time::timeout(PREPARE_TIMEOUT, self.gateway.clone().confirm_handoff(req)).await,
+            Ok(Ok(resp)) if resp.get_ref().ok
+        );
+        if accepted {
+            metrics::counter!("handoff_rollbacks_total").increment(1);
+        } else {
+            // Nothing else can save the player from here: say so loudly rather
+            // than leaving a silent inconsistency.
+            tracing::error!(
+                target: "zone",
+                zone = %self.zone_id,
+                "handoff rollback REFUSED for player={player_id} — routing is now inconsistent"
+            );
+            metrics::counter!("handoff_rollback_failures_total").increment(1);
+        }
+        accepted
+    }
+
+    /// Drop bookkeeping for a player that left the mesh entirely.
+    pub fn forget(&self, player_id: u32) {
+        self.pending_handoffs.remove(&player_id);
+        self.cooldowns.remove(&player_id);
+    }
+
+    /// Expire stale bookkeeping.
+    ///
+    /// Both maps are keyed by player and only ever cleared on the happy path,
+    /// so a disconnect mid-handoff leaves an entry behind forever. Sweeping on
+    /// the boundary scan keeps them bounded by the live population instead of
+    /// by the session's total connection count.
+    pub fn prune_expired(&self) {
+        self.cooldowns.retain(|_, at| at.elapsed() < self.cooldown);
+        self.pending_handoffs.retain(|_, state| match state {
+            HandoffState::PreparationRequested { requested_at, .. } => {
+                requested_at.elapsed() < PREPARE_TIMEOUT * 2
+            }
+            // Ready/Transferring are resolved by the crossing path itself;
+            // they are short-lived and must not be swept from under it.
+            _ => true,
+        });
+    }
+
     /// Cancel a pending handoff (player turned around, or prepare failed).
     /// Starts the cooldown so the same player doesn't immediately re-trigger.
     pub fn cancel(&self, player_id: u32) {

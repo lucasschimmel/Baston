@@ -19,6 +19,14 @@ use crate::zone_registry::ZoneRegistry;
 /// How long updates are buffered around a handoff commit.
 const HANDOFF_HOLD: Duration = Duration::from_millis(50);
 
+/// Budget for the zone-side release RPC. Bounded so a wedged zone cannot stall
+/// the forwarder task for every other player.
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Ceiling on forwarder shards. Beyond a handful the bottleneck is NATS, not
+/// the number of publishing tasks.
+const MAX_FORWARD_SHARDS: usize = 8;
+
 /// Bounded so a slow NATS consumer can't let the forward queue grow without
 /// limit. State updates are unreliable (superseded ~50ms later), so overflow
 /// drops them rather than risking OOM.
@@ -43,12 +51,22 @@ enum ForwardMsg {
     FlushHold {
         source: u32,
     },
+    /// The client disconnected: release it in its zone and forget it here.
+    Dropped {
+        source: u32,
+    },
 }
 
 /// Cloneable handle used by the UDP server (sync context).
+///
+/// Work is sharded across several tasks keyed by player. Sharding on the
+/// player is what makes it safe: every message about a given player — its
+/// updates, its handoff hold, its release — lands on the same shard, so the
+/// ordering the handoff hold depends on is preserved exactly, while unrelated
+/// players stop queueing behind each other's NATS round trips.
 #[derive(Clone)]
 pub struct MeshForwarder {
-    tx: mpsc::Sender<ForwardMsg>,
+    shards: Arc<Vec<mpsc::Sender<ForwardMsg>>>,
 }
 
 impl MeshForwarder {
@@ -57,9 +75,33 @@ impl MeshForwarder {
         router: Arc<ConnectionRouter>,
         registry: Arc<ZoneRegistry>,
     ) -> Self {
-        let (tx, rx) = mpsc::channel(FORWARD_CAPACITY);
-        tokio::spawn(run(nats, router, registry, rx, tx.clone()));
-        Self { tx }
+        let shard_count = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .clamp(1, MAX_FORWARD_SHARDS);
+        let mut shards = Vec::with_capacity(shard_count);
+        for _ in 0..shard_count {
+            // Capacity is per shard, so total buffering scales with the shard
+            // count rather than being split thinner as shards are added.
+            let (tx, rx) = mpsc::channel(FORWARD_CAPACITY);
+            tokio::spawn(run(
+                nats.clone(),
+                Arc::clone(&router),
+                Arc::clone(&registry),
+                rx,
+                tx.clone(),
+            ));
+            shards.push(tx);
+        }
+        tracing::info!(target: "gateway", shards = shard_count, "mesh forwarder started");
+        Self {
+            shards: Arc::new(shards),
+        }
+    }
+
+    /// The shard owning every message about `source`.
+    fn shard(&self, source: u32) -> &mpsc::Sender<ForwardMsg> {
+        &self.shards[source as usize % self.shards.len()]
     }
 
     /// Forward a client state update toward the player's current zone.
@@ -67,7 +109,7 @@ impl MeshForwarder {
     /// unreliable and superseded shortly after).
     pub fn forward(&self, source: u32, update: ClientStateUpdate) {
         if self
-            .tx
+            .shard(source)
             .try_send(ForwardMsg::Update { source, update })
             .is_err()
         {
@@ -78,9 +120,34 @@ impl MeshForwarder {
     /// Called from the handoff-committed hook: buffer this player's updates
     /// for 50ms, then flush them to the (new) current zone.
     pub fn begin_handoff_hold(&self, source: u32) {
-        if self.tx.try_send(ForwardMsg::BeginHold { source }).is_err() {
-            tracing::warn!(target: "gateway", source, "handoff hold dropped: forward queue full");
-        }
+        self.send_control(source, ForwardMsg::BeginHold { source }, "handoff hold");
+    }
+
+    /// The client disconnected: tell its zone to release it, and drop the
+    /// per-player bookkeeping this forwarder holds.
+    ///
+    /// Without this nothing ever tells a zone that a player is gone — the
+    /// zone keeps its ped, its entities and its directory entry forever, and
+    /// the leak compounds with every reconnect.
+    pub fn player_dropped(&self, source: u32) {
+        self.send_control(source, ForwardMsg::Dropped { source }, "player release");
+    }
+
+    /// Control messages change bookkeeping, so losing one corrupts state that
+    /// nothing later repairs. Take the lock-free path when there is room, and
+    /// fall back to an awaited send rather than dropping when the queue is
+    /// full — late is recoverable, lost is not.
+    fn send_control(&self, source: u32, msg: ForwardMsg, what: &'static str) {
+        let shard = self.shard(source);
+        let Err(mpsc::error::TrySendError::Full(msg)) = shard.try_send(msg) else {
+            return;
+        };
+        metrics::counter!("mesh_forward_control_deferred_total").increment(1);
+        tracing::warn!(target: "gateway", %what, "forward queue full: control message deferred");
+        let shard = shard.clone();
+        tokio::spawn(async move {
+            let _ = shard.send(msg).await;
+        });
     }
 }
 
@@ -149,8 +216,43 @@ async fn run(
                     }
                 }
             }
+            ForwardMsg::Dropped { source } => {
+                holds.remove(&source);
+                homed.remove(&source);
+                release_in_zone(&router, &registry, source).await;
+            }
         }
     }
+}
+
+/// Tell the player's zone to release it, then forget the route.
+///
+/// Ordering matters: the route is what tells us which zone to call, so it is
+/// removed only after the RPC has been addressed.
+async fn release_in_zone(router: &ConnectionRouter, registry: &ZoneRegistry, source: u32) {
+    let Some(zone) = router.zone_of(source) else {
+        return; // never routed (or already released)
+    };
+    if let Some(mut client) = registry.zone_client(&zone).await {
+        let request = baston_protocol::mesh::ReleasePlayerRequest {
+            player_id: source,
+            reason: "client disconnected".to_owned(),
+        };
+        match tokio::time::timeout(RELEASE_TIMEOUT, client.release_player(request)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(status)) => {
+                tracing::warn!(target: "gateway", source, zone = %zone, error = %status,
+                    "ReleasePlayer failed — the zone may retain stale player state");
+                metrics::counter!("mesh_release_failures_total").increment(1);
+            }
+            Err(_) => {
+                tracing::warn!(target: "gateway", source, zone = %zone,
+                    "ReleasePlayer timed out — the zone may retain stale player state");
+                metrics::counter!("mesh_release_failures_total").increment(1);
+            }
+        }
+    }
+    router.remove(source);
 }
 
 async fn publish(

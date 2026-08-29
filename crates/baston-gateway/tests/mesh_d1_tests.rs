@@ -38,6 +38,7 @@ fn snapshot(source: u32) -> PlayerStateSnapshot {
         health: 200.0,
         armour: 0.0,
         current_weapon: 0,
+        player_entity: None,
         owned_entities: vec![],
         script_state: Default::default(),
     }

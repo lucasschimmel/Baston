@@ -24,6 +24,16 @@ pub struct PlayerStateSnapshot {
     pub armour: f32,
     pub current_weapon: u32,
 
+    /// The player's own ped entity, verbatim.
+    ///
+    /// The loose spatial and health fields above are the routing summary the
+    /// gateway reads; this is the authoritative record the target zone
+    /// resurrects, so the entity id and model survive the crossing instead of
+    /// being re-derived from whatever the client reports next. `None` only
+    /// when the player had not been placed in the origin zone yet.
+    #[serde(default)]
+    pub player_entity: Option<EntityState>,
+
     /// Entities network-owned by this player (occupied vehicle, etc.).
     pub owned_entities: Vec<EntityState>,
 
@@ -68,6 +78,21 @@ mod tests {
             health: 175.0,
             armour: 50.0,
             current_weapon: 0x1B06D571,
+            player_entity: Some(crate::entity::EntityState {
+                entity_id: crate::entity::new_entity_id(),
+                entity_type: crate::entity::EntityType::Player,
+                network_owner: Some(7),
+                model_hash: 0xDEAD_BEEF,
+                coords: [-120.5, 33.0, 71.2],
+                heading: 90.0,
+                velocity: [1.0, 0.0, 0.0],
+                health: 175.0,
+                armour: 50.0,
+                extra: crate::entity::EntityExtra::Player {
+                    is_in_vehicle: false,
+                    vehicle_id: None,
+                },
+            }),
             owned_entities: vec![],
             script_state,
         };
@@ -76,5 +101,11 @@ mod tests {
         let state: serde_json::Value =
             serde_json::from_str(&decoded.script_state["axiom-core"]).unwrap();
         assert_eq!(state["characterId"], 42);
+        // The ped must survive the wire: it is what gives the target zone
+        // authority over the player's health and identity after a crossing.
+        let ped = decoded.player_entity.expect("ped survives encoding");
+        assert_eq!(ped.entity_id, snap.player_entity.unwrap().entity_id);
+        assert_eq!(ped.health, 175.0);
+        assert_eq!(ped.model_hash, 0xDEAD_BEEF);
     }
 }

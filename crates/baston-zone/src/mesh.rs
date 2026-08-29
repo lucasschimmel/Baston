@@ -23,7 +23,9 @@ use tonic::{Request, Response, Status};
 #[derive(Debug)]
 pub enum GhostState {
     Pending {
-        snapshot: PlayerStateSnapshot,
+        /// Boxed so an `Active` ghost — the common, long-lived case — does not
+        /// pay the full snapshot's footprint in every map entry.
+        snapshot: Box<PlayerStateSnapshot>,
         created_at: Instant,
     },
     Active,
@@ -61,6 +63,9 @@ pub struct ZoneMesh {
     /// resource control to this zone. `None` until set (RPCs answer
     /// unavailable).
     resource_manager: std::sync::RwLock<Option<Arc<crate::ResourceManager>>>,
+    /// Wired by the composition root (the manager is built after the mesh) so
+    /// releasing a player also clears its handoff bookkeeping.
+    handoff_manager: std::sync::RwLock<Option<Arc<crate::handoff_manager::HandoffManager>>>,
 }
 
 impl ZoneMesh {
@@ -86,11 +91,27 @@ impl ZoneMesh {
             peer_clients: DashMap::new(),
             hooks,
             resource_manager: std::sync::RwLock::new(None),
+            handoff_manager: std::sync::RwLock::new(None),
         }))
     }
 
     /// Give the mesh access to the zone's ResourceManager (resource-control
     /// RPCs). Call before `spawn_grpc_server`.
+    /// Let a release purge handoff bookkeeping for the departing player.
+    pub fn set_handoff_manager(&self, manager: Arc<crate::handoff_manager::HandoffManager>) {
+        *self
+            .handoff_manager
+            .write()
+            .expect("handoff manager lock poisoned") = Some(manager);
+    }
+
+    fn handoff_manager(&self) -> Option<Arc<crate::handoff_manager::HandoffManager>> {
+        self.handoff_manager
+            .read()
+            .expect("handoff manager lock poisoned")
+            .clone()
+    }
+
     pub fn set_resource_manager(&self, rm: Arc<crate::ResourceManager>) {
         *self.resource_manager.write().expect("rm lock poisoned") = Some(rm);
     }
@@ -254,7 +275,7 @@ impl ZoneService for ZoneGrpc {
         self.mesh.ghosts.insert(
             req.player_id,
             GhostState::Pending {
-                snapshot,
+                snapshot: Box::new(snapshot),
                 created_at: Instant::now(),
             },
         );
@@ -299,6 +320,9 @@ impl ZoneService for ZoneGrpc {
     ) -> Result<Response<ReleasePlayerResponse>, Status> {
         let req = request.into_inner();
         self.mesh.ghosts.remove(&req.player_id);
+        if let Some(manager) = self.mesh.handoff_manager() {
+            manager.forget(req.player_id);
+        }
         (self.mesh.hooks.on_release_player)(req.player_id, &req.reason);
         tracing::info!(target: "zone", zone = %self.mesh.zone_id,
             "player={} released ({})", req.player_id,

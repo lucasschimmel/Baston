@@ -13,6 +13,7 @@ use baston_protocol::entity::{
     distance3d, new_entity_id, EntityExtra, EntityId, EntityState, EntityStateUpdate, EntityType,
 };
 use baston_protocol::udp::state::ClientStateUpdate;
+use baston_protocol::PlayerStateSnapshot;
 use dashmap::DashMap;
 
 use crate::entity_manager::EntityManager;
@@ -221,6 +222,40 @@ impl StateIngest {
         id
     }
 
+    /// Re-establish a handed-off player's authoritative state in this zone.
+    ///
+    /// The origin zone destroys everything the player owned once the handoff
+    /// commits. Without this the ped would be lazily re-created from the next
+    /// client report — surrendering server authority over health and armour to
+    /// the client at every crossing — and every entity the player owned, its
+    /// vehicle first of all, would simply cease to exist.
+    ///
+    /// Entity ids are preserved so scripts and clients that already hold a
+    /// reference stay consistent across the mesh. Returns the ped's entity id
+    /// when the snapshot carried one.
+    pub fn restore_player_state(&self, snapshot: &PlayerStateSnapshot) -> Option<EntityId> {
+        let source = snapshot.source_id;
+        for entity in &snapshot.owned_entities {
+            self.entity_manager.spawn_entity(entity.clone());
+        }
+        let ped = snapshot.player_entity.clone()?;
+        let id = ped.entity_id;
+        self.entity_manager.spawn_entity(ped);
+        self.player_entities.insert(source, id);
+        // Seed the anti-cheat baseline at the handed-off position, otherwise
+        // the first update in this zone reads as a teleport from the origin.
+        self.last_accepted
+            .insert(id, (Instant::now(), snapshot.coords));
+        tracing::info!(
+            target: "zone",
+            source,
+            entity_id = %id,
+            owned = snapshot.owned_entities.len(),
+            "player state restored after handoff"
+        );
+        Some(id)
+    }
+
     /// Opt a source into `msgBastonSnapshot` pushes (binary-protocol client).
     pub fn mark_snapshot_subscriber(&self, source: u32) {
         self.snapshot_subscribers.insert(source, ());
@@ -260,6 +295,121 @@ mod tests {
 
     fn ingest() -> StateIngest {
         StateIngest::new(Arc::new(EntityManager::new()), 200.0)
+    }
+
+    fn entity(id: EntityId, entity_type: EntityType, owner: u32, coords: [f32; 3]) -> EntityState {
+        EntityState {
+            entity_id: id,
+            entity_type,
+            network_owner: Some(owner),
+            model_hash: 0xDEAD_BEEF,
+            coords,
+            heading: 90.0,
+            velocity: [0.0; 3],
+            health: 175.0,
+            armour: 42.0,
+            extra: EntityExtra::Player {
+                is_in_vehicle: false,
+                vehicle_id: None,
+            },
+        }
+    }
+
+    fn handoff_snapshot(
+        source: u32,
+        ped: EntityState,
+        owned: Vec<EntityState>,
+    ) -> PlayerStateSnapshot {
+        PlayerStateSnapshot {
+            source_id: source,
+            name: "Lucas".to_owned(),
+            identifiers: vec!["license:abc".to_owned()],
+            coords: ped.coords,
+            heading: ped.heading,
+            velocity: ped.velocity,
+            health: ped.health,
+            armour: ped.armour,
+            current_weapon: 0,
+            player_entity: Some(ped),
+            owned_entities: owned,
+            script_state: Default::default(),
+        }
+    }
+
+    /// A player crossing a zone boundary must arrive with everything it owned.
+    /// Before this, the target zone only restored the name and script state:
+    /// the vehicle vanished and the ped was re-created from the client's own
+    /// next report, handing health authority to the client.
+    #[test]
+    fn handoff_restores_ped_and_owned_entities() {
+        let ingest = ingest();
+        let ped_id = new_entity_id();
+        let vehicle_id = new_entity_id();
+        let snapshot = handoff_snapshot(
+            7,
+            entity(ped_id, EntityType::Player, 7, [120.0, -34.0, 8.5]),
+            vec![entity(
+                vehicle_id,
+                EntityType::Vehicle,
+                7,
+                [122.0, -34.0, 8.5],
+            )],
+        );
+
+        let restored = ingest.restore_player_state(&snapshot);
+
+        assert_eq!(restored, Some(ped_id), "the ped keeps its identity");
+        assert_eq!(ingest.player_entity(7), Some(ped_id));
+        assert_eq!(ingest.entity_manager().count(), 2, "ped + vehicle");
+
+        let ped = ingest.entity_manager().get(ped_id).expect("ped restored");
+        assert_eq!(ped.health, 175.0, "server keeps health authority");
+        assert_eq!(ped.armour, 42.0);
+        assert_eq!(ped.coords, [120.0, -34.0, 8.5]);
+        assert_eq!(ped.model_hash, 0xDEAD_BEEF, "model survives the crossing");
+
+        let vehicle = ingest
+            .entity_manager()
+            .get(vehicle_id)
+            .expect("owned vehicle restored");
+        assert_eq!(vehicle.network_owner, Some(7));
+    }
+
+    /// The first update after a crossing must not read as a teleport from the
+    /// origin zone, or the anti-cheat rejects the player it just welcomed.
+    #[test]
+    fn restored_player_is_not_flagged_as_teleporting() {
+        let ingest = ingest();
+        let ped_id = new_entity_id();
+        let snapshot = handoff_snapshot(
+            7,
+            entity(ped_id, EntityType::Player, 7, [1000.0, 0.0, 0.0]),
+            Vec::new(),
+        );
+        ingest.restore_player_state(&snapshot);
+
+        // A small step from the handed-off position is plausible movement.
+        let accepted = ingest.apply(7, sample([1001.0, 0.0, 0.0]));
+
+        assert_eq!(accepted, Ok(ped_id));
+    }
+
+    /// A snapshot from a player that was never placed carries no ped; the
+    /// restore must still bring the owned entities across.
+    #[test]
+    fn restore_without_a_ped_still_restores_owned_entities() {
+        let ingest = ingest();
+        let vehicle_id = new_entity_id();
+        let mut snapshot = handoff_snapshot(
+            7,
+            entity(new_entity_id(), EntityType::Player, 7, [0.0; 3]),
+            vec![entity(vehicle_id, EntityType::Vehicle, 7, [5.0, 0.0, 0.0])],
+        );
+        snapshot.player_entity = None;
+
+        assert_eq!(ingest.restore_player_state(&snapshot), None);
+        assert_eq!(ingest.player_entity(7), None);
+        assert!(ingest.entity_manager().get(vehicle_id).is_some());
     }
 
     #[test]
