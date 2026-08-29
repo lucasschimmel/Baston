@@ -24,6 +24,7 @@ deno_core = "0.406"
 dashmap = "6"
 notify = "8"
 tower-http = { version = "0.7", features = ["trace", "cors", "timeout"] }
+bcrypt = "0.17"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 # Explicit provider so rustls doesn't panic when both ring (reqwest) and aws-lc-rs (axum-server) are compiled in.

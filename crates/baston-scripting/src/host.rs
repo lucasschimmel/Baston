@@ -127,6 +127,9 @@ pub struct ScriptHost {
     kvp: Arc<std::sync::RwLock<Arc<crate::KvpStore>>>,
     /// Outbound HTTP bridge, set by the composition root that owns the worker.
     http: Arc<std::sync::RwLock<Option<crate::HttpBridge>>>,
+    /// Resource lifecycle control, set by the composition root that owns the
+    /// resource manager. Until then a script cannot start or stop anything.
+    resource_control: Arc<std::sync::RwLock<Arc<dyn crate::ResourceControl>>>,
     /// Inbound HTTP handlers (`SetHttpHandler`). Always present: registration
     /// is driven by the resources themselves, and the gateway reads it to
     /// decide whether a request has anywhere to go.
@@ -202,6 +205,7 @@ impl ScriptHost {
             ))),
             http: Arc::new(std::sync::RwLock::new(None)),
             http_handlers: Arc::new(crate::HttpHandlerRegistry::new()),
+            resource_control: Arc::new(std::sync::RwLock::new(Arc::new(crate::NoResourceControl))),
             started_at: Instant::now(),
             cross_zone: Arc::new(std::sync::RwLock::new(None)),
             voice: Arc::new(std::sync::RwLock::new(None)),
@@ -253,6 +257,24 @@ impl ScriptHost {
     /// feeds it.
     pub fn http_handlers(&self) -> Arc<crate::HttpHandlerRegistry> {
         Arc::clone(&self.http_handlers)
+    }
+
+    /// Install the resource lifecycle control (`StartResource` and friends).
+    /// Applies to resources loaded afterwards.
+    pub fn set_resource_control(&self, control: Arc<dyn crate::ResourceControl>) {
+        *self
+            .resource_control
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = control;
+    }
+
+    fn resource_control(&self) -> Arc<dyn crate::ResourceControl> {
+        Arc::clone(
+            &self
+                .resource_control
+                .read()
+                .unwrap_or_else(|e| e.into_inner()),
+        )
     }
 
     /// Dispatch an event into one resource only.
@@ -458,6 +480,7 @@ impl ScriptHost {
             kvp: self.kvp(),
             http: self.http(),
             http_handlers: Arc::clone(&self.http_handlers),
+            resource_control: self.resource_control(),
             voice: self.voice.read().unwrap_or_else(|e| e.into_inner()).clone(),
         })?;
         let mut queued = handle
@@ -728,6 +751,7 @@ struct RuntimeThreadParams<'a> {
     kvp: Arc<crate::KvpStore>,
     http: Option<crate::HttpBridge>,
     http_handlers: Arc<crate::HttpHandlerRegistry>,
+    resource_control: Arc<dyn crate::ResourceControl>,
     voice: Option<Arc<dyn crate::extensions::VoiceControl>>,
 }
 
@@ -752,6 +776,7 @@ fn spawn_runtime_thread(
         kvp,
         http,
         http_handlers,
+        resource_control,
         voice,
         ..
     } = params;
@@ -790,6 +815,7 @@ fn spawn_runtime_thread(
                 kvp,
                 http,
                 http_handlers,
+                resource_control,
             });
             runtime.install_voice(crate::extensions::SharedVoice(voice));
             let _ = init_tx.send(Ok(()));

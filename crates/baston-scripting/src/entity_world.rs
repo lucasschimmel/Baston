@@ -65,6 +65,12 @@ pub struct EntitySummary {
     pub armour: Option<f32>,
     /// Model hash, once a creation node has been seen.
     pub model: Option<u32>,
+    /// The wire entity type (`NetObjEntityType`), finer-grained than
+    /// [`Self::entity_type`]: it tells a boat from a plane.
+    pub net_type: u8,
+    /// The client that first created the entity, which keeps answering after
+    /// ownership migrates away.
+    pub first_owner: u32,
     /// Heading in degrees, from the entity's orientation node.
     pub heading: Option<f32>,
     /// Heading a ped is turning towards.
@@ -292,6 +298,8 @@ mod tests {
             network_id: id,
             owner,
             entity_type,
+            net_type: 0,
+            first_owner: owner,
             position: [id as f32, 0.0, 0.0],
             velocity: [0.0; 3],
             routing_bucket: 0,

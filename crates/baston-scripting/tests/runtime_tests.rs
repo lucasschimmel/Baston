@@ -570,7 +570,9 @@ async fn stalled_client_native_does_not_block_other_events() {
         .await
         .expect("native invoke sent")
         .expect("net bridge open");
-    let baston_scripting::NetOutbound::ClientEvent { event, .. } = first;
+    let baston_scripting::NetOutbound::ClientEvent { event, .. } = first else {
+        panic!("a native dispatch emits a JSON-args client event, not a raw one")
+    };
     assert_eq!(event, "__baston:invokeNative");
 
     let started = std::time::Instant::now();
@@ -579,7 +581,9 @@ async fn stalled_client_native_does_not_block_other_events() {
         .await
         .expect("'fast' must not wait for the stalled native")
         .expect("net bridge open");
-    let baston_scripting::NetOutbound::ClientEvent { event, .. } = pong;
+    let baston_scripting::NetOutbound::ClientEvent { event, .. } = pong else {
+        panic!("TriggerClientEvent emits a JSON-args client event, not a raw one")
+    };
     assert_eq!(event, "pong");
     assert!(
         started.elapsed() < Duration::from_millis(900),
@@ -610,6 +614,8 @@ fn owned_entity(network_id: u32, owner: u32) -> baston_scripting::EntitySummary 
         network_id,
         owner,
         entity_type: baston_scripting::ScriptEntityType::Ped,
+        net_type: 6, // NetObjEntityType::Ped
+        first_owner: owner,
         position: [0.0; 3],
         velocity: [0.0; 3],
         routing_bucket: 0,
@@ -629,7 +635,10 @@ fn invoke_native_call(outbound: baston_scripting::NetOutbound) -> (u32, String, 
         source,
         event,
         args_json,
-    } = outbound;
+    } = outbound
+    else {
+        panic!("a native dispatch emits a JSON-args client event, not a raw one")
+    };
     assert_eq!(event, "__baston:invokeNative");
     let payload: serde_json::Value = serde_json::from_str(&args_json).expect("payload is JSON");
     let call = payload[0].clone();
@@ -804,6 +813,8 @@ fn synced_vehicle(network_id: u32, owner: u32) -> baston_scripting::EntitySummar
         network_id,
         owner,
         entity_type: baston_scripting::ScriptEntityType::Vehicle,
+        net_type: 0, // NetObjEntityType::Automobile
+        first_owner: owner,
         position: [0.0; 3],
         velocity: [3.0, 4.0, 0.0],
         routing_bucket: 0,
@@ -1077,6 +1088,165 @@ async fn entity_script_resolves_the_owning_resource_name() {
                 }
                 // A hash nothing loaded produced resolves to nothing.
                 if (GetEntityScript(9999) !== '') throw new Error('unknown entity')
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load");
+}
+
+// --- server control natives ---
+
+#[tokio::test]
+async fn resource_lifecycle_natives_reach_the_manager() {
+    let (host, _) = host();
+    let (control, mut commands) = baston_scripting::QueuedResourceControl::new();
+    host.set_resource_control(Arc::new(control));
+
+    host.load_resource(
+        "admin",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                if (StartResource('chat') !== true) throw new Error('start refused')
+                if (StopResource('chat') !== true) throw new Error('stop refused')
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load");
+
+    assert_eq!(
+        commands.recv().await,
+        Some(baston_scripting::ResourceCommand::Start("chat".into()))
+    );
+    assert_eq!(
+        commands.recv().await,
+        Some(baston_scripting::ResourceCommand::Stop("chat".into()))
+    );
+}
+
+/// With no manager wired the natives must report failure rather than look like
+/// they worked — a script can then fall back instead of waiting on a resource
+/// that will never start.
+#[tokio::test]
+async fn resource_lifecycle_natives_refuse_without_a_manager() {
+    let (host, _) = host();
+    host.load_resource(
+        "admin",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: "if (StartResource('chat') !== false) throw new Error('claimed success')".into(),
+        }],
+    )
+    .await
+    .expect("load");
+}
+
+#[tokio::test]
+async fn server_metadata_natives_write_the_convars_info_json_reads() {
+    let (host, _) = host();
+    host.load_resource(
+        "meta",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                SetGameType('Roleplay')
+                SetMapName('Los Santos')
+                if (GetConvar('sv_gametype', '') !== 'Roleplay') throw new Error('game type')
+                if (GetConvar('sv_mapname', '') !== 'Los Santos') throw new Error('map name')
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load");
+}
+
+/// bcrypt round trip: the hash a script stores must verify, and a wrong
+/// password must not.
+#[tokio::test]
+async fn password_hashing_round_trips() {
+    let (host, _) = host();
+    host.load_resource(
+        "auth",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                const hash = GetPasswordHash('correct horse battery staple')
+                if (!hash.startsWith('$2')) throw new Error(`not a bcrypt hash: ${hash}`)
+                if (VerifyPasswordHash('correct horse battery staple', hash) !== true) {
+                  throw new Error('the right password did not verify')
+                }
+                if (VerifyPasswordHash('wrong', hash) !== false) {
+                  throw new Error('the wrong password verified')
+                }
+                if (VerifyPasswordHash('anything', 'not-a-hash') !== false) {
+                  throw new Error('a malformed hash must verify as false')
+                }
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load");
+}
+
+/// The internal event native carries msgpack the caller packed itself, so the
+/// bytes must reach the transport unchanged.
+#[tokio::test]
+async fn trigger_client_event_internal_forwards_its_payload_verbatim() {
+    let (host, mut net_rx) = host_with_net();
+    host.load_resource(
+        "raw-events",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                AddEventHandler('send', () => {
+                  // msgpack for [1, 255] — bytes that are not valid UTF-8 text.
+                  const payload = String.fromCharCode(0x92, 0x01, 0xCC, 0xFF)
+                  TriggerClientEventInternal('custom:ping', 7, payload, payload.length)
+                })
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load");
+
+    host.trigger_event("send", &[]).await.expect("event");
+
+    let outbound = tokio::time::timeout(Duration::from_secs(5), net_rx.recv())
+        .await
+        .expect("the raw event reached the bridge")
+        .expect("net bridge open");
+    let baston_scripting::NetOutbound::ClientEventRaw {
+        source,
+        event,
+        payload,
+    } = outbound
+    else {
+        panic!("the internal native must emit a raw event, not a JSON-args one")
+    };
+    assert_eq!(source, 7);
+    assert_eq!(event, "custom:ping");
+    assert_eq!(payload, vec![0x92, 0x01, 0xCC, 0xFF]);
+}
+
+#[tokio::test]
+async fn the_console_buffer_retains_what_resources_printed() {
+    let (host, _) = host();
+    host.load_resource(
+        "chatty",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                console.log('a distinctive line')
+                if (!GetConsoleBuffer().includes('a distinctive line')) {
+                  throw new Error('the console buffer did not retain the line')
+                }
             "#
             .into(),
         }],

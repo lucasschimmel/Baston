@@ -16,6 +16,7 @@ mod http_handler;
 mod kvp;
 pub mod net_bridge;
 pub mod observability;
+mod resource_control;
 mod resource_registry;
 mod runtime;
 mod state_bag;
@@ -37,6 +38,9 @@ pub use net_bridge::{NetBridge, NetOutbound};
 pub use observability::{
     DispatchKind, HandlerPerfStats, Observability, ProfilerRecordOptions, ProfilerStatus,
     ResMonSnapshot, ResourcePerfStats,
+};
+pub use resource_control::{
+    NoResourceControl, QueuedResourceControl, ResourceCommand, ResourceControl,
 };
 pub use resource_registry::{ResourceRegistry, ScriptResourceState};
 pub use runtime::{ScriptRuntime, SharedGameState};

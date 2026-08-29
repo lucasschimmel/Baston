@@ -332,6 +332,14 @@ pub(super) fn try_dispatch(
         }
 
         // --- entity metadata ---
+        "GET_NET_TYPE_FROM_ENTITY" => Some(serde_json::json!(
+            entity(state, args).map_or(0, |e| u32::from(e.net_type))
+        )),
+        // Survives ownership migration, which is the whole reason the native
+        // exists: it answers "who spawned this", not "who simulates it".
+        "NETWORK_GET_FIRST_ENTITY_OWNER" => Some(serde_json::json!(
+            entity(state, args).map_or(0, |e| e.first_owner)
+        )),
         "GET_ENTITY_POPULATION_TYPE" => Some(serde_json::json!(entity(state, args)
             .and_then(|e| e.sync.population_type)
             .unwrap_or(0))),

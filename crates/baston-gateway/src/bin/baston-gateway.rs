@@ -145,6 +145,49 @@ async fn main() -> anyhow::Result<()> {
     }
     let resource_manager = ResourceManager::new(script_host.clone(), config.resources.path.clone());
 
+    // `StartResource` and friends. The transitions run on this task rather
+    // than inside the calling isolate: the manager loads resources *through*
+    // the script host, so doing it inline would re-enter the very runtime the
+    // native was invoked from.
+    {
+        let (control, mut commands) = baston_scripting::QueuedResourceControl::new();
+        script_host.set_resource_control(Arc::new(control));
+        let manager = Arc::clone(&resource_manager);
+        tokio::spawn(async move {
+            while let Some(command) = commands.recv().await {
+                use baston_scripting::ResourceCommand;
+                let (what, name, result) = match command {
+                    ResourceCommand::Start(name) => {
+                        let result = manager.start(&name).await;
+                        ("start", name, result)
+                    }
+                    ResourceCommand::Stop(name) => {
+                        let result = manager.stop(&name).await;
+                        ("stop", name, result)
+                    }
+                    ResourceCommand::Restart(name) => {
+                        let result = manager.restart(&name).await;
+                        ("restart", name, result)
+                    }
+                    // The manager only knows one resource root, so a scan of
+                    // any other path has nothing to discover.
+                    ResourceCommand::ScanRoot(root) => {
+                        let result = manager.discover().await.map(|_| ());
+                        ("scan", root, result)
+                    }
+                };
+                if let Err(e) = result {
+                    tracing::warn!(
+                        target: "resources",
+                        %name,
+                        error = %e,
+                        "a script's resource {what} request failed"
+                    );
+                }
+            }
+        });
+    }
+
     resource_manager.discover().await?;
     resource_manager.start_all().await?;
 
@@ -465,20 +508,37 @@ async fn main() -> anyhow::Result<()> {
                     let Ok(v) = serde_json::from_slice::<serde_json::Value>(&msg.payload) else {
                         continue;
                     };
-                    let (Some(source), Some(event), Some(args_json)) = (
-                        v["source"].as_u64(),
-                        v["event"].as_str(),
-                        v["args"].as_str(),
-                    ) else {
+                    let (Some(source), Some(event)) = (v["source"].as_u64(), v["event"].as_str())
+                    else {
                         continue;
                     };
-                    match baston_protocol::events::json_args_to_msgpack(args_json) {
-                        Ok(args) => {
-                            let packet = baston_protocol::events::build_net_event(event, &args);
-                            udp.control().send(source as u32, 0, packet);
+                    // A zone can relay either JSON args to encode here, or a
+                    // payload the resource already packed itself
+                    // (TriggerClientEventInternal), which crosses NATS as a
+                    // byte array because JSON has no binary type.
+                    let args = if let Some(raw) = v["raw"].as_array() {
+                        Some(
+                            raw.iter()
+                                .filter_map(|b| b.as_u64().and_then(|b| u8::try_from(b).ok()))
+                                .collect::<Vec<u8>>(),
+                        )
+                    } else {
+                        match v["args"]
+                            .as_str()
+                            .map(baston_protocol::events::json_args_to_msgpack)
+                        {
+                            Some(Ok(args)) => Some(args),
+                            Some(Err(e)) => {
+                                tracing::error!(target: "gateway", error = %e,
+                                    "zone outbound event encode failed");
+                                None
+                            }
+                            None => None,
                         }
-                        Err(e) => tracing::error!(target: "gateway", error = %e,
-                            "zone outbound event encode failed"),
+                    };
+                    if let Some(args) = args {
+                        let packet = baston_protocol::events::build_net_event(event, &args);
+                        udp.control().send(source as u32, 0, packet);
                     }
                 }
             });

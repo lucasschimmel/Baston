@@ -92,8 +92,11 @@ pub struct ServerEntity {
     /// Model hash, decoded from the creation node.
     pub model: Option<u32>,
     /// Vehicle this ped was created inside and its seat, from the creation
-    /// node. [`Self::ped_game_state`] supersedes it once the ped syncs.
+    /// node. The ped game state supersedes it once the ped syncs.
     pub vehicle_seat: Option<(u16, u8)>,
+    /// The client that created the entity. Kept across ownership migration,
+    /// because that is exactly what `NetworkGetFirstEntityOwner` asks about.
+    pub first_owner: u32,
     /// Everything else the sync tree carries: vehicle state and appearance,
     /// ped occupancy and tasks, attachment, visibility.
     pub nodes: EntityNodeState,
@@ -409,6 +412,8 @@ impl ServerGameState {
                 armour: None,
                 model: Some(model),
                 vehicle_seat: None,
+                // Nobody created it but the server itself.
+                first_owner: 0,
                 nodes: EntityNodeState::default(),
                 heading: Some(heading),
                 desired_heading: None,

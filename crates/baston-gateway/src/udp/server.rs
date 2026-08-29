@@ -630,6 +630,8 @@ impl UdpServer {
                     ty if ty.is_vehicle() => ScriptEntityType::Vehicle,
                     _ => ScriptEntityType::Object,
                 },
+                net_type: entity.entity_type as u8,
+                first_owner: entity.first_owner,
                 position: entity.position,
                 velocity: entity.velocity,
                 routing_bucket: entity.routing_bucket,
@@ -719,6 +721,20 @@ impl UdpServer {
                     }
                 };
                 let packet = events::build_net_event(&event, &msgpack);
+                self.handle_command(UdpCommand::SendToSource {
+                    source,
+                    channel: 0,
+                    data: packet,
+                    reliable: true,
+                });
+            }
+            // Already msgpack: framed and sent as-is.
+            NetOutbound::ClientEventRaw {
+                source,
+                event,
+                payload,
+            } => {
+                let packet = events::build_net_event(&event, &payload);
                 self.handle_command(UdpCommand::SendToSource {
                     source,
                     channel: 0,

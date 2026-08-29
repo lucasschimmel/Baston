@@ -106,6 +106,10 @@ pub struct SharedKvp(pub Arc<crate::KvpStore>);
 #[derive(Clone)]
 pub struct SharedHttp(pub Option<crate::HttpBridge>);
 
+/// Resource lifecycle control (`StartResource`, `StopResource`).
+#[derive(Clone)]
+pub struct SharedResourceControl(pub Arc<dyn crate::ResourceControl>);
+
 /// Inbound HTTP handler registry (`SetHttpHandler`). Shared with the gateway,
 /// which owns the route that feeds it.
 #[derive(Clone)]
@@ -130,10 +134,37 @@ pub struct SharedVoice(pub Option<Arc<dyn VoiceControl>>);
 
 // --- 1. console ---
 
+/// Lines retained for `GetConsoleBuffer`. Bounded: the buffer is a debugging
+/// convenience, and a chatty resource must not turn it into a memory leak.
+const CONSOLE_BUFFER_LINES: usize = 512;
+
+/// Recent console output, oldest first.
+///
+/// Process-wide because the console is: `GetConsoleBuffer` is documented to
+/// return what the server printed, not what the calling resource printed.
+fn console_buffer() -> &'static std::sync::Mutex<std::collections::VecDeque<String>> {
+    static BUFFER: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<String>>> =
+        std::sync::OnceLock::new();
+    BUFFER.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
+}
+
+/// The retained console output as one blob, which is what the native returns.
+pub(super) fn console_buffer_text() -> String {
+    let buffer = console_buffer().lock().unwrap_or_else(|e| e.into_inner());
+    buffer.iter().cloned().collect::<Vec<_>>().join("\n")
+}
+
 #[op2(fast)]
 fn op_console_log(state: &mut OpState, #[string] msg: String) {
     let resource = &state.borrow::<RuntimeContext>().resource_name;
     tracing::info!(target: "script", resource, "{msg}");
+    {
+        let mut buffer = console_buffer().lock().unwrap_or_else(|e| e.into_inner());
+        if buffer.len() == CONSOLE_BUFFER_LINES {
+            buffer.pop_front();
+        }
+        buffer.push_back(format!("[{resource}] {msg}"));
+    }
     println!("{msg}");
 }
 

@@ -109,6 +109,8 @@ fn world_with(network_id: u32, owner: u32) -> EntityWorldView {
         network_id,
         owner,
         entity_type: ScriptEntityType::Vehicle,
+        net_type: 0,
+        first_owner: owner,
         position: [0.0; 3],
         velocity: [0.0; 3],
         routing_bucket: 0,

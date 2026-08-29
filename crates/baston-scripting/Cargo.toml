@@ -14,3 +14,4 @@ thiserror = { workspace = true }
 dashmap = { workspace = true }
 metrics = { workspace = true }
 baston-protocol = { workspace = true }
+bcrypt = { workspace = true }

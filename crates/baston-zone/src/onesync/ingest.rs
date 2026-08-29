@@ -169,6 +169,7 @@ impl ServerGameState {
             armour: previous.and_then(|e| e.armour),
             model: previous.and_then(|e| e.model),
             vehicle_seat: previous.and_then(|e| e.vehicle_seat),
+            first_owner: previous.map_or(source, |e| e.first_owner),
             nodes: previous.map(|e| e.nodes).unwrap_or_default(),
             heading: previous.and_then(|e| e.heading),
             desired_heading: previous.and_then(|e| e.desired_heading),

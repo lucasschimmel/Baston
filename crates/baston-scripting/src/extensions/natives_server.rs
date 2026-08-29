@@ -10,8 +10,9 @@ use dashmap::DashMap;
 use deno_core::{op2, OpState};
 
 use super::{
-    natives_world, rpc_natives, RuntimeContext, SharedEntityWorld, SharedHttp, SharedKvp,
-    SharedPlayers, SharedRouting, SharedStateBags, SharedVoice, SharedWorldControl, VoiceControl,
+    console_buffer_text, natives_world, rpc_natives, RuntimeContext, SharedConvars,
+    SharedEntityWorld, SharedHttp, SharedKvp, SharedPlayers, SharedResourceControl, SharedRouting,
+    SharedStateBags, SharedVoice, SharedWorldControl, VoiceControl,
 };
 use crate::ScriptEntityType;
 use crate::{
@@ -510,6 +511,160 @@ pub(super) fn op_cfx_server_native(
             tracing::info!(target: "structured-trace", "{}", json_arg_string(&args, 0));
             serde_json::Value::Null
         }
+        // --- permanently unavailable, answered rather than reported ---
+        //
+        // The commerce natives query Rockstar's store through the CFX backend.
+        // BASTON has no access to it and never will, so a definitive "no" is
+        // the right answer: reporting these as unimplemented would keep
+        // suggesting they are coming.
+        "CAN_PLAYER_START_COMMERCE_SESSION"
+        | "DOES_PLAYER_OWN_SKU"
+        | "DOES_PLAYER_OWN_SKU_EXT"
+        | "IS_PLAYER_COMMERCE_INFO_LOADED"
+        | "IS_PLAYER_COMMERCE_INFO_LOADED_EXT" => serde_json::json!(false),
+        "LOAD_PLAYER_COMMERCE_DATA"
+        | "LOAD_PLAYER_COMMERCE_DATA_EXT"
+        | "REQUEST_PLAYER_COMMERCE_SESSION" => serde_json::Value::Null,
+        // Mounts are Red Dead only; on GTA5 the engine answers the same way.
+        "GET_MOUNT" => serde_json::json!(0),
+        "IS_PED_ON_MOUNT" => serde_json::json!(false),
+        // The public `SetHttpHandler` keeps its callback JS-side and registers
+        // through a dedicated op, so reaching the raw native means a script
+        // invoked it by hash with a handle we cannot call.
+        "SET_HTTP_HANDLER" => {
+            tracing::warn!(
+                target: "http",
+                resource = %state.borrow::<RuntimeContext>().resource_name,
+                "SET_HTTP_HANDLER invoked as a raw native; use the SetHttpHandler global instead"
+            );
+            serde_json::Value::Null
+        }
+
+        // --- console ---
+        "GET_CONSOLE_BUFFER" => serde_json::json!(console_buffer_text()),
+        // Console output already goes to the buffer above and to tracing; a
+        // per-resource listener would need a JS callback across the op
+        // boundary, which this runtime deliberately never does.
+        "REGISTER_CONSOLE_LISTENER" => serde_json::Value::Null,
+
+        // --- raw client events ---
+        //
+        // `TriggerClientEvent` goes through a dedicated op with JSON args; the
+        // internal form exists for callers that packed their own msgpack, so
+        // the payload is forwarded byte-for-byte instead of re-encoded.
+        //
+        // The latent variant additionally takes a bytes-per-second budget. The
+        // event is delivered whole rather than paced: a resource using it gets
+        // correct delivery and, for a large payload, a larger burst than it
+        // asked for. Pacing needs a fragmenting sender the transport does not
+        // have yet.
+        "TRIGGER_CLIENT_EVENT_INTERNAL" | "TRIGGER_LATENT_CLIENT_EVENT_INTERNAL" => {
+            let event = json_arg_string(&args, 0);
+            let source = json_arg_netid(&args, 1);
+            let payload = latin1_bytes(&json_arg_string(&args, 2));
+            if name.starts_with("TRIGGER_LATENT") {
+                tracing::debug!(
+                    target: "events",
+                    %event,
+                    source,
+                    bytes = payload.len(),
+                    "latent client event sent whole; rate limiting is not implemented"
+                );
+            }
+            send_raw_client_event(state, source, event, payload);
+            serde_json::Value::Null
+        }
+
+        // --- moderation ---
+        //
+        // The engine records the ban in its own database; BASTON has none, so
+        // the player is dropped and the ban is logged for whatever the
+        // operator's own ban resource does with it. Saying so beats a silent
+        // no-op that looks like a working ban.
+        "TEMP_BAN_PLAYER" => {
+            let source = json_arg_netid(&args, 0);
+            let reason = json_arg_string(&args, 1);
+            tracing::warn!(
+                target: "moderation",
+                source,
+                %reason,
+                "TempBanPlayer dropped the player; BASTON keeps no ban list, so \
+                 the ban itself is the calling resource's to persist"
+            );
+            state.borrow::<SharedPlayers>().0.remove(source);
+            serde_json::Value::Null
+        }
+
+        // --- password hashing ---
+        //
+        // bcrypt, as the engine uses, so hashes produced by either are
+        // interchangeable. Both calls block the isolate for the cost factor's
+        // duration by design: that cost is the whole point, and the engine's
+        // natives are synchronous too.
+        "GET_PASSWORD_HASH" => {
+            match bcrypt::hash(json_arg_string(&args, 0), bcrypt::DEFAULT_COST) {
+                Ok(hash) => serde_json::json!(hash),
+                Err(e) => {
+                    tracing::error!(target: "natives", error = %e, "password hashing failed");
+                    serde_json::json!("")
+                }
+            }
+        }
+        "VERIFY_PASSWORD_HASH" => {
+            // A malformed hash verifies as false rather than erroring: the
+            // caller's question is "does this password match", and the answer
+            // for a hash we cannot read is no.
+            let matches = bcrypt::verify(json_arg_string(&args, 0), &json_arg_string(&args, 1))
+                .unwrap_or(false);
+            serde_json::json!(matches)
+        }
+
+        // --- resource lifecycle ---
+        //
+        // The transition is queued for the resource manager: it owns the
+        // loading, and it is the caller of this very isolate, so doing it
+        // inline would re-enter the host. The boolean says the request was
+        // accepted, which is also all the engine's own return value means.
+        "START_RESOURCE" => serde_json::json!(shared_resource_control(state)
+            .submit(crate::ResourceCommand::Start(json_arg_string(&args, 0)))),
+        "STOP_RESOURCE" => serde_json::json!(shared_resource_control(state)
+            .submit(crate::ResourceCommand::Stop(json_arg_string(&args, 0)))),
+        "SCAN_RESOURCE_ROOT" => serde_json::json!(shared_resource_control(state)
+            .submit(crate::ResourceCommand::ScanRoot(json_arg_string(&args, 0)))),
+        // Every resource is ticked every frame here, so there is nothing to
+        // schedule. Answering silently is correct rather than a gap.
+        "SCHEDULE_RESOURCE_TICK" => serde_json::Value::Null,
+        // Build-time hooks with no server-side counterpart: BASTON serves
+        // resource files straight off disk and runs no build tasks.
+        "REGISTER_RESOURCE_ASSET" => serde_json::json!(""),
+        "REGISTER_RESOURCE_BUILD_TASK_FACTORY" => serde_json::Value::Null,
+
+        // --- server listing metadata ---
+        //
+        // These are convars in the engine too, and `/info.json` reads them
+        // from the same place, so setting them here really does change what
+        // the server list shows.
+        "SET_GAME_TYPE" => {
+            set_convar(state, "sv_gametype", json_arg_string(&args, 0));
+            serde_json::Value::Null
+        }
+        "SET_MAP_NAME" => {
+            set_convar(state, "sv_mapname", json_arg_string(&args, 0));
+            serde_json::Value::Null
+        }
+        "FLAG_SERVER_AS_PRIVATE" => {
+            set_convar(state, "sv_private", json_arg_bool(&args, 0).to_string());
+            serde_json::Value::Null
+        }
+        "ENABLE_ENHANCED_HOST_SUPPORT" => {
+            set_convar(
+                state,
+                "sv_enhancedHostSupport",
+                json_arg_bool(&args, 0).to_string(),
+            );
+            serde_json::Value::Null
+        }
+
         "SET_PLAYER_ROUTING_BUCKET" => {
             shared_routing(state)
                 .set_player_bucket(json_arg_netid(&args, 0), json_arg_netid(&args, 1));
@@ -627,6 +782,52 @@ fn perform_http_request(state: &OpState, resource: &str, raw: &str) -> u32 {
     bridge
         .submit(|token| spec.with_token(token))
         .unwrap_or_default()
+}
+
+/// Recover the bytes behind a JS binary string.
+///
+/// The internal event natives carry msgpack that JS holds as a string of code
+/// points 0..255. Anything above that never came from a byte buffer, so it is
+/// dropped rather than silently mangled into multi-byte UTF-8.
+fn latin1_bytes(text: &str) -> Vec<u8> {
+    text.chars()
+        .filter_map(|c| u8::try_from(c as u32).ok())
+        .collect()
+}
+
+/// Queue an already-encoded client event on the net bridge.
+fn send_raw_client_event(state: &OpState, source: u32, event: String, payload: Vec<u8>) {
+    let net = &state.borrow::<super::SharedNet>().0;
+    if net
+        .tx
+        .try_send(crate::net_bridge::NetOutbound::ClientEventRaw {
+            source,
+            event: event.clone(),
+            payload,
+        })
+        .is_err()
+    {
+        tracing::warn!(
+            target: "events",
+            %event,
+            source,
+            "raw client event dropped: net bridge full or closed"
+        );
+    }
+}
+
+fn shared_resource_control(state: &OpState) -> Arc<dyn crate::ResourceControl> {
+    Arc::clone(&state.borrow::<SharedResourceControl>().0)
+}
+
+/// Write a console variable from a native. Same store `GetConvar` reads and
+/// `/info.json` publishes, so a script setting one is immediately visible
+/// everywhere the engine would make it visible.
+fn set_convar(state: &OpState, name: &str, value: String) {
+    state
+        .borrow::<SharedConvars>()
+        .0
+        .insert(name.to_owned(), value);
 }
 
 fn shared_world(state: &OpState) -> Arc<crate::EntityWorldView> {

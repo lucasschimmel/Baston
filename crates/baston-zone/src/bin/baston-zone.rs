@@ -187,14 +187,25 @@ async fn main() -> anyhow::Result<()> {
         let subject = format!("baston.zone.{zone_id}.outbound");
         tokio::spawn(async move {
             while let Some(msg) = net_rx.recv().await {
-                let baston_scripting::NetOutbound::ClientEvent {
-                    source,
-                    event,
-                    args_json,
-                } = msg;
-                let payload = serde_json::json!({
-                    "source": source, "event": event, "args": args_json,
-                });
+                // JSON args are relayed as text for the gateway to encode; an
+                // already-packed payload crosses as a byte array, because JSON
+                // has no binary type and re-encoding it would corrupt it.
+                let payload = match msg {
+                    baston_scripting::NetOutbound::ClientEvent {
+                        source,
+                        event,
+                        args_json,
+                    } => serde_json::json!({
+                        "source": source, "event": event, "args": args_json,
+                    }),
+                    baston_scripting::NetOutbound::ClientEventRaw {
+                        source,
+                        event,
+                        payload,
+                    } => serde_json::json!({
+                        "source": source, "event": event, "raw": payload,
+                    }),
+                };
                 if let Err(e) = nats
                     .publish(subject.clone(), payload.to_string().into())
                     .await

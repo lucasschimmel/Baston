@@ -15,8 +15,8 @@ use crate::deferrals::DeferralRegistry;
 use crate::error::ScriptError;
 use crate::extensions::{
     all_extensions, RuntimeContext, SharedConvars, SharedDeferrals, SharedEntityWorld, SharedHttp,
-    SharedHttpHandlers, SharedKvp, SharedNet, SharedObservability, SharedPlayers, SharedResources,
-    SharedRouting, SharedStateBags, SharedWorldControl,
+    SharedHttpHandlers, SharedKvp, SharedNet, SharedObservability, SharedPlayers,
+    SharedResourceControl, SharedResources, SharedRouting, SharedStateBags, SharedWorldControl,
 };
 use crate::net_bridge::NetBridge;
 use crate::observability::{DispatchKind, DispatchMeasurement, Observability, V8MemoryStats};
@@ -205,6 +205,7 @@ pub struct SharedGameState {
     /// `None` until a composition root wires an outbound HTTP worker.
     pub http: Option<crate::HttpBridge>,
     pub http_handlers: Arc<crate::HttpHandlerRegistry>,
+    pub resource_control: Arc<dyn crate::ResourceControl>,
 }
 
 /// A single resource's V8 isolate with the BASTON extensions and bootstrap
@@ -284,6 +285,7 @@ impl ScriptRuntime {
             op_state.put(SharedHttpHandlers(Arc::new(
                 crate::HttpHandlerRegistry::new(),
             )));
+            op_state.put(SharedResourceControl(Arc::new(crate::NoResourceControl)));
         }
 
         js.execute_script("baston:bootstrap.js", BOOTSTRAP_JS)
@@ -332,6 +334,7 @@ impl ScriptRuntime {
         op_state.put(SharedKvp(shared.kvp));
         op_state.put(SharedHttp(shared.http));
         op_state.put(SharedHttpHandlers(shared.http_handlers));
+        op_state.put(SharedResourceControl(shared.resource_control));
     }
 
     /// Install the voice control surface backing the `MUMBLE_*` natives.

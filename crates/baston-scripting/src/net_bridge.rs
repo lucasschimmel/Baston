@@ -18,6 +18,14 @@ pub enum NetOutbound {
         event: String,
         args_json: String,
     },
+    /// `TriggerClientEventInternal` — the payload is already msgpack, packed
+    /// by the caller. Kept distinct from [`Self::ClientEvent`] so the gateway
+    /// does not re-encode bytes that are already in wire form.
+    ClientEventRaw {
+        source: u32,
+        event: String,
+        payload: Vec<u8>,
+    },
 }
 
 /// Bounded so a script emitting client events / native calls in a tight loop
