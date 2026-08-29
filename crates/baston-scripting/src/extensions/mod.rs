@@ -17,6 +17,7 @@
 
 mod natives_client;
 mod natives_server;
+mod natives_world;
 mod rpc_natives;
 
 use std::collections::{HashMap, HashSet, VecDeque};

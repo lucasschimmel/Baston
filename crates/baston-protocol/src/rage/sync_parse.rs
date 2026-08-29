@@ -74,13 +74,48 @@ pub struct GameBuild(pub u32);
 impl GameBuild {
     /// From 3717 ("Winter 2025"), ped health fields are 14 bits, not 13.
     ///
-    /// The engine has more build gates than this (2060 and later add fields
-    /// *after* the ones we read). They are absent here on purpose: every
-    /// decoder stops at the last field it uses, so a gate past that point can
-    /// never change what we read.
+    /// The engine has more build gates than the ones declared here; only those
+    /// that sit *before* a field we decode matter, because every decoder stops
+    /// at the last field it uses and a gate past that point can never change
+    /// what we read.
     #[must_use]
     fn is_winter_update_25(self) -> bool {
         self.0 >= 3717
+    }
+
+    #[must_use]
+    fn is_2060(self) -> bool {
+        self.0 >= 2060
+    }
+
+    #[must_use]
+    fn is_2189(self) -> bool {
+        self.0 >= 2189
+    }
+
+    #[must_use]
+    fn is_2372(self) -> bool {
+        self.0 >= 2372
+    }
+
+    #[must_use]
+    fn is_2545(self) -> bool {
+        self.0 >= 2545
+    }
+
+    #[must_use]
+    fn is_2699(self) -> bool {
+        self.0 >= 2699
+    }
+
+    #[must_use]
+    fn is_3258(self) -> bool {
+        self.0 >= 3258
+    }
+
+    #[must_use]
+    fn is_3407(self) -> bool {
+        self.0 >= 3407
     }
 }
 
@@ -119,6 +154,194 @@ pub struct SyncNodeData {
     /// Heading in degrees (0..360), from whichever orientation node this
     /// entity type uses.
     pub heading: Option<f32>,
+    /// Engine, doors, lights and locks, from `CVehicleGameStateDataNode`.
+    pub vehicle_game_state: Option<VehicleGameState>,
+    /// Body/engine/tank health and tyres, from `CVehicleHealthDataNode`.
+    pub vehicle_health: Option<VehicleHealth>,
+    /// Colours, mods, plate and neons, from `CVehicleAppearanceDataNode`.
+    pub vehicle_appearance: Option<VehicleAppearance>,
+    /// Bullet and window damage, from `CVehicleDamageStatusDataNode`.
+    pub vehicle_damage: Option<VehicleDamage>,
+    /// Weapon and vehicle occupancy, from `CPedGameStateDataNode`.
+    pub ped_game_state: Option<PedGameState>,
+}
+
+/// `CVehicleGameStateDataNode`: everything a script reads about a vehicle's
+/// running state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VehicleGameState {
+    pub radio_station: u8,
+    pub engine_on: bool,
+    pub engine_starting: bool,
+    pub handbrake: bool,
+    /// False when the vehicle overrides its headlight colour.
+    pub default_headlights: bool,
+    /// Xenon colour index; `0` when the headlights are the model's default.
+    pub headlights_colour: u8,
+    pub siren_on: bool,
+    pub lock_status: u8,
+    /// Bitmask of open doors, one bit per door (0..6).
+    pub doors_open: u8,
+    /// Per-door opening, 0 (shut) to 7 (fully open). Only doors flagged in
+    /// [`Self::doors_open`] carry a value.
+    pub door_positions: [u8; 7],
+    pub is_stationary: bool,
+    pub lights_on: bool,
+    pub highbeams_on: bool,
+    /// `SetVehicleLights` state (3 bits).
+    pub light_state: u8,
+    pub has_been_owned_by_player: bool,
+    pub has_lock: bool,
+    /// Bitmask of players the vehicle is locked for; `-1` means everyone.
+    pub locked_players: i32,
+}
+
+/// `CVehicleHealthDataNode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VehicleHealth {
+    pub engine_health: i32,
+    pub petrol_tank_health: i32,
+    pub health: i32,
+    pub body_health: i32,
+    /// False when at least one tyre is damaged; only then is
+    /// [`Self::tyre_status`] populated.
+    pub tyres_fine: bool,
+    /// Per-wheel: 0 = intact, 1 = burst, 2 = on the rim.
+    pub tyre_status: [u8; 16],
+    pub total_repairs: u8,
+}
+
+impl Default for VehicleHealth {
+    /// The engine's own "undamaged" values — the same ones its parser
+    /// substitutes when a health field is absent from the record.
+    fn default() -> Self {
+        Self {
+            engine_health: 1000,
+            petrol_tank_health: 1000,
+            health: 1000,
+            body_health: 1000,
+            tyres_fine: true,
+            tyre_status: [0; 16],
+            total_repairs: 0,
+        }
+    }
+}
+
+/// `CVehicleAppearanceDataNode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VehicleAppearance {
+    pub primary_colour: u8,
+    pub secondary_colour: u8,
+    pub pearl_colour: u8,
+    pub wheel_colour: u8,
+    pub interior_colour: u8,
+    pub dashboard_colour: u8,
+    pub is_primary_colour_rgb: bool,
+    pub primary_rgb: [u8; 3],
+    pub is_secondary_colour_rgb: bool,
+    pub secondary_rgb: [u8; 3],
+    /// 0..15; the native reports it as a float.
+    pub dirt_level: u8,
+    /// Bitmask of enabled extras.
+    pub extras: u16,
+    /// `-1` when the vehicle has no custom livery.
+    pub livery_index: i16,
+    pub roof_livery_index: i16,
+    pub kit_index: u8,
+    pub wheel_choice: u8,
+    /// `255` when no mod kit is applied.
+    pub wheel_type: u8,
+    pub window_tint_index: u8,
+    pub tyre_smoke_colour: [u8; 3],
+    /// Number plate, space-padded exactly as the engine stores it.
+    pub plate: [u8; 8],
+    pub number_plate_text_index: u32,
+    pub horn_type_hash: u32,
+    pub has_neon_lights: bool,
+    pub neon_colour: [u8; 3],
+    /// Left, right, front, back.
+    pub neon_sides: [bool; 4],
+}
+
+impl Default for VehicleAppearance {
+    fn default() -> Self {
+        Self {
+            primary_colour: 0,
+            secondary_colour: 0,
+            pearl_colour: 0,
+            wheel_colour: 0,
+            interior_colour: 0,
+            dashboard_colour: 0,
+            is_primary_colour_rgb: false,
+            primary_rgb: [0; 3],
+            is_secondary_colour_rgb: false,
+            secondary_rgb: [0; 3],
+            dirt_level: 1,
+            extras: 0,
+            livery_index: -1,
+            roof_livery_index: -1,
+            kit_index: 0,
+            wheel_choice: 0,
+            wheel_type: 255,
+            window_tint_index: 0,
+            tyre_smoke_colour: [255; 3],
+            plate: [b' '; 8],
+            number_plate_text_index: 0,
+            horn_type_hash: 0,
+            has_neon_lights: false,
+            neon_colour: [0; 3],
+            neon_sides: [false; 4],
+        }
+    }
+}
+
+impl VehicleAppearance {
+    /// The plate as text, trailing padding removed.
+    #[must_use]
+    pub fn plate_text(&self) -> String {
+        String::from_utf8_lossy(&self.plate).trim_end().to_owned()
+    }
+}
+
+/// `CVehicleDamageStatusDataNode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct VehicleDamage {
+    pub damaged_by_bullets: bool,
+    pub any_window_broken: bool,
+    /// True = that window is broken.
+    pub windows_broken: [bool; 8],
+}
+
+/// `CPedGameStateDataNode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PedGameState {
+    pub cur_weapon: u32,
+    /// Object id of the vehicle the ped is in, or `-1`.
+    pub cur_vehicle: i32,
+    /// Seat index, `-1` when not in a vehicle and `-2` while entering one.
+    pub cur_vehicle_seat: i32,
+    pub is_handcuffed: bool,
+    pub is_flashlight_on: bool,
+    pub action_mode_enabled: bool,
+    pub stealth_mode_enabled: bool,
+    pub arrest_state: u8,
+    pub death_state: u8,
+}
+
+impl Default for PedGameState {
+    fn default() -> Self {
+        Self {
+            cur_weapon: 0,
+            cur_vehicle: -1,
+            cur_vehicle_seat: -1,
+            is_handcuffed: false,
+            is_flashlight_on: false,
+            action_mode_enabled: false,
+            stealth_mode_enabled: false,
+            arrest_state: 0,
+            death_state: 0,
+        }
+    }
 }
 
 impl SyncNodeData {
@@ -316,6 +539,11 @@ fn decodes(name: &str) -> bool {
             | "CObjectOrientationDataNode"
             | "CPedOrientationDataNode"
             | "CPhysicalVelocityDataNode"
+            | "CVehicleGameStateDataNode"
+            | "CVehicleHealthDataNode"
+            | "CVehicleAppearanceDataNode"
+            | "CVehicleDamageStatusDataNode"
+            | "CPedGameStateDataNode"
     )
 }
 
@@ -454,8 +682,474 @@ fn decode_leaf(name: &str, buf: &mut MessageBuffer, build: GameBuild, out: &mut 
                 out.velocity = Some([x as f32 * QUANTUM, y as f32 * QUANTUM, z as f32 * QUANTUM]);
             }
         }
+        "CVehicleGameStateDataNode" => {
+            out.vehicle_game_state = decode_vehicle_game_state(buf, build);
+        }
+        "CVehicleHealthDataNode" => {
+            out.vehicle_health = decode_vehicle_health(buf, build);
+        }
+        "CVehicleAppearanceDataNode" => {
+            out.vehicle_appearance = decode_vehicle_appearance(buf, build);
+        }
+        "CVehicleDamageStatusDataNode" => {
+            out.vehicle_damage = decode_vehicle_damage(buf);
+        }
+        "CPedGameStateDataNode" => {
+            out.ped_game_state = decode_ped_game_state(buf, build);
+        }
         _ => {}
     }
+}
+
+/// `CVehicleGameStateDataNode::Parse`.
+///
+/// The node is long and mostly opaque, but the fields scripts read are spread
+/// across it, so the port has to walk the variable-length middle faithfully
+/// rather than stop early. Every read is checked: the first truncated field
+/// abandons the node and the walk resynchronises on the length prefix.
+///
+/// Fields are assigned in sequence rather than through a struct literal: the
+/// order here **is** the wire order, and a literal would let a future edit
+/// reorder it silently.
+#[allow(clippy::field_reassign_with_default)]
+fn decode_vehicle_game_state(
+    buf: &mut MessageBuffer,
+    build: GameBuild,
+) -> Option<VehicleGameState> {
+    let mut out = VehicleGameState::default();
+
+    out.radio_station = buf.read_bits_single(if build.is_2545() { 7 } else { 6 })? as u8;
+    buf.read_bit();
+    out.engine_on = buf.read_bit() != 0;
+    out.engine_starting = buf.read_bit() != 0;
+    buf.read_bit();
+    out.handbrake = buf.read_bit() != 0;
+    buf.read_bit();
+    buf.read_bit();
+    // Set when the vehicle publishes no detailed state at all; the engine then
+    // substitutes the defaults mirrored below.
+    let state_absent = buf.read_bit() != 0;
+
+    if state_absent {
+        out.default_headlights = true;
+    } else {
+        out.default_headlights = buf.read_bit() != 0;
+        if !out.default_headlights {
+            out.headlights_colour = buf.read_bits_single(8)? as u8;
+        }
+        out.siren_on = buf.read_bit() != 0;
+        if build.is_3407() {
+            buf.read_bit();
+        }
+        if buf.read_bit() != 0 {
+            buf.read_bit();
+        }
+        buf.read_bit();
+        if buf.read_bit() != 0 {
+            out.lock_status = buf.read_bits_single(5)? as u8;
+            buf.read_bits_single(7)?;
+            buf.read_bits_single(7)?; // unbreakable doors
+            let doors_open = buf.read_bits_single(7)? as u8;
+            out.doors_open = doors_open;
+            for (door, position) in out.door_positions.iter_mut().enumerate() {
+                if doors_open & (1 << door) != 0 {
+                    *position = buf.read_bits_single(4)? as u8;
+                }
+            }
+            // Eight bits are read, but the engine only walks the low seven.
+            let extra_mask = buf.read_bits_single(8)?;
+            for slot in 0..7 {
+                if extra_mask & (1 << slot) != 0 {
+                    buf.read_bits_single(5)?;
+                }
+            }
+        }
+        if buf.read_bit() != 0 {
+            buf.read_bits_single(6)?; // open windows
+        }
+        buf.read_bit();
+        buf.read_bit();
+        out.is_stationary = buf.read_bit() != 0;
+        buf.read_bit(); // is parked
+        buf.read_bit();
+        buf.read_bit();
+        if buf.read_bit() != 0 {
+            buf.read_float(10, 3000.0)?;
+        }
+    }
+
+    if buf.read_bit() != 0 {
+        buf.read_bits_single(32)?;
+        buf.read_bits_single(13)?;
+    }
+
+    // Two 13-bit ids when present. The engine reads them with a counter it
+    // decrements to zero, then compares the lock flags below against that
+    // counter — which is therefore always zero by then. Reproduced as a plain
+    // `!= 0` rather than the counter, because that is what it evaluates to.
+    if buf.read_bit() != 0 {
+        buf.read_bits_single(13)?;
+        buf.read_bits_single(13)?;
+    }
+
+    if buf.read_bit() != 0 {
+        buf.read_bits_single(13)?;
+    }
+
+    out.lights_on = buf.read_bit() != 0;
+    out.highbeams_on = buf.read_bit() != 0;
+    out.light_state = buf.read_bits_single(3)? as u8;
+
+    for _ in 0..6 {
+        buf.read_bit();
+    }
+    buf.read_bits_single(32)?;
+    buf.read_bits_single(3)?;
+    buf.read_bit();
+    out.has_been_owned_by_player = buf.read_bit() != 0;
+
+    for _ in 0..6 {
+        buf.read_bit();
+    }
+    if build.is_2699() {
+        buf.read_bit();
+        buf.read_bit();
+    }
+
+    out.has_lock = buf.read_bit() != 0;
+    if out.has_lock {
+        out.locked_players = buf.read_bits_single(32)? as i32;
+    }
+
+    Some(out)
+}
+
+/// `CVehicleHealthDataNode::Parse`.
+fn decode_vehicle_health(buf: &mut MessageBuffer, build: GameBuild) -> Option<VehicleHealth> {
+    let mut out = VehicleHealth::default();
+
+    buf.read_bit();
+    buf.read_bit();
+    let engine_damaged = buf.read_bit() != 0;
+    let petrol_tank_damaged = buf.read_bit() != 0;
+
+    if engine_damaged {
+        out.engine_health = buf.read_signed(19)?;
+    }
+    if petrol_tank_damaged {
+        out.petrol_tank_health = buf.read_signed(19)?;
+    }
+
+    out.tyres_fine = buf.read_bit() != 0;
+    let wheel_extra_fine = buf.read_bit() != 0;
+
+    if !out.tyres_fine || !wheel_extra_fine {
+        let total_wheels = buf.read_bits_single(4)? as usize;
+        if !out.tyres_fine {
+            for wheel in 0..total_wheels {
+                if build.is_2060() && buf.read_bit() != 0 {
+                    buf.read_bits_single(8)?;
+                }
+                let burst = buf.read_bit() != 0;
+                let on_rim = buf.read_bit() != 0;
+                buf.read_bit();
+                buf.read_bit();
+                if let Some(slot) = out.tyre_status.get_mut(wheel) {
+                    *slot = if on_rim {
+                        2
+                    } else if burst {
+                        1
+                    } else {
+                        0
+                    };
+                }
+            }
+        }
+        if !wheel_extra_fine {
+            for _ in 0..total_wheels {
+                if buf.read_bit() != 0 {
+                    buf.read_bits_single(10)?;
+                }
+            }
+        }
+    }
+
+    if buf.read_bit() == 0 {
+        out.health = buf.read_signed(19)?;
+    }
+    if buf.read_bit() == 0 {
+        out.body_health = buf.read_signed(19)?;
+    }
+
+    if buf.read_bit() != 0 {
+        buf.read_bits_single(13)?; // damaging entity
+        buf.read_bits_single(32)?; // last damage source
+    }
+
+    buf.read_bits_single(4)?;
+    out.total_repairs = buf.read_bits_single(4)? as u8;
+
+    Some(out)
+}
+
+/// `CVehicleAppearanceDataNode::Serialize`.
+///
+/// Assigned in sequence for the same reason as
+/// [`decode_vehicle_game_state`]: the order is the wire format.
+#[allow(clippy::field_reassign_with_default)]
+fn decode_vehicle_appearance(
+    buf: &mut MessageBuffer,
+    build: GameBuild,
+) -> Option<VehicleAppearance> {
+    let mut out = VehicleAppearance::default();
+
+    out.primary_colour = buf.read_bits_single(8)? as u8;
+    out.secondary_colour = buf.read_bits_single(8)? as u8;
+    out.pearl_colour = buf.read_bits_single(8)? as u8;
+    out.wheel_colour = buf.read_bits_single(8)? as u8;
+    out.interior_colour = buf.read_bits_single(8)? as u8;
+    out.dashboard_colour = buf.read_bits_single(8)? as u8;
+
+    out.is_primary_colour_rgb = buf.read_bit() != 0;
+    if out.is_primary_colour_rgb {
+        for channel in &mut out.primary_rgb {
+            *channel = buf.read_bits_single(8)? as u8;
+        }
+    }
+    out.is_secondary_colour_rgb = buf.read_bit() != 0;
+    if out.is_secondary_colour_rgb {
+        for channel in &mut out.secondary_rgb {
+            *channel = buf.read_bits_single(8)? as u8;
+        }
+    }
+
+    buf.read_bits_single(8)?; // environment effect scale
+
+    if buf.read_bit() != 0 {
+        out.dirt_level = buf.read_bits_single(5)? as u8;
+        out.extras = buf.read_bits_single(16)? as u16;
+        out.livery_index = if buf.read_bit() != 0 {
+            buf.read_bits_single(5)? as i16
+        } else {
+            0
+        };
+        out.roof_livery_index = if buf.read_bit() != 0 {
+            buf.read_bits_single(5)? as i16
+        } else {
+            0
+        };
+    }
+
+    out.kit_index = buf.read_bits_single(2)? as u8;
+    if out.kit_index != 0 {
+        for _ in 0..13 {
+            if buf.read_bit() != 0 {
+                buf.read_bits_single(32)?;
+            }
+        }
+        if buf.read_bit() != 0 {
+            buf.read_bits_single(6)?; // toggle mods
+        }
+        out.wheel_choice = buf.read_bits_single(8)? as u8;
+        out.wheel_type = buf.read_bits_single(4)? as u8;
+        if buf.read_bit() != 0 {
+            buf.read_bits_single(8)?; // rear wheel choice
+        }
+        buf.read_bit(); // custom tyres
+        buf.read_bit(); // wheel variation
+    }
+
+    if buf.read_bit() != 0 {
+        out.window_tint_index = buf.read_bits_single(8)? as u8;
+    }
+
+    if buf.read_bit() != 0 {
+        for channel in &mut out.tyre_smoke_colour {
+            *channel = buf.read_bits_single(8)? as u8;
+        }
+    }
+
+    // The eight plate characters are always framed; the flag only decides
+    // whether they carry text or padding.
+    let has_plate = buf.read_bit() != 0;
+    for character in &mut out.plate {
+        if has_plate {
+            *character = buf.read_bits_single(7)? as u8;
+        }
+    }
+
+    out.number_plate_text_index = buf.read_bits_single(32)?;
+    out.horn_type_hash = buf.read_bits_single(32)?;
+
+    if buf.read_bit() != 0 {
+        // Emblems: a crew emblem or a texture pair, then up to four badges.
+        if buf.read_bit() != 0 {
+            buf.read_bits_single(32)?; // txd name
+            buf.read_bits_single(32)?; // texture name
+        } else {
+            buf.read_bits_single(1)?;
+            buf.read_bits_single(32)?;
+            buf.read_bit();
+            buf.read_bits_single(3)?;
+        }
+        for _ in 0..4 {
+            if buf.read_bit() != 0 {
+                buf.read_bits_single(10)?; // bone index
+                buf.read_bits_single(8)?; // alpha
+                for _ in 0..3 {
+                    // offset, direction, side: two 14-bit axes then a 10-bit one
+                    buf.read_bits_single(14)?;
+                    buf.read_bits_single(14)?;
+                    buf.read_bits_single(10)?;
+                }
+                buf.read_bits_single(16)?; // size
+            }
+        }
+    }
+
+    out.has_neon_lights = buf.read_bit() != 0;
+    if out.has_neon_lights {
+        for channel in &mut out.neon_colour {
+            *channel = buf.read_bits_single(8)? as u8;
+        }
+        for side in &mut out.neon_sides {
+            *side = buf.read_bit() != 0;
+        }
+        if build.is_2372() {
+            buf.read_bit(); // neon suppressed
+        }
+    }
+
+    Some(out)
+}
+
+/// `CVehicleDamageStatusDataNode::Parse`.
+fn decode_vehicle_damage(buf: &mut MessageBuffer) -> Option<VehicleDamage> {
+    let mut out = VehicleDamage::default();
+
+    if buf.read_bit() != 0 {
+        for _ in 0..6 {
+            buf.read_bits_single(2)?; // per-panel deformation level
+        }
+    }
+
+    out.damaged_by_bullets = buf.read_bit() != 0;
+    if out.damaged_by_bullets {
+        for _ in 0..6 {
+            buf.read_bits_single(8)?;
+        }
+    }
+
+    if buf.read_bit() != 0 {
+        buf.read_bits_single(2)?; // front bumper
+        buf.read_bits_single(2)?; // rear bumper
+    }
+
+    if buf.read_bit() != 0 {
+        for _ in 0..22 {
+            buf.read_bit();
+        }
+    }
+
+    out.any_window_broken = buf.read_bit() != 0;
+    for window in &mut out.windows_broken {
+        *window = out.any_window_broken && buf.read_bit() != 0;
+    }
+
+    Some(out)
+}
+
+/// `CPedGameStateDataNode::Parse`.
+///
+/// The engine's node carries the vehicle a ped occupies — the only
+/// authoritative source for the whole `*_PED_IN_VEHICLE_*` native family.
+fn decode_ped_game_state(buf: &mut MessageBuffer, build: GameBuild) -> Option<PedGameState> {
+    let mut out = PedGameState::default();
+
+    for _ in 0..6 {
+        buf.read_bit();
+    }
+    if build.is_2060() {
+        buf.read_bit();
+        buf.read_bit();
+        if build.is_2189() {
+            buf.read_bit();
+        }
+        if build.is_2372() {
+            buf.read_bit();
+        }
+        if build.is_3407() {
+            buf.read_bit();
+            buf.read_bit();
+        }
+    }
+
+    out.arrest_state = buf.read_bits_single(1)? as u8;
+    out.death_state = buf.read_bits_single(2)? as u8;
+
+    if buf.read_bit() != 0 {
+        out.cur_weapon = buf.read_bits_single(32)?;
+        if build.is_3258() {
+            buf.read_bits_single(3)?; // weapon state
+        }
+    }
+
+    if build.is_2060() {
+        buf.read_bit();
+    }
+
+    for _ in 0..5 {
+        buf.read_bit(); // weapon exists/visible/has ammo/attach left/unknown
+    }
+
+    if buf.read_bit() != 0 {
+        buf.read_bits_single(5)?; // weapon tint
+    }
+
+    let weapon_components = buf.read_bits_single(4)?;
+    for _ in 0..weapon_components {
+        buf.read_bits_single(32)?;
+        if build.is_2372() && buf.read_bit() != 0 {
+            buf.read_bits_single(5)?;
+        }
+    }
+
+    let gadgets = buf.read_bits_single(2)?;
+    for _ in 0..gadgets {
+        buf.read_bits_single(32)?;
+    }
+
+    if buf.read_bit() != 0 {
+        let vehicle = buf.read_bits_single(13)? as i32;
+        if buf.read_bit() != 0 {
+            out.cur_vehicle = vehicle;
+            out.cur_vehicle_seat = buf.read_bits_single(5)? as i32;
+        } else {
+            // Entering or leaving: the engine reports the vehicle as gone and
+            // remembers it as the last one instead. The caller owns that
+            // merge, because it needs the previous record to do it.
+            out.cur_vehicle = -1;
+            out.cur_vehicle_seat = -1;
+        }
+    }
+
+    if buf.read_bit() != 0 {
+        buf.read_bit();
+    }
+
+    if buf.read_bit() != 0 {
+        buf.read_bits_single(13)?; // custodian
+        out.is_handcuffed = buf.read_bit() != 0;
+        for _ in 0..4 {
+            buf.read_bit(); // arrest capability flags
+        }
+    }
+
+    out.is_flashlight_on = buf.read_bit() != 0;
+    out.action_mode_enabled = buf.read_bit() != 0;
+    out.stealth_mode_enabled = buf.read_bit() != 0;
+
+    Some(out)
 }
 
 /// Read a compressed quaternion and return the heading it encodes, in degrees.
@@ -1013,5 +1707,360 @@ mod tests {
             };
             let _ = parse_sync_tree(ty, is_create, &blob, length_hack, build);
         }
+    }
+
+    // --- vehicle and ped state nodes ---
+
+    /// Author a node body the way the engine writes it, then decode it back.
+    /// Written against the field order in `SyncTrees_Five.h`, so a drift on
+    /// either side fails here rather than in production.
+    struct NodeWriter {
+        buf: MessageBuffer,
+    }
+
+    impl NodeWriter {
+        fn new() -> Self {
+            Self {
+                buf: MessageBuffer::new(256),
+            }
+        }
+
+        fn bit(&mut self, value: bool) -> &mut Self {
+            self.buf.write_bit(value);
+            self
+        }
+
+        fn bits(&mut self, value: u32, length: usize) -> &mut Self {
+            self.buf.write_bits_single(value, length);
+            self
+        }
+
+        fn signed(&mut self, value: i32, length: usize) -> &mut Self {
+            self.buf.write_signed(value, length);
+            self
+        }
+
+        /// Seal the body at exactly the bits written, so a decoder reading one
+        /// bit too many fails instead of drifting into the zero padding.
+        fn finish(&mut self) -> MessageBuffer {
+            let bits = self.buf.current_bit();
+            MessageBuffer::from_bits(self.buf.buffer().to_vec(), bits)
+        }
+    }
+
+    #[test]
+    fn vehicle_game_state_decodes_engine_doors_and_lights() {
+        let mut w = NodeWriter::new();
+        w.bits(21, 7) // radio station (7 bits from build 2545)
+            .bit(false)
+            .bit(true) // engine on
+            .bit(false) // engine starting
+            .bit(false)
+            .bit(true) // handbrake
+            .bit(false)
+            .bit(false)
+            .bit(false); // detailed state present
+        w.bit(false) // non-default headlights
+            .bits(5, 8) // headlight colour
+            .bit(true) // siren on
+            .bit(false) // unk12
+            .bit(false) // unk14
+            .bit(true); // lock/door block present
+        w.bits(7, 5) // lock status
+            .bits(0, 7)
+            .bits(0, 7) // unbreakable doors
+            .bits(0b000_0101, 7); // doors 0 and 2 open
+        w.bits(3, 4) // door 0 position
+            .bits(6, 4) // door 2 position
+            .bits(0, 8); // no extra door slots
+        w.bit(false) // no open windows
+            .bit(false)
+            .bit(false)
+            .bit(true) // stationary
+            .bit(false)
+            .bit(false)
+            .bit(false)
+            .bit(false); // no trailing float
+        w.bit(false) // unk33
+            .bit(false) // no id pair
+            .bit(false); // unk38
+        w.bit(true) // lights on
+            .bit(false) // highbeams
+            .bits(2, 3); // light state
+        for _ in 0..6 {
+            w.bit(false);
+        }
+        w.bits(0, 32).bits(0, 3).bit(false).bit(true); // owned by a player
+        for _ in 0..6 {
+            w.bit(false);
+        }
+        w.bit(false).bit(false); // 2699 gate
+        w.bit(true) // has lock
+            .bits(0xFFFF_FFFF, 32); // locked for everyone
+
+        let state = decode_vehicle_game_state(&mut w.finish(), GameBuild(3258)).expect("decoded");
+        assert_eq!(state.radio_station, 21);
+        assert!(state.engine_on && state.handbrake && state.siren_on);
+        assert!(!state.default_headlights);
+        assert_eq!(state.headlights_colour, 5);
+        assert_eq!(state.lock_status, 7);
+        assert_eq!(state.doors_open, 0b000_0101);
+        assert_eq!(state.door_positions[0], 3);
+        assert_eq!(state.door_positions[2], 6);
+        assert_eq!(
+            state.door_positions[1], 0,
+            "a shut door carries no position"
+        );
+        assert!(state.is_stationary && state.lights_on && !state.highbeams_on);
+        assert_eq!(state.light_state, 2);
+        assert!(state.has_been_owned_by_player && state.has_lock);
+        assert_eq!(state.locked_players, -1, "-1 is the engine's ALL sentinel");
+    }
+
+    /// Before 2545 the radio index was 6 bits wide. Decoding an old record
+    /// with the newer width would shift every field after it.
+    #[test]
+    fn vehicle_game_state_radio_width_follows_the_build() {
+        let mut w = NodeWriter::new();
+        w.bits(37, 6); // fits the pre-2545 width
+        for _ in 0..7 {
+            w.bit(false);
+        }
+        w.bit(false); // detailed state present
+        w.bit(true) // default headlights
+            .bit(false) // siren
+            .bit(false) // unk12
+            .bit(false) // unk14
+            .bit(false) // no lock block
+            .bit(false); // no open windows
+        for _ in 0..7 {
+            w.bit(false);
+        }
+        w.bit(false).bit(false).bit(false);
+        w.bit(false).bit(false).bits(0, 3);
+        for _ in 0..6 {
+            w.bit(false);
+        }
+        w.bits(0, 32).bits(0, 3).bit(false).bit(false);
+        for _ in 0..6 {
+            w.bit(false);
+        }
+        w.bit(false);
+
+        let state = decode_vehicle_game_state(&mut w.finish(), GameBuild(2372)).expect("decoded");
+        assert_eq!(state.radio_station, 37);
+        assert!(state.default_headlights);
+    }
+
+    #[test]
+    fn vehicle_health_decodes_damage_and_tyres() {
+        let mut w = NodeWriter::new();
+        w.bit(false)
+            .bit(false)
+            .bit(true) // engine damaged
+            .bit(true); // petrol tank damaged
+        w.signed(650, 19).signed(400, 19);
+        w.bit(false) // tyres not fine
+            .bit(true); // no extra wheel data
+        w.bits(4, 4); // four wheels
+                      // From 2060 each wheel is preceded by an optional heat byte; the flag
+                      // is written false here. Then: burst, on-rim, and two unknowns.
+        w.bit(false).bit(true).bit(false).bit(false).bit(false);
+        w.bit(false).bit(false).bit(true).bit(false).bit(false);
+        w.bit(false).bit(false).bit(false).bit(false).bit(false);
+        w.bit(false).bit(false).bit(false).bit(false).bit(false);
+        w.bit(false).signed(820, 19); // overall health
+        w.bit(false).signed(910, 19); // body health
+        w.bit(false); // no damage source
+        w.bits(0, 4).bits(3, 4); // total repairs
+
+        let health = decode_vehicle_health(&mut w.finish(), GameBuild(3258)).expect("decoded");
+        assert_eq!(health.engine_health, 650);
+        assert_eq!(health.petrol_tank_health, 400);
+        assert_eq!(health.health, 820);
+        assert_eq!(health.body_health, 910);
+        assert!(!health.tyres_fine);
+        assert_eq!(health.tyre_status[0], 1, "burst");
+        assert_eq!(health.tyre_status[1], 2, "on the rim");
+        assert_eq!(health.tyre_status[2], 0);
+        assert_eq!(health.total_repairs, 3);
+    }
+
+    /// An undamaged vehicle sends almost nothing; the engine substitutes 1000
+    /// everywhere, and so must we, or every intact car reads as a wreck.
+    #[test]
+    fn vehicle_health_defaults_to_intact() {
+        let mut w = NodeWriter::new();
+        w.bit(false).bit(false).bit(false).bit(false);
+        w.bit(true).bit(true); // tyres and wheels fine
+        w.bit(true).bit(true); // health and body health fine
+        w.bit(false);
+        w.bits(0, 4).bits(0, 4);
+
+        let health = decode_vehicle_health(&mut w.finish(), GameBuild(3258)).expect("decoded");
+        assert_eq!(health.engine_health, 1000);
+        assert_eq!(health.petrol_tank_health, 1000);
+        assert_eq!(health.health, 1000);
+        assert_eq!(health.body_health, 1000);
+        assert!(health.tyres_fine);
+    }
+
+    #[test]
+    fn vehicle_appearance_decodes_colours_plate_and_neons() {
+        let mut w = NodeWriter::new();
+        w.bits(12, 8) // primary
+            .bits(34, 8) // secondary
+            .bits(1, 8) // pearl
+            .bits(2, 8) // wheel
+            .bits(3, 8) // interior
+            .bits(4, 8); // dashboard
+        w.bit(false).bit(false); // no RGB overrides
+        w.bits(0, 8); // env effect scale
+        w.bit(true) // has extras
+            .bits(9, 5) // dirt level
+            .bits(0b110, 16) // extras 1 and 2
+            .bit(true)
+            .bits(5, 5) // livery
+            .bit(false); // no roof livery
+        w.bits(0, 2); // no mod kit
+        w.bit(true).bits(3, 8); // window tint
+        w.bit(true).bits(10, 8).bits(20, 8).bits(30, 8); // tyre smoke
+        w.bit(true);
+        for byte in b"ABC123  " {
+            w.bits(u32::from(*byte), 7);
+        }
+        w.bits(7, 32) // plate text index
+            .bits(0xDEAD_BEEF, 32); // horn hash
+        w.bit(false); // no emblems
+        w.bit(true) // neons
+            .bits(255, 8)
+            .bits(128, 8)
+            .bits(0, 8)
+            .bit(true)
+            .bit(true)
+            .bit(false)
+            .bit(true);
+
+        let look = decode_vehicle_appearance(&mut w.finish(), GameBuild(3258)).expect("decoded");
+        assert_eq!(look.primary_colour, 12);
+        assert_eq!(look.secondary_colour, 34);
+        assert_eq!(look.interior_colour, 3);
+        assert_eq!(look.dashboard_colour, 4);
+        assert_eq!(look.dirt_level, 9);
+        assert_eq!(look.extras, 0b110);
+        assert_eq!(look.livery_index, 5);
+        assert_eq!(look.roof_livery_index, 0);
+        assert_eq!(look.wheel_type, 255, "no kit means no wheel type");
+        assert_eq!(look.window_tint_index, 3);
+        assert_eq!(look.tyre_smoke_colour, [10, 20, 30]);
+        assert_eq!(look.plate_text(), "ABC123");
+        assert_eq!(look.number_plate_text_index, 7);
+        assert_eq!(look.horn_type_hash, 0xDEAD_BEEF);
+        assert!(look.has_neon_lights);
+        assert_eq!(look.neon_colour, [255, 128, 0]);
+        assert_eq!(look.neon_sides, [true, true, false, true]);
+    }
+
+    #[test]
+    fn vehicle_damage_decodes_bullets_and_windows() {
+        let mut w = NodeWriter::new();
+        w.bit(false); // no body deformation
+        w.bit(true); // damaged by bullets
+        for _ in 0..6 {
+            w.bits(2, 8);
+        }
+        w.bit(false); // no broken bumper
+        w.bit(false); // no broken light
+        w.bit(true); // some window broken
+        w.bit(true).bit(false).bit(false).bit(true);
+        w.bit(false).bit(false).bit(false).bit(false);
+
+        let damage = decode_vehicle_damage(&mut w.finish()).expect("decoded");
+        assert!(damage.damaged_by_bullets);
+        assert!(damage.any_window_broken);
+        assert_eq!(
+            damage.windows_broken,
+            [true, false, false, true, false, false, false, false]
+        );
+    }
+
+    #[test]
+    fn ped_game_state_decodes_the_vehicle_a_ped_sits_in() {
+        let mut w = NodeWriter::new();
+        for _ in 0..6 {
+            w.bit(false);
+        }
+        // Build 3258 opens the 2060, 2189 and 2372 gates (four bits), not 3407.
+        for _ in 0..4 {
+            w.bit(false);
+        }
+        w.bits(0, 1).bits(0, 2); // arrest and death state
+        w.bit(true).bits(0x1B06_D7B1, 32).bits(0, 3); // weapon (build >= 3258)
+        w.bit(false); // 2060 gate
+        for _ in 0..5 {
+            w.bit(false);
+        }
+        w.bit(false); // no tint
+        w.bits(0, 4); // no weapon components
+        w.bits(0, 2); // no gadgets
+        w.bit(true) // in a vehicle
+            .bits(4243, 13)
+            .bit(true) // seated
+            .bits(2, 5);
+        w.bit(false); // unk6
+        w.bit(true) // custodian block
+            .bits(0, 13)
+            .bit(true) // handcuffed
+            .bit(false)
+            .bit(false)
+            .bit(false)
+            .bit(false);
+        w.bit(true) // flashlight
+            .bit(false) // action mode
+            .bit(true); // stealth
+
+        let ped = decode_ped_game_state(&mut w.finish(), GameBuild(3258)).expect("decoded");
+        assert_eq!(ped.cur_weapon, 0x1B06_D7B1);
+        assert_eq!(ped.cur_vehicle, 4243);
+        assert_eq!(ped.cur_vehicle_seat, 2);
+        assert!(ped.is_handcuffed && ped.is_flashlight_on && ped.stealth_mode_enabled);
+        assert!(!ped.action_mode_enabled);
+    }
+
+    /// A ped mid-entry reports a vehicle without a seat. The engine treats
+    /// that as "not in a vehicle" and remembers it as the last one instead —
+    /// so the decoder must not report occupancy the ped does not have.
+    #[test]
+    fn ped_entering_a_vehicle_is_not_reported_as_inside_it() {
+        let mut w = NodeWriter::new();
+        for _ in 0..6 {
+            w.bit(false);
+        }
+        for _ in 0..4 {
+            w.bit(false); // 2060, 2189 and 2372 gates
+        }
+        w.bits(0, 1).bits(0, 2);
+        w.bit(false); // no weapon
+        w.bit(false); // 2060 gate
+        for _ in 0..5 {
+            w.bit(false);
+        }
+        w.bit(false).bits(0, 4).bits(0, 2);
+        w.bit(true).bits(4243, 13).bit(false); // vehicle, but no seat
+        w.bit(false).bit(false);
+        w.bit(false).bit(false).bit(false);
+
+        let ped = decode_ped_game_state(&mut w.finish(), GameBuild(3258)).expect("decoded");
+        assert_eq!(ped.cur_vehicle, -1);
+        assert_eq!(ped.cur_vehicle_seat, -1);
+    }
+
+    /// Truncation must cost the node, not the walk: a body that stops halfway
+    /// yields nothing rather than a half-filled struct of plausible garbage.
+    #[test]
+    fn a_truncated_vehicle_node_decodes_to_nothing() {
+        let mut w = NodeWriter::new();
+        w.bits(21, 6).bit(false).bit(true);
+        assert!(decode_vehicle_game_state(&mut w.finish(), GameBuild(3258)).is_none());
     }
 }

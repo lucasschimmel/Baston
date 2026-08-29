@@ -113,8 +113,11 @@ fn world_with(network_id: u32, owner: u32) -> EntityWorldView {
         velocity: [0.0; 3],
         routing_bucket: 0,
         health: None,
+        max_health: None,
         armour: None,
         model: None,
+        heading: None,
+        sync: Default::default(),
     }]);
     world
 }

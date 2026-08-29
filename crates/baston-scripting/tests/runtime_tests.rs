@@ -614,8 +614,11 @@ fn owned_entity(network_id: u32, owner: u32) -> baston_scripting::EntitySummary 
         velocity: [0.0; 3],
         routing_bucket: 0,
         health: None,
+        max_health: None,
         armour: None,
         model: None,
+        heading: None,
+        sync: Default::default(),
     }
 }
 
@@ -773,6 +776,205 @@ async fn set_entity_coords_updates_server_state_and_propagates_to_the_owner() {
     assert_eq!(target, 5, "only the networked handle has an owner");
     assert_eq!(hash, "0x06843DA7060A026B");
     assert_eq!(args[0], serde_json::json!(4243));
+}
+
+// --- vehicle and ped state natives ---
+
+/// A vehicle carrying every node the readers depend on.
+fn synced_vehicle(network_id: u32, owner: u32) -> baston_scripting::EntitySummary {
+    use baston_protocol::rage::sync_parse::{VehicleAppearance, VehicleGameState, VehicleHealth};
+
+    let mut appearance = VehicleAppearance {
+        primary_colour: 12,
+        secondary_colour: 34,
+        window_tint_index: 255,
+        plate: *b"BASTON01",
+        has_neon_lights: true,
+        neon_colour: [255, 0, 128],
+        neon_sides: [true, false, true, false],
+        // Extras are inverted on the wire: a set bit turns the extra off. Bit 2
+        // is extra 1, so extra 1 reads as off and extra 2 as on.
+        extras: 0b100,
+        ..VehicleAppearance::default()
+    };
+    appearance.livery_index = 5;
+
+    baston_scripting::EntitySummary {
+        network_id,
+        owner,
+        entity_type: baston_scripting::ScriptEntityType::Vehicle,
+        position: [0.0; 3],
+        velocity: [3.0, 4.0, 0.0],
+        routing_bucket: 0,
+        health: None,
+        max_health: None,
+        armour: None,
+        model: None,
+        heading: Some(90.0),
+        sync: baston_scripting::EntitySyncState {
+            vehicle_game_state: Some(VehicleGameState {
+                radio_station: 21,
+                engine_on: true,
+                siren_on: true,
+                lock_status: 2,
+                doors_open: 0b000_0001,
+                door_positions: [4, 0, 0, 0, 0, 0, 0],
+                lights_on: true,
+                has_lock: true,
+                locked_players: -1,
+                ..VehicleGameState::default()
+            }),
+            vehicle_health: Some(VehicleHealth {
+                engine_health: 650,
+                body_health: 910,
+                tyres_fine: false,
+                tyre_status: {
+                    let mut status = [0; 16];
+                    status[0] = 1;
+                    status[1] = 2;
+                    status
+                },
+                ..VehicleHealth::default()
+            }),
+            vehicle_appearance: Some(appearance),
+            vehicle_damage: None,
+            ped_game_state: None,
+            last_vehicle: None,
+            last_vehicle_seat: None,
+        },
+    }
+}
+
+/// A ped sitting in `vehicle`'s driver seat (raw seat 1 = script seat -1).
+fn seated_ped(network_id: u32, owner: u32, vehicle: i32) -> baston_scripting::EntitySummary {
+    use baston_protocol::rage::sync_parse::PedGameState;
+
+    let mut ped = owned_entity(network_id, owner);
+    ped.sync.ped_game_state = Some(PedGameState {
+        cur_vehicle: vehicle,
+        cur_vehicle_seat: 1,
+        cur_weapon: 0x1B06_D7B1,
+        is_handcuffed: true,
+        ..PedGameState::default()
+    });
+    ped
+}
+
+#[tokio::test]
+async fn vehicle_natives_read_the_decoded_sync_tree() {
+    let (host, _) = host();
+    host.entity_world().publish([synced_vehicle(4243, 5)]);
+    host.load_resource(
+        "vehicle-test",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                const v = 4243
+                const eq = (label, got, want) => {
+                  if (got !== want) {
+                    throw new Error(`${label}: got ${got}, wanted ${want}`)
+                  }
+                }
+                eq('engine', GetIsVehicleEngineRunning(v), true)
+                eq('siren', IsVehicleSirenOn(v), true)
+                eq('lock', GetVehicleDoorLockStatus(v), 2)
+                eq('lockedForPlayer', GetVehicleDoorsLockedForPlayer(v), true)
+                eq('door0', GetVehicleDoorStatus(v, 0), 4)
+                eq('door1', GetVehicleDoorStatus(v, 1), 0)
+                eq('radio', GetVehicleRadioStationIndex(v), 21)
+                eq('engineHealth', GetVehicleEngineHealth(v), 650)
+                eq('bodyHealth', GetVehicleBodyHealth(v), 910)
+                eq('tyre0Burst', IsVehicleTyreBurst(v, 0, false), true)
+                eq('tyre0Completely', IsVehicleTyreBurst(v, 0, true), false)
+                eq('tyre1Completely', IsVehicleTyreBurst(v, 1, true), true)
+                eq('tyre2', IsVehicleTyreBurst(v, 2, false), false)
+                eq('plate', GetVehicleNumberPlateText(v), 'BASTON01')
+                eq('livery', GetVehicleLivery(v), 5)
+                eq('tint', GetVehicleWindowTint(v), -1)
+                eq('extra1', IsVehicleExtraTurnedOn(v, 1), false)
+                eq('extra2', IsVehicleExtraTurnedOn(v, 2), true)
+                eq('neonLeft', GetVehicleNeonEnabled(v, 0), true)
+                eq('neonRight', GetVehicleNeonEnabled(v, 1), false)
+
+                const colours = GetVehicleColours(v)
+                eq('primary', colours[0], 12)
+                eq('secondary', colours[1], 34)
+                const neon = GetVehicleNeonColour(v)
+                eq('neonR', neon[0], 255)
+                eq('neonB', neon[2], 128)
+                const lights = GetVehicleLightsState(v)
+                eq('lightsOn', lights[1], true)
+                eq('highbeams', lights[2], false)
+
+                eq('speed', GetEntitySpeed(v), 5)
+                eq('rotationZ', GetEntityRotation(v)[2], 90)
+
+                // An entity the mirror does not know answers neutrally rather
+                // than inventing a reading.
+                eq('unknownEngine', GetIsVehicleEngineRunning(9999), false)
+                eq('unknownPlate', GetVehicleNumberPlateText(9999), '')
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load");
+}
+
+#[tokio::test]
+async fn ped_occupancy_natives_resolve_both_directions() {
+    let (host, _) = host();
+    host.entity_world()
+        .publish([synced_vehicle(4243, 5), seated_ped(77, 5, 4243)]);
+    host.load_resource(
+        "occupancy-test",
+        vec![ScriptSource {
+            path: "server.js".into(),
+            code: r#"
+                const eq = (label, got, want) => {
+                  if (got !== want) {
+                    throw new Error(`${label}: got ${got}, wanted ${want}`)
+                  }
+                }
+                eq('vehiclePedIsIn', GetVehiclePedIsIn(77, false), 4243)
+                eq('inAnyVehicle', IsPedInAnyVehicle(77), true)
+                eq('inThatVehicle', IsPedInVehicle(77, 4243, false), true)
+                eq('inOtherVehicle', IsPedInVehicle(77, 1, false), false)
+                eq('seat', GetSeatPedIsUsing(77), -1)
+                eq('driver', GetPedInVehicleSeat(4243, -1), 77)
+                eq('emptySeat', GetPedInVehicleSeat(4243, 0), 0)
+                eq('lastDriver', GetLastPedInVehicleSeat(4243, -1), 77)
+                eq('weapon', GetSelectedPedWeapon(77), 0x1B06D7B1)
+                eq('handcuffed', IsPedHandcuffed(77), true)
+                eq('stealth', GetPedStealthMovement(77), false)
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("load");
+}
+
+/// Leaving a vehicle must keep the seat's last occupant, or a script cannot
+/// tell who just got out.
+#[tokio::test]
+async fn a_seat_keeps_its_last_occupant_after_the_ped_leaves() {
+    let (host, _) = host();
+    let world = host.entity_world();
+    world.publish([synced_vehicle(4243, 5), seated_ped(77, 5, 4243)]);
+
+    let mut left = seated_ped(77, 5, -1);
+    left.sync.ped_game_state = left.sync.ped_game_state.map(|mut state| {
+        state.cur_vehicle = -1;
+        state.cur_vehicle_seat = -1;
+        state
+    });
+    left.sync.last_vehicle = Some(4243);
+    left.sync.last_vehicle_seat = Some(1);
+    world.publish([synced_vehicle(4243, 5), left]);
+
+    assert_eq!(world.occupant(4243, -1), None, "the seat is empty now");
+    assert_eq!(world.last_occupant(4243, -1), Some(77));
 }
 
 // --- HTTP natives ---

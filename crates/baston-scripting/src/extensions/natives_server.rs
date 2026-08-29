@@ -10,7 +10,7 @@ use dashmap::DashMap;
 use deno_core::{op2, OpState};
 
 use super::{
-    rpc_natives, RuntimeContext, SharedEntityWorld, SharedHttp, SharedKvp,
+    natives_world, rpc_natives, RuntimeContext, SharedEntityWorld, SharedHttp, SharedKvp,
     SharedPlayers, SharedRouting, SharedStateBags, SharedVoice, SharedWorldControl, VoiceControl,
 };
 use crate::ScriptEntityType;
@@ -582,12 +582,18 @@ pub(super) fn op_cfx_server_native(
             serde_json::json!([pos[0], pos[1], pos[2]])
         }
         _ => {
+            // Readers backed by the decoded sync tree — the vehicle and ped
+            // state family. Tried first: they answer from the server's own
+            // reading of the world, so they must not be routed to a client.
+            if let Some(value) = natives_world::try_dispatch(state, &name, &args) {
+                value
+            }
             // Much of the "server" native surface is really a client mutation
             // the server routes to one client (see [`rpc_natives`]). Try that
             // before declaring the native unimplemented: a native in the CFX
             // context table *is* implemented, it just executes elsewhere. Every
             // one of them returns void, hence the null.
-            if rpc_natives::try_dispatch(state, &name, &args) {
+            else if rpc_natives::try_dispatch(state, &name, &args) {
                 serde_json::Value::Null
             } else {
                 let resource = state.borrow::<RuntimeContext>().resource_name.clone();

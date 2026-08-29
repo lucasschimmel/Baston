@@ -22,6 +22,9 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use baston_protocol::rage::sync_parse::{
+    PedGameState, VehicleAppearance, VehicleDamage, VehicleGameState, VehicleHealth,
+};
 use dashmap::DashMap;
 
 /// Entity classes as reported by `GET_ENTITY_TYPE`.
@@ -60,10 +63,39 @@ pub struct EntitySummary {
     /// `None` means the entity has not reported one yet — natives must say so
     /// rather than substituting a plausible number.
     pub health: Option<f32>,
+    pub max_health: Option<f32>,
     pub armour: Option<f32>,
     /// Model hash, once a creation node has been seen.
     pub model: Option<u32>,
+    /// Heading in degrees, from the entity's orientation node.
+    pub heading: Option<f32>,
+    /// The richer per-type state the sync tree carries.
+    pub sync: EntitySyncState,
 }
+
+/// Sync-tree state beyond position, health and model — everything the vehicle
+/// and ped natives read.
+///
+/// Grouped rather than flattened into [`EntitySummary`] so the summary stays
+/// about identity and placement, and so a new node adds one field here instead
+/// of widening every construction site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EntitySyncState {
+    pub vehicle_game_state: Option<VehicleGameState>,
+    pub vehicle_health: Option<VehicleHealth>,
+    pub vehicle_appearance: Option<VehicleAppearance>,
+    pub vehicle_damage: Option<VehicleDamage>,
+    pub ped_game_state: Option<PedGameState>,
+    /// Object id of the last vehicle a ped occupied.
+    pub last_vehicle: Option<u16>,
+    /// Raw seat index that went with [`Self::last_vehicle`].
+    pub last_vehicle_seat: Option<i32>,
+}
+
+/// Seat indices on the wire are offset by two from the ones scripts use, so
+/// that "entering" (-2) and "no seat" (-1) fit an unsigned field. `-1` is the
+/// driver's seat in script terms.
+pub const SEAT_INDEX_BIAS: i32 = 2;
 
 struct Entry {
     summary: EntitySummary,
@@ -79,6 +111,20 @@ pub struct EntityWorldView {
     revision: AtomicU64,
     /// Player net id → the ped entity it owns, for `GetPlayerPed`.
     player_peds: DashMap<u32, u32>,
+    /// `(vehicle, raw seat)` → the ped sitting there right now.
+    ///
+    /// Peds carry their vehicle, not the reverse, so answering
+    /// `GET_PED_IN_VEHICLE_SEAT` from the summaries alone would mean scanning
+    /// every ped per call. The index is rebuilt with each publication instead.
+    occupants: DashMap<u64, u32>,
+    /// Same key, but retaining the last ped to have used the seat.
+    last_occupants: DashMap<u64, u32>,
+}
+
+/// Key for the occupancy indices.
+fn seat_key(vehicle: u32, raw_seat: i32) -> Option<u64> {
+    let seat = u8::try_from(raw_seat).ok()?;
+    Some((u64::from(vehicle) << 8) | u64::from(seat))
 }
 
 impl EntityWorldView {
@@ -95,10 +141,14 @@ impl EntityWorldView {
     pub fn publish(&self, entities: impl IntoIterator<Item = EntitySummary>) {
         let revision = self.revision.fetch_add(1, Ordering::Relaxed) + 1;
         self.player_peds.clear();
+        self.occupants.clear();
+        // Not cleared: a seat's last occupant outlives the ped leaving it,
+        // which is the whole point of GET_LAST_PED_IN_VEHICLE_SEAT.
         for summary in entities {
             if summary.entity_type == ScriptEntityType::Ped {
                 // Last writer wins; a client owns exactly one player ped.
                 self.player_peds.insert(summary.owner, summary.network_id);
+                self.index_occupancy(&summary);
             }
             self.entities
                 .entry(summary.network_id)
@@ -109,6 +159,39 @@ impl EntityWorldView {
                 .or_insert(Entry { summary, revision });
         }
         self.entities.retain(|_, entry| entry.revision == revision);
+    }
+
+    /// Record where a ped sits, and where it last sat.
+    fn index_occupancy(&self, ped: &EntitySummary) {
+        if let Some(state) = ped.sync.ped_game_state {
+            if let Some(key) = u32::try_from(state.cur_vehicle)
+                .ok()
+                .and_then(|vehicle| seat_key(vehicle, state.cur_vehicle_seat))
+            {
+                self.occupants.insert(key, ped.network_id);
+                // Whoever is in the seat is also the last one to have used it.
+                self.last_occupants.insert(key, ped.network_id);
+            }
+        }
+        if let (Some(vehicle), Some(seat)) = (ped.sync.last_vehicle, ped.sync.last_vehicle_seat) {
+            if let Some(key) = seat_key(u32::from(vehicle), seat) {
+                self.last_occupants.entry(key).or_insert(ped.network_id);
+            }
+        }
+    }
+
+    /// The ped in a seat, addressed the way scripts do (`-1` = driver).
+    #[must_use]
+    pub fn occupant(&self, vehicle: u32, script_seat: i32) -> Option<u32> {
+        let key = seat_key(vehicle, script_seat + SEAT_INDEX_BIAS)?;
+        self.occupants.get(&key).map(|entry| *entry)
+    }
+
+    /// The last ped to have used a seat, whether or not it is still there.
+    #[must_use]
+    pub fn last_occupant(&self, vehicle: u32, script_seat: i32) -> Option<u32> {
+        let key = seat_key(vehicle, script_seat + SEAT_INDEX_BIAS)?;
+        self.last_occupants.get(&key).map(|entry| *entry)
     }
 
     /// Publication counter — lets callers cheaply detect a stale read.
@@ -227,8 +310,11 @@ mod tests {
             velocity: [0.0; 3],
             routing_bucket: 0,
             health: None,
+            max_health: None,
             armour: None,
             model: None,
+            heading: None,
+            sync: EntitySyncState::default(),
         }
     }
 

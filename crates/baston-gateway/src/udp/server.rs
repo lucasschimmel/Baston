@@ -634,8 +634,19 @@ impl UdpServer {
                 velocity: entity.velocity,
                 routing_bucket: entity.routing_bucket,
                 health: entity.health,
+                max_health: entity.max_health,
                 armour: entity.armour,
                 model: entity.model,
+                heading: entity.heading,
+                sync: baston_scripting::EntitySyncState {
+                    vehicle_game_state: entity.vehicle_game_state,
+                    vehicle_health: entity.vehicle_health,
+                    vehicle_appearance: entity.vehicle_appearance,
+                    vehicle_damage: entity.vehicle_damage,
+                    ped_game_state: entity.ped_game_state,
+                    last_vehicle: entity.last_vehicle,
+                    last_vehicle_seat: entity.last_vehicle_seat,
+                },
             });
         self.script_host.entity_world().publish(world);
     }

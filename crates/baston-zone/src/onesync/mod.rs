@@ -18,7 +18,10 @@ use std::collections::HashMap;
 use baston_protocol::rage::clone::NetObjEntityType;
 use baston_protocol::rage::object_ids;
 use baston_protocol::rage::reliability::{GameStateAck, GameStateNAck};
-use baston_protocol::rage::sync_parse::{world_position, GameBuild, SyncNodeData};
+use baston_protocol::rage::sync_parse::{
+    world_position, GameBuild, PedGameState, SyncNodeData, VehicleAppearance, VehicleDamage,
+    VehicleGameState, VehicleHealth,
+};
 use baston_protocol::rage::sync_write;
 
 use rayon::prelude::*;
@@ -91,8 +94,26 @@ pub struct ServerEntity {
     pub armour: Option<f32>,
     /// Model hash, decoded from the creation node.
     pub model: Option<u32>,
-    /// Vehicle this ped occupies and its seat, when known.
+    /// Vehicle this ped was created inside and its seat, from the creation
+    /// node. [`Self::ped_game_state`] supersedes it once the ped syncs.
     pub vehicle_seat: Option<(u16, u8)>,
+    /// Engine, doors, lights and locks (vehicles only).
+    pub vehicle_game_state: Option<VehicleGameState>,
+    /// Body, engine and tyre health (vehicles only).
+    pub vehicle_health: Option<VehicleHealth>,
+    /// Colours, mods, plate and neons (vehicles only).
+    pub vehicle_appearance: Option<VehicleAppearance>,
+    /// Bullet and window damage (vehicles only).
+    pub vehicle_damage: Option<VehicleDamage>,
+    /// Weapon and vehicle occupancy (peds and players).
+    pub ped_game_state: Option<PedGameState>,
+    /// Last vehicle this ped occupied, kept when it leaves one.
+    ///
+    /// The engine tracks this inside the node's own persistent state; the
+    /// decoder here is stateless, so the merge below owns it.
+    pub last_vehicle: Option<u16>,
+    /// Raw seat index that went with [`Self::last_vehicle`].
+    pub last_vehicle_seat: Option<i32>,
     /// Heading in degrees, decoded from the entity's orientation node.
     pub heading: Option<f32>,
     /// Created by a server script rather than by a client.
@@ -144,6 +165,39 @@ impl ServerEntity {
         }
         if let Some(heading) = decoded.heading {
             self.heading = Some(heading);
+        }
+        if let Some(state) = decoded.vehicle_game_state {
+            self.vehicle_game_state = Some(state);
+        }
+        if let Some(health) = decoded.vehicle_health {
+            self.vehicle_health = Some(health);
+        }
+        if let Some(appearance) = decoded.vehicle_appearance {
+            self.vehicle_appearance = Some(appearance);
+        }
+        if let Some(damage) = decoded.vehicle_damage {
+            self.vehicle_damage = Some(damage);
+        }
+        if let Some(state) = decoded.ped_game_state {
+            // The decoder cannot know the previous vehicle, so "last vehicle"
+            // is derived here: a ped that had one and now reports none just
+            // left it. Losing this would break GET_LAST_PED_IN_VEHICLE_SEAT
+            // exactly when it matters — right after someone steps out.
+            if state.cur_vehicle < 0 {
+                if let Some(previous) =
+                    self.ped_game_state
+                        .filter(|p| p.cur_vehicle >= 0)
+                        .and_then(|p| {
+                            u16::try_from(p.cur_vehicle)
+                                .ok()
+                                .map(|v| (v, p.cur_vehicle_seat))
+                        })
+                {
+                    self.last_vehicle = Some(previous.0);
+                    self.last_vehicle_seat = Some(previous.1);
+                }
+            }
+            self.ped_game_state = Some(state);
         }
     }
 }
@@ -399,6 +453,13 @@ impl ServerGameState {
                 armour: None,
                 model: Some(model),
                 vehicle_seat: None,
+                vehicle_game_state: None,
+                vehicle_health: None,
+                vehicle_appearance: None,
+                vehicle_damage: None,
+                ped_game_state: None,
+                last_vehicle: None,
+                last_vehicle_seat: None,
                 heading: Some(heading),
                 server_owned: true,
             },
