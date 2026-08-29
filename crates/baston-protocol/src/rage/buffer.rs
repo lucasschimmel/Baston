@@ -44,6 +44,22 @@ impl MessageBuffer {
         }
     }
 
+    /// Reader over existing bytes, bounded to `bit_len` bits rather than to the
+    /// whole byte buffer.
+    ///
+    /// Used to confine a decoder to one length-framed region: reads past the
+    /// region fail instead of silently returning bits that belong to whatever
+    /// follows it.
+    pub fn from_bits(data: Vec<u8>, bit_len: usize) -> Self {
+        let max_bit = bit_len.min(data.len() * 8);
+        Self {
+            data,
+            cur_bit: 0,
+            max_bit,
+            length_hack: false,
+        }
+    }
+
     /// Enable/disable the 13→16-bit length hack (OneSync big-id mode).
     pub fn with_length_hack(mut self, enabled: bool) -> Self {
         self.length_hack = enabled;

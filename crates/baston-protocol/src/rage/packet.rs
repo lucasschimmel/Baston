@@ -65,7 +65,13 @@ pub struct IncomingPacket {
 /// Decode a raw inbound payload `[u32 type][lz4 body]` (the tail the client
 /// uploads). Returns `None` if the type isn't a clone/ack stream or LZ4 fails,
 /// matching the `length <= 0` bail in `ParseGameStatePacket`.
-pub fn decode_incoming(payload: &[u8]) -> Option<IncomingPacket> {
+///
+/// `length_hack` must match the mode the rest of the clone stream runs in: it
+/// widens every 13-bit field — object ids *and* sync-node length prefixes —
+/// to 16 bits. Passing the wrong value desynchronises the bit cursor by three
+/// bits and turns every record into garbage, so the flag is threaded from the
+/// game state rather than assumed here.
+pub fn decode_incoming(payload: &[u8], length_hack: bool) -> Option<IncomingPacket> {
     if payload.len() < 4 {
         return None;
     }
@@ -75,13 +81,7 @@ pub fn decode_incoming(payload: &[u8]) -> Option<IncomingPacket> {
     }
     let body = lz4dict::decompress_using_dict(&payload[4..], INBOUND_SCRATCH)?;
 
-    // NOTE: inbound decoding assumes NATIVE mode (13-bit object ids). BASTON
-    // runs non-OneSync today, so the big-mode length hack (16-bit ids) is never
-    // active on this path — unlike the ack path (`onesync.rs`), which enables it
-    // symmetrically. If big-mode inbound is ever wired, the `length_hack` flag
-    // MUST be threaded down to here (via `.with_length_hack(...)`) or object ids
-    // desync by 3 bits and every record parses as garbage.
-    let mut buf = MessageBuffer::from_bytes(body);
+    let mut buf = MessageBuffer::from_bytes(body).with_length_hack(length_hack);
     let mut records = Vec::new();
     while !buf.is_at_end() {
         let ty = match buf.read_bits_single(3) {
@@ -278,7 +278,8 @@ mod tests {
         for _ in 0..4000 {
             let len = (next() % 600) as usize;
             let buf: Vec<u8> = (0..len).map(|_| next() as u8).collect();
-            let _ = decode_incoming(&buf);
+            let _ = decode_incoming(&buf, false);
+            let _ = decode_incoming(&buf, true);
             let _ = decode_downlink(&buf);
             let _ = super::super::reliability::parse_nack(&buf);
             let _ = super::super::reliability::parse_ack(&buf);
@@ -341,7 +342,7 @@ mod tests {
     fn incoming_rejects_non_clone_type() {
         let mut payload = 0xDEAD_BEEFu32.to_le_bytes().to_vec();
         payload.extend_from_slice(&[0u8; 8]);
-        assert!(decode_incoming(&payload).is_none());
+        assert!(decode_incoming(&payload, false).is_none());
     }
 
     fn sample_clone(object_id: u16, blob: &[u8]) -> OutboundClone<'_> {
@@ -473,7 +474,7 @@ mod tests {
         let mut payload = NET_CLONES.to_le_bytes().to_vec();
         payload.extend_from_slice(&compressed);
 
-        let decoded = decode_incoming(&payload).unwrap();
+        let decoded = decode_incoming(&payload, false).unwrap();
         assert_eq!(decoded.msg_type, NET_CLONES);
         assert_eq!(decoded.records.len(), 2);
         assert!(matches!(

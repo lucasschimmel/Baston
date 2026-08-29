@@ -9,11 +9,18 @@
 //! client every tick from a spatial view (no rotation), so scope entry/exit is
 //! reactive at all population sizes.
 //!
-//! Positions are supplied by the caller (a world snapshot) — this module is
-//! deliberately agnostic about whether they come from parsed sync-tree nodes or
-//! the client state-report path.
+//! Candidates come from a [`SpatialIndex`] rebuilt once per tick over the world
+//! snapshot, so a tick costs O(clients × neighbours) rather than
+//! O(clients × entities).
+//!
+//! Positions are supplied by the caller in that snapshot. In OneSync-NG they
+//! are decoded from each entity's own sync tree
+//! ([`baston_protocol::rage::sync_parse`]); this module stays agnostic about
+//! their origin.
 
 use std::collections::HashMap;
+
+use baston_protocol::rage::clone::NetObjEntityType;
 
 /// Ceiling on a view's accumulated priority. Priority only needs to establish a
 /// *relative* ordering, and f32 loses integer precision past ~1.7e7 (so
@@ -30,6 +37,9 @@ pub struct EntitySnapshot {
     pub uniqifier: u16,
     pub owner: u32,
     pub position: [f32; 3],
+    pub velocity: [f32; 3],
+    pub entity_type: NetObjEntityType,
+    pub routing_bucket: u32,
     /// Server frame index at the entity's last update (the delta baseline).
     pub frame_index: u64,
     /// Payload size in bytes — used for budget accounting.
@@ -50,6 +60,21 @@ pub struct InterestConfig {
     pub closing_weight: f32,
     /// Flat priority added each tick an entity goes unsent (anti-starvation).
     pub staleness_weight: f32,
+    /// Extra retention radius for entities already in scope.
+    pub hysteresis_m: f32,
+    /// Maximum bytes spent on scope removals in one tick.
+    pub remove_budget_bytes: usize,
+}
+
+impl InterestConfig {
+    /// The widest distance at which an entity can still be relevant: the AoI
+    /// radius plus the retention margin granted to entities already in scope.
+    /// Spatial queries must use this, not `aoi_radius`, or an entity held by
+    /// hysteresis would silently drop out of the candidate set.
+    #[must_use]
+    pub fn query_radius(&self) -> f32 {
+        self.aoi_radius + self.hysteresis_m
+    }
 }
 
 impl Default for InterestConfig {
@@ -60,6 +85,22 @@ impl Default for InterestConfig {
             distance_weight: 10.0,
             closing_weight: 0.5,
             staleness_weight: 1.0,
+            hysteresis_m: 20.0,
+            remove_budget_bytes: 4 * 1024,
+        }
+    }
+}
+
+impl From<&baston_config::StateSyncConfig> for InterestConfig {
+    fn from(value: &baston_config::StateSyncConfig) -> Self {
+        Self {
+            aoi_radius: value.aoi_radius,
+            budget_bytes: value.interest_budget_bytes,
+            distance_weight: value.interest_distance_weight,
+            closing_weight: value.interest_closing_weight,
+            staleness_weight: value.interest_staleness_weight,
+            hysteresis_m: value.interest_hysteresis_m,
+            remove_budget_bytes: value.interest_remove_budget_bytes,
         }
     }
 }
@@ -75,6 +116,74 @@ struct EntityView {
     created: bool,
     /// True if the entity was relevant this tick (for scope-exit detection).
     seen_this_tick: bool,
+    uniqifier: u16,
+}
+
+/// Uniform-grid spatial index over one world snapshot.
+///
+/// Interest is a radius query, so scanning every entity for every client is
+/// O(clients × entities) per tick — the dominant cost once a server holds more
+/// than a few hundred entities. The grid is rebuilt once per tick from the
+/// immutable snapshot and then queried by every client in parallel, which
+/// turns the tick into O(clients × neighbours).
+///
+/// Cells are sized at or above the query radius, so the 3×3 block around a
+/// focus point provably covers every entity within that radius. Membership is
+/// stored as indices into the caller's snapshot slice, so the index owns no
+/// entity data and stays cheap to build.
+pub struct SpatialIndex {
+    cell_size: f32,
+    cells: HashMap<(i32, i32), Vec<u32>>,
+}
+
+impl SpatialIndex {
+    /// Build an index whose cells are at least `radius` wide.
+    ///
+    /// `world` must not exceed `u32::MAX` entries; larger snapshots are
+    /// truncated rather than silently mis-indexed, which cannot occur in
+    /// practice (the object-id space caps the world at 65 535 entities).
+    #[must_use]
+    pub fn build(world: &[EntitySnapshot], radius: f32) -> Self {
+        // A degenerate radius would collapse every entity into one cell and
+        // reintroduce the linear scan; keep a sane floor.
+        let cell_size = radius.max(1.0);
+        let mut cells: HashMap<(i32, i32), Vec<u32>> = HashMap::new();
+        let count = world.len().min(u32::MAX as usize);
+        for (index, entity) in world.iter().take(count).enumerate() {
+            cells
+                .entry(cell_of(entity.position, cell_size))
+                .or_default()
+                .push(index as u32);
+        }
+        Self { cells, cell_size }
+    }
+
+    /// Visit every snapshot index within the query radius of `focus`.
+    ///
+    /// The callback may be invoked for entities slightly outside the radius —
+    /// the caller already applies the exact distance test — but never misses
+    /// one inside it.
+    pub fn for_each_near(&self, focus: [f32; 3], mut visit: impl FnMut(u32)) {
+        let (cx, cy) = cell_of(focus, self.cell_size);
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                if let Some(bucket) = self.cells.get(&(cx + dx, cy + dy)) {
+                    for &index in bucket {
+                        visit(index);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Interest is a horizontal query, so the grid is 2D — a vertical shaft of
+/// entities shares one cell, which is what a city with interiors wants.
+fn cell_of(position: [f32; 3], cell_size: f32) -> (i32, i32) {
+    (
+        (position[0] / cell_size).floor() as i32,
+        (position[1] / cell_size).floor() as i32,
+    )
 }
 
 /// What the tick decided to send one client, in priority order.
@@ -120,58 +229,106 @@ impl ClientView {
         world: &[EntitySnapshot],
         cfg: &InterestConfig,
     ) -> TickPlan {
+        let index = SpatialIndex::build(world, cfg.query_radius());
+        self.tick_with_context(focus, [0.0; 3], 0, world, &index, cfg)
+    }
+
+    /// Bucket-aware interest tick with relative velocity scoring.
+    ///
+    /// `index` must have been built over `world` with at least
+    /// [`InterestConfig::query_radius`] cells, so the neighbourhood query can
+    /// never miss a relevant entity.
+    pub fn tick_with_context(
+        &mut self,
+        focus: [f32; 3],
+        focus_velocity: [f32; 3],
+        routing_bucket: u32,
+        world: &[EntitySnapshot],
+        index: &SpatialIndex,
+        cfg: &InterestConfig,
+    ) -> TickPlan {
         // Reset seen flags.
         for v in self.views.values_mut() {
             v.seen_this_tick = false;
         }
 
-        let r2 = cfg.aoi_radius * cfg.aoi_radius;
         // Candidate = (object_id, priority, snapshot index).
         let mut candidates: Vec<(u16, f32, usize)> = Vec::new();
 
-        for (i, e) in world.iter().enumerate() {
-            if u32::from(self.net_id) == e.owner {
-                continue; // owner-echo suppression
+        index.for_each_near(focus, |i| {
+            let i = i as usize;
+            let Some(e) = world.get(i) else {
+                return;
+            };
+            if u32::from(self.net_id) == e.owner || e.routing_bucket != routing_bucket {
+                return; // owner-echo suppression
             }
             let dx = e.position[0] - focus[0];
             let dy = e.position[1] - focus[1];
             let d2 = dx * dx + dy * dy;
-            if d2 > r2 {
-                continue; // outside AoI
+            let already_scoped = self.views.contains_key(&e.object_id);
+            let radius = cfg.aoi_radius
+                + if already_scoped {
+                    cfg.hysteresis_m
+                } else {
+                    0.0
+                };
+            if d2 > radius * radius {
+                return; // outside AoI
             }
             let dist = d2.sqrt();
             // Distance term: full weight at 0, zero at the radius.
             let dist_term = cfg.distance_weight * (1.0 - dist / cfg.aoi_radius).max(0.0);
+            let closing_speed = if dist > f32::EPSILON {
+                let relative_velocity = [
+                    e.velocity[0] - focus_velocity[0],
+                    e.velocity[1] - focus_velocity[1],
+                ];
+                // AoI is horizontal, so closing velocity must use the same
+                // metric. Mixing a Z component with a 2D denominator lets
+                // vertical motion dominate priority near the focus point.
+                let radial_velocity =
+                    (relative_velocity[0] * dx + relative_velocity[1] * dy) / dist;
+                (-radial_velocity).max(0.0)
+            } else {
+                0.0
+            };
+            let closing_term = cfg.closing_weight * closing_speed;
 
             let view = self.views.entry(e.object_id).or_insert(EntityView {
                 priority: 0.0,
                 base_frame: 0,
                 created: false,
                 seen_this_tick: false,
+                uniqifier: e.uniqifier,
             });
             view.seen_this_tick = true;
-            view.priority = (view.priority + dist_term + cfg.staleness_weight).min(PRIORITY_CAP);
+            view.uniqifier = e.uniqifier;
+            view.priority =
+                (view.priority + dist_term + closing_term + cfg.staleness_weight).min(PRIORITY_CAP);
 
             candidates.push((e.object_id, view.priority, i));
-        }
+        });
 
         // Scope exits: entities we knew but didn't see this tick.
         let mut plan = TickPlan::default();
-        let exited: Vec<u16> = self
+        let mut exited: Vec<(u16, u16)> = self
             .views
             .iter()
             .filter(|(_, v)| !v.seen_this_tick)
-            .map(|(&id, _)| id)
+            .map(|(&id, v)| (id, v.uniqifier))
             .collect();
-        for id in exited {
+        exited.sort_unstable_by_key(|(id, _)| *id);
+        // A remove record is about 8 bytes. Keep unsent exits in the view so
+        // they are retried next tick instead of causing an unbounded storm.
+        let max_removes = (cfg.remove_budget_bytes / 8).max(1);
+        for (id, uniqifier) in exited.into_iter().take(max_removes) {
             self.views.remove(&id);
-            if let Some(e) = world.iter().find(|e| e.object_id == id) {
-                plan.removes.push((id, e.uniqifier));
-            }
+            plan.removes.push((id, uniqifier));
         }
 
         // Highest priority first.
-        candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
+        candidates.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
         let mut spent = 0usize;
         for (object_id, _prio, idx) in candidates {
@@ -260,6 +417,9 @@ mod tests {
             uniqifier: id,
             owner,
             position: pos,
+            velocity: [0.0; 3],
+            entity_type: NetObjEntityType::Object,
+            routing_bucket: 0,
             frame_index: frame,
             data_len: 64,
         }
@@ -383,5 +543,59 @@ mod tests {
         view.rollback(10, 4, false);
         let plan = view.tick([0.0, 0.0, 0.0], &world, &cfg);
         assert_eq!(plan.syncs, vec![10]);
+    }
+
+    #[test]
+    fn routing_buckets_are_isolated() {
+        let mut view = ClientView::new(1);
+        let mut entity = snap(10, 2, [10.0, 0.0, 0.0], 1);
+        entity.routing_bucket = 2;
+        let plan = view.tick_with_context(
+            [0.0; 3],
+            [0.0; 3],
+            1,
+            &[entity],
+            &SpatialIndex::build(&[entity], InterestConfig::default().query_radius()),
+            &InterestConfig::default(),
+        );
+        assert!(plan.creates.is_empty());
+    }
+
+    #[test]
+    fn closing_velocity_breaks_equal_distance_priority_tie() {
+        let cfg = InterestConfig {
+            budget_bytes: 22 + 64,
+            distance_weight: 0.0,
+            closing_weight: 1.0,
+            ..Default::default()
+        };
+        let mut view = ClientView::new(1);
+        let mut approaching = snap(11, 2, [100.0, 0.0, 0.0], 1);
+        approaching.velocity = [-20.0, 0.0, 0.0];
+        let receding = snap(10, 2, [100.0, 0.0, 0.0], 1);
+        let world = [receding, approaching];
+        let index = SpatialIndex::build(&world, cfg.query_radius());
+        let plan = view.tick_with_context([0.0; 3], [0.0; 3], 0, &world, &index, &cfg);
+        assert_eq!(plan.creates, vec![11]);
+    }
+
+    #[test]
+    fn scope_removes_are_budgeted_and_retried() {
+        let cfg = InterestConfig {
+            aoi_radius: 100.0,
+            remove_budget_bytes: 8,
+            ..Default::default()
+        };
+        let mut view = ClientView::new(1);
+        let near = vec![
+            snap(10, 2, [10.0, 0.0, 0.0], 1),
+            snap(11, 2, [20.0, 0.0, 0.0], 1),
+        ];
+        view.tick([0.0; 3], &near, &cfg);
+        let first = view.tick([0.0; 3], &[], &cfg);
+        assert_eq!(first.removes.len(), 1);
+        let second = view.tick([0.0; 3], &[], &cfg);
+        assert_eq!(second.removes.len(), 1);
+        assert_ne!(first.removes, second.removes);
     }
 }

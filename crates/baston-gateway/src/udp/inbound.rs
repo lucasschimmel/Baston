@@ -20,6 +20,30 @@ impl UdpServer {
         let Some((msg_type, payload)) = read_message_type(data) else {
             return;
         };
+        let expected_channel = match msg_type {
+            MSG_CONNECT | MSG_TIME_SYNC_REQ | MSG_SERVER_EVENT | MSG_I_HOST | MSG_I_QUIT => Some(0),
+            MSG_BASTON_STATE
+            | MSG_ROUTE
+            | MSG_REQUEST_OBJECT_IDS
+            | GAME_STATE_NACK
+            | GAME_STATE_ACK => Some(1),
+            _ => None,
+        };
+        if expected_channel.is_some_and(|expected| expected != channel) {
+            metrics::counter!(
+                "udp_ingress_rejected_total",
+                "reason" => "wrong_channel"
+            )
+            .increment(1);
+            tracing::debug!(
+                target: "udp",
+                msg_type = format!("0x{msg_type:08x}"),
+                channel,
+                expected_channel = expected_channel.unwrap_or_default(),
+                "game message rejected on wrong transport plane"
+            );
+            return;
+        }
         match msg_type {
             MSG_CONNECT => self.on_handshake(peer_id, payload),
             MSG_TIME_SYNC_REQ => self.on_time_sync(peer_id, payload),
@@ -102,6 +126,7 @@ impl UdpServer {
         if let Some(gs) = self.onesync.as_mut() {
             gs.add_client(source);
         }
+        self.refresh_routing_source(source);
 
         // msgConVars: msgpack map of ConVar_Replicated variables.
         let onesync_value = if onesync_on { "on" } else { "off" };
@@ -142,9 +167,12 @@ impl UdpServer {
         // packets, enough to sink the connect phase of a mesh benchmark).
         if !is_baston_client {
             let name = self.players.get(source).map(|p| p.name).unwrap_or_default();
+            let routing = self.script_host.routing_control();
+            let source_bucket = routing.player_bucket(source);
             let others: Vec<(u32, bool)> = self
                 .peer_sources
                 .values()
+                .filter(|&&s| routing.player_bucket(s) == source_bucket)
                 .map(|&s| {
                     let sub = self
                         .state_ingest
@@ -207,7 +235,17 @@ impl UdpServer {
         if u32::from(route.target_net_id) == source {
             return;
         }
-        let Some(&target_peer) = self.source_peers.get(&(u32::from(route.target_net_id))) else {
+        let target = u32::from(route.target_net_id);
+        let routing = self.script_host.routing_control();
+        if routing.player_bucket(source) != routing.player_bucket(target) {
+            metrics::counter!(
+                "udp_ingress_rejected_total",
+                "reason" => "routing_bucket"
+            )
+            .increment(1);
+            return;
+        }
+        let Some(&target_peer) = self.source_peers.get(&target) else {
             return;
         };
         let packet = baston_protocol::udp::route::build_server_route(source as u16, route.data);
@@ -221,6 +259,9 @@ impl UdpServer {
     /// OneSync-NG inbound: ingest the client's clone stream into the server
     /// game state and send back the resulting `msgPackedAcks`.
     fn on_clone_stream(&mut self, source: u32, data: &[u8]) {
+        // Apply routing native changes before enforcing create/takeover
+        // lockdown on this packet.
+        self.refresh_routing_source(source);
         let Some(gs) = self.onesync.as_mut() else {
             return;
         };
@@ -441,14 +482,16 @@ impl UdpServer {
         // Client shim reporting its ped state: same validated path as the
         // binary packet, no script-runtime dispatch.
         if event.name == STATE_UPDATE_EVENT {
-            if let (Some(ingest), Some(update)) = (
-                &self.state_ingest,
-                state_msg::client_state_update_from_json(&args),
-            ) {
+            if let Some(update) = state_msg::client_state_update_from_json(&args) {
+                if self.onesync.is_some() {
+                    self.focus_positions.insert(source, update.coords);
+                }
                 if let Some(fwd) = &self.mesh_forward {
                     fwd.forward(source, update.clone());
                 }
-                let _ = ingest.apply(source, update);
+                if let Some(ingest) = &self.state_ingest {
+                    let _ = ingest.apply(source, update);
+                }
             }
             return;
         }
