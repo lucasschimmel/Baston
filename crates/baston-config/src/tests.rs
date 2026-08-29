@@ -359,3 +359,63 @@ fn download_policy_rejects_zero_and_unsafe_chunk_sizes() {
         })
     ));
 }
+
+#[test]
+fn display_info_is_off_until_asked_for() {
+    let debug = DebugConfig::default();
+    assert_eq!(debug.display_info, DisplayInfoAccess::Off);
+    assert!(
+        !debug.allows(&["license:abc".to_owned()]),
+        "the overlay must not appear on a server that never configured it"
+    );
+}
+
+#[test]
+fn allowlist_matches_identifiers_case_insensitively() {
+    let debug = DebugConfig {
+        display_info: DisplayInfoAccess::Allowlist,
+        allow: vec!["License:ABC".to_owned()],
+        ..DebugConfig::default()
+    };
+    assert!(debug.allows(&["steam:110000".to_owned(), "license:abc".to_owned()]));
+    assert!(!debug.allows(&["license:other".to_owned()]));
+}
+
+#[test]
+fn everyone_needs_no_identifier_at_all() {
+    let debug = DebugConfig {
+        display_info: DisplayInfoAccess::Everyone,
+        ..DebugConfig::default()
+    };
+    assert!(debug.allows(&[]));
+}
+
+#[test]
+fn an_empty_allowlist_is_rejected_rather_than_silently_denying() {
+    let debug = DebugConfig {
+        display_info: DisplayInfoAccess::Allowlist,
+        ..DebugConfig::default()
+    };
+    assert!(matches!(
+        debug.validate(),
+        Err(ConfigError::Invalid {
+            section: "debug",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn refresh_hz_is_bounded() {
+    for hz in [0, 31] {
+        let debug = DebugConfig {
+            display_info: DisplayInfoAccess::Everyone,
+            refresh_hz: hz,
+            ..DebugConfig::default()
+        };
+        assert!(
+            debug.validate().is_err(),
+            "refresh_hz = {hz} must be rejected"
+        );
+    }
+}

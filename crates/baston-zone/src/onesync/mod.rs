@@ -15,6 +15,7 @@ mod tests;
 
 use std::collections::HashMap;
 
+use baston_protocol::debug_info::ObjectIdUsage;
 use baston_protocol::rage::clone::NetObjEntityType;
 use baston_protocol::rage::object_ids;
 use baston_protocol::rage::reliability::{GameStateAck, GameStateNAck};
@@ -270,6 +271,54 @@ impl ServerGameState {
 
     pub fn entity_count(&self) -> usize {
         self.entities.len()
+    }
+
+    /// Entities the server itself authored, rather than adopted from a client.
+    pub fn server_owned_count(&self) -> usize {
+        self.entities.values().filter(|e| e.server_owned).count()
+    }
+
+    /// Entities currently simulated by `source`.
+    pub fn owned_by(&self, source: u32) -> usize {
+        self.entities.values().filter(|e| e.owner == source).count()
+    }
+
+    /// How many entities are cloned to `source` right now. `None` for a
+    /// source that is not a registered client.
+    pub fn client_scope_len(&self, source: u32) -> Option<usize> {
+        self.clients.get(&source).map(|c| c.view.scope_len())
+    }
+
+    /// The frame index `source` last acknowledged. The distance to
+    /// [`Self::frame_index`] is how far behind that client's view is.
+    pub fn client_frame_index(&self, source: u32) -> Option<u64> {
+        self.clients.get(&source).map(|c| c.frame_index)
+    }
+
+    /// Occupancy of the object-id space.
+    ///
+    /// Exhaustion is silent from the outside — clients simply stop being able
+    /// to create entities — so the split between *used* (a live entity) and
+    /// *leased* (handed out, not created on yet) is what distinguishes a full
+    /// world from clients hoarding ids they never spend.
+    pub fn object_id_usage(&self) -> ObjectIdUsage {
+        let mut used = 0;
+        let mut leased = 0;
+        // Id 0 is "no object" and `lease_object_ids` starts at 1; counting the
+        // whole vector would report one permanently unavailable free id.
+        for state in &self.ids[1..=self.max_object_id as usize] {
+            match state {
+                IdState::Used => used += 1,
+                IdState::Leased => leased += 1,
+                IdState::Free => {}
+            }
+        }
+        ObjectIdUsage {
+            used,
+            leased,
+            free: u32::from(self.max_object_id) - used - leased,
+            max: u32::from(self.max_object_id),
+        }
     }
 
     /// Iterate every tracked entity.

@@ -93,6 +93,14 @@ impl AdaptiveTickController {
         self.current_hz
     }
 
+    /// Smoothed fraction of the scheduled period recent ticks consumed.
+    ///
+    /// `None` before the first observation: there is nothing to average yet,
+    /// and reporting 0 would read as "idle" rather than "unknown".
+    pub fn utilization(&self) -> Option<f64> {
+        self.ewma_utilization
+    }
+
     pub fn period(&self) -> Duration {
         Duration::from_secs_f64(1.0 / f64::from(self.current_hz))
     }

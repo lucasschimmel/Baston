@@ -584,3 +584,58 @@ fn despawn_frees_the_object_id() {
         Some(id)
     );
 }
+
+#[test]
+fn object_id_usage_separates_leased_from_used() {
+    let mut gs = ServerGameState::new(true, false);
+    let empty = gs.object_id_usage();
+    assert_eq!(empty.max, MAX_OBJECT_ID_NATIVE as u32);
+    assert_eq!(empty.used + empty.leased, 0);
+    assert_eq!(empty.free, empty.max, "id 0 is not part of the pool");
+
+    // A lease is not yet an entity: the two must not be conflated, or a
+    // client hoarding ids looks the same as a full world.
+    let (leased, _) = gs.lease_object_ids(5, 4);
+    assert_eq!(leased.len(), 4);
+    let after_lease = gs.object_id_usage();
+    assert_eq!(after_lease.leased, 4);
+    assert_eq!(after_lease.used, 0);
+    assert_eq!(after_lease.free, after_lease.max - 4);
+
+    // Creating on a leased id consumes the lease rather than adding to it.
+    gs.ingest_clone_payload(
+        5,
+        &build_clone_payload(|b| {
+            write_inbound_create(b, leased[0], 1, NetObjEntityType::Object, &[1]);
+        }),
+    );
+    let after_create = gs.object_id_usage();
+    assert_eq!(after_create.used, 1);
+    assert_eq!(after_create.leased, 3);
+    assert_eq!(
+        after_create.used + after_create.leased + after_create.free,
+        after_create.max
+    );
+}
+
+#[test]
+fn per_client_counters_answer_for_the_right_client() {
+    let mut gs = ServerGameState::new(true, false);
+    with_player(&mut gs, 5, 10, [0.0; 3]);
+    with_player(&mut gs, 6, 20, [0.0; 3]);
+    let server_id = gs
+        .spawn_server_entity(NetObjEntityType::Object, 1, [0.0; 3], 0.0, false)
+        .expect("server entity");
+
+    assert_eq!(gs.owned_by(5), 1);
+    assert_eq!(gs.owned_by(6), 1);
+    assert_eq!(gs.server_owned_count(), 1);
+    assert_eq!(gs.entity_count(), 3);
+    assert!(gs.entity(server_id).is_some());
+
+    // A source that never connected has no view, which is distinct from an
+    // empty one.
+    assert!(gs.client_scope_len(5).is_some());
+    assert!(gs.client_scope_len(99).is_none());
+    assert!(gs.client_frame_index(99).is_none());
+}

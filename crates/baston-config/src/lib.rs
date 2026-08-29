@@ -143,6 +143,8 @@ pub struct BastonConfig {
     #[serde(default)]
     pub dev: DevConfig,
     #[serde(default)]
+    pub debug: DebugConfig,
+    #[serde(default)]
     pub meshing: MeshingConfig,
     #[serde(default)]
     pub escrow: EscrowConfig,
@@ -895,6 +897,96 @@ pub struct ConnectionConfig {
     pub deferral_timeout_secs: u64,
 }
 
+/// Who may turn the `displayinfo` overlay on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DisplayInfoAccess {
+    /// The overlay does not exist: the builtin resource is not advertised to
+    /// any client, and toggle requests are refused.
+    #[default]
+    Off,
+    /// Only players whose identifiers appear in `[debug].allow`.
+    Allowlist,
+    /// Anyone connected. The snapshot exposes zone topology and per-player
+    /// network stats, so this is a development setting.
+    Everyone,
+}
+
+impl DisplayInfoAccess {
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+}
+
+/// `[debug]` section — the server-assembled `displayinfo` overlay.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DebugConfig {
+    #[serde(default)]
+    pub display_info: DisplayInfoAccess,
+    /// Identifiers cleared for the overlay when `display_info = "allowlist"`,
+    /// in `GetPlayerIdentifiers` form (`license:abc…`, `steam:110000…`).
+    /// Matching is exact and case-insensitive.
+    #[serde(default)]
+    pub allow: Vec<String>,
+    /// Snapshots per second, per subscriber. Each one is a reliable client
+    /// event carrying the mesh topology, so this is deliberately far below
+    /// the sync tick.
+    #[serde(default = "default_display_info_hz")]
+    pub refresh_hz: u32,
+}
+
+impl Default for DebugConfig {
+    fn default() -> Self {
+        Self {
+            display_info: DisplayInfoAccess::default(),
+            allow: Vec::new(),
+            refresh_hz: default_display_info_hz(),
+        }
+    }
+}
+
+impl DebugConfig {
+    /// Whether `source`'s identifiers clear it for the overlay.
+    pub fn allows(&self, identifiers: &[String]) -> bool {
+        match self.display_info {
+            DisplayInfoAccess::Off => false,
+            DisplayInfoAccess::Everyone => true,
+            DisplayInfoAccess::Allowlist => identifiers.iter().any(|id| {
+                self.allow
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(id.trim()))
+            }),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if !(1..=30).contains(&self.refresh_hz) {
+            return Err(ConfigError::Invalid {
+                section: "debug",
+                reason: format!(
+                    "refresh_hz must be between 1 and 30, got {}",
+                    self.refresh_hz
+                ),
+            });
+        }
+        // An allowlist mode with nothing in it is almost always a half-finished
+        // edit, and it fails silently: the overlay simply never appears.
+        if self.display_info == DisplayInfoAccess::Allowlist && self.allow.is_empty() {
+            return Err(ConfigError::Invalid {
+                section: "debug",
+                reason: "display_info = \"allowlist\" but allow is empty — \
+                         list the identifiers cleared for the overlay, or use \"off\""
+                    .to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn default_display_info_hz() -> u32 {
+    5
+}
+
 /// `[dev]` section.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DevConfig {
@@ -1178,6 +1270,7 @@ impl BastonConfig {
         self.api.validate()?;
         self.state_sync.validate()?;
         self.resources.validate()?;
+        self.debug.validate()?;
         if self.license.public_listing {
             if self.license.mode != LicenseMode::Verified {
                 return Err(ConfigError::Invalid {

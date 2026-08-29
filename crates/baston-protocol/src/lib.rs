@@ -1,6 +1,7 @@
 //! Shared types exchanged between BASTON components (gateway, zone, scripting).
 
 pub mod connection;
+pub mod debug_info;
 pub mod entity;
 pub mod events;
 pub mod native;
