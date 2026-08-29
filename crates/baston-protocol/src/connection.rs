@@ -77,22 +77,24 @@ pub struct InitConnectResponse {
 
 impl InitConnectResponse {
     /// Response with BASTON's fixed protocol constants filled in.
-    pub fn new(token: String, game_name: &str, max_clients: u32) -> Self {
+    ///
+    /// `onesync_enabled` is explicit so the HTTP negotiation cannot silently
+    /// diverge from the UDP runtime configuration. BASTON only implements the
+    /// Infinity-style big mode when OneSync is enabled.
+    pub fn new(token: String, game_name: &str, max_clients: u32, onesync_enabled: bool) -> Self {
         Self {
             protocol: PROTOCOL_VERSION,
             bit_version: NET_BIT_VERSION,
             pure: 0,
             script_hook_allowed: false,
-            // FXServer sends `sv_enhancedHostSupport && !IsOneSync()`; BASTON
-            // is always non-OneSync and the gateway implements the
-            // sessionmanager arbitration (hostingSession/sessionHostResult),
-            // so the client can fall back to hosting when a P2P join fails
-            // instead of failing fast (NetHook.cpp HS_JOIN_FAILURE).
-            enhanced_host_support: true,
-            onesync: false,
-            onesync_big: false,
+            // FXServer sends `sv_enhancedHostSupport && !IsOneSync()`.
+            // Legacy mode keeps sessionmanager host arbitration; authoritative
+            // OneSync must never ask the client to host the session.
+            enhanced_host_support: !onesync_enabled,
+            onesync: onesync_enabled,
+            onesync_big: onesync_enabled,
             onesync_lh: false,
-            onesync_population: false,
+            onesync_population: onesync_enabled,
             token,
             gamename: game_name.to_owned(),
             netlib_version: NETLIB_VERSION,
@@ -165,7 +167,7 @@ mod tests {
 
     #[test]
     fn init_connect_response_uses_fxserver_field_names() {
-        let response = InitConnectResponse::new("tok-123".into(), "gta5", 32);
+        let response = InitConnectResponse::new("tok-123".into(), "gta5", 32, false);
         let json = serde_json::to_value(&response).unwrap();
         // Field names the client actually checks (NetLibrary.cpp).
         assert_eq!(json["protocol"], 5);
@@ -175,6 +177,16 @@ mod tests {
         assert_eq!(json["maxClients"], 32);
         assert_eq!(json["token"], "tok-123");
         assert!(json["handover"].is_object());
+    }
+
+    #[test]
+    fn init_connect_advertises_authoritative_big_mode_explicitly() {
+        let response = InitConnectResponse::new("tok".into(), "gta5", 128, true);
+        assert!(response.onesync);
+        assert!(response.onesync_big);
+        assert!(response.onesync_population);
+        assert!(!response.onesync_lh);
+        assert!(!response.enhanced_host_support);
     }
 
     #[test]

@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use baston_config::BastonConfig;
+use baston_config::{BastonConfig, OneSyncMode};
+use baston_core::license::LicenseKeyToken;
 use baston_gateway::{router, AppState, PlayerRegistry};
 use baston_scripting::{DeferralRegistry, ScriptHost};
 use baston_zone::resource_loader::ResourceManager;
@@ -49,12 +50,30 @@ fn write_axiom_core(dir: &Path, script: &str) {
 }
 
 async fn app(dir: &Path, script: &str) -> axum::Router {
+    app_with_token(dir, script, None).await
+}
+
+async fn app_with_token(
+    dir: &Path,
+    script: &str,
+    license_token: Option<LicenseKeyToken>,
+) -> axum::Router {
+    app_with_mode(dir, script, license_token, OneSyncMode::Off).await
+}
+
+async fn app_with_mode(
+    dir: &Path,
+    script: &str,
+    license_token: Option<LicenseKeyToken>,
+    onesync: OneSyncMode,
+) -> axum::Router {
     write_axiom_core(dir, script);
     // Tests run with dev.auth_bypass (no launcher ticket available in CI).
     let mut config: BastonConfig =
         toml::from_str("[server]\nport = 30120\n[dev]\nauth_bypass = true\n").unwrap();
     config.resources.path = dir.to_owned();
     config.connection.deferral_timeout_secs = 2;
+    config.state_sync.onesync = onesync;
 
     let deferrals = Arc::new(DeferralRegistry::new());
     let players = Arc::new(PlayerRegistry::new());
@@ -65,7 +84,9 @@ async fn app(dir: &Path, script: &str) -> axum::Router {
 
     let auth = baston_gateway::AuthService::new(&config.auth).unwrap();
     router(Arc::new(AppState {
+        downloads: baston_gateway::http::DownloadPolicy::new(&config.resources),
         config,
+        license_token: std::sync::RwLock::new(license_token),
         resource_manager,
         players,
         script_host,
@@ -93,7 +114,27 @@ async fn info_json_returns_server_metadata() {
     let json = body_json(response).await;
     assert_eq!(json["name"], "BASTON Dev");
     assert_eq!(json["onesync"]["enabled"], false);
+    assert!(json["vars"].get("sv_licenseKeyToken").is_none());
+    assert_eq!(json["vars"]["sv_maxClients"], "32");
     assert_eq!(json["resources"][0], "axiom-core");
+}
+
+#[tokio::test]
+async fn info_json_publishes_authenticated_cfx_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let token = LicenseKeyToken::new("authenticated-cfx-token").unwrap();
+    let app = app_with_token(dir.path(), AXIOM_CORE_JS, Some(token)).await;
+
+    let response = app
+        .oneshot(Request::get("/info.json").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let json = body_json(response).await;
+
+    assert_eq!(
+        json["vars"]["sv_licenseKeyToken"],
+        "authenticated-cfx-token"
+    );
 }
 
 #[tokio::test]
@@ -104,7 +145,7 @@ async fn files_route_serves_resource_scripts_and_404s_missing() {
     let ok = app
         .clone()
         .oneshot(
-            Request::get("/files/axiom-core/dist/server/index.js")
+            Request::get("/files/axiom-core/dist/client/index.js")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -112,6 +153,17 @@ async fn files_route_serves_resource_scripts_and_404s_missing() {
         .unwrap();
     assert_eq!(ok.status(), StatusCode::OK);
     assert_eq!(ok.headers()["content-type"], "application/javascript");
+
+    let private = app
+        .clone()
+        .oneshot(
+            Request::get("/files/axiom-core/dist/server/index.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(private.status(), StatusCode::NOT_FOUND);
 
     let missing = app
         .clone()
@@ -207,6 +259,40 @@ async fn init_connect_response_has_fxserver_fields() {
     assert_eq!(json["netlibVersion"], 2);
     assert_eq!(json["maxClients"], 32);
     assert!(json["handover"].is_object());
+}
+
+#[tokio::test]
+async fn onesync_mode_is_consistent_in_info_and_init_connect() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_mode(dir.path(), AXIOM_CORE_JS, None, OneSyncMode::On).await;
+
+    let info = app
+        .clone()
+        .oneshot(Request::get("/info.json").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let info = body_json(info).await;
+    assert_eq!(info["onesync"]["enabled"], true);
+    assert_eq!(info["enhancedHostSupport"], false);
+    assert_eq!(info["vars"]["onesync"], "on");
+    assert_eq!(info["vars"]["onesync_enabled"], "true");
+
+    let connect = app
+        .oneshot(
+            Request::post("/client")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "method=initConnect&name=OneSync&protocol=12&gameName=gta5&guid=10",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let connect = body_json(connect).await;
+    assert_eq!(connect["onesync"], true);
+    assert_eq!(connect["onesync_big"], true);
+    assert_eq!(connect["onesync_population"], true);
+    assert_eq!(connect["enhancedHostSupport"], false);
 }
 
 #[tokio::test]
