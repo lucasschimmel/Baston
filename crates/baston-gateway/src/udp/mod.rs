@@ -18,6 +18,6 @@ mod inbound;
 mod oob;
 mod server;
 
-pub use handle::{UdpCommand, UdpError, UdpHandle};
+pub use handle::{ControlPlaneHandle, SyncPlaneHandle, UdpCommand, UdpError, UdpHandle};
 pub use oob::{OobInfo, OobSocket};
-pub use server::{spawn, spawn_with_mesh, spawn_with_net};
+pub use server::{spawn, spawn_with_mesh, spawn_with_mesh_on, spawn_with_net};

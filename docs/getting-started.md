@@ -82,6 +82,7 @@ Fichiers fournis :
 [server]
 name = "BASTON Dev"
 port = 30120
+bind_address = "0.0.0.0"     # interface TCP + UDP du jeu
 max_players = 32
 enforce_game_build = "3258"   # le client bascule sur ce build avant connexion
 
@@ -116,6 +117,8 @@ port = 30121                  # TCP(TLS) contrôle + UDP voix (même numéro)
 [license]
 mode = "off"                  # off | gate | verified   (cf docs/licensing.md)
 sv_license_key = ""
+# public_listing = true        # broker FXServer officiel → liste CFX
+# listing_ip_override = "203.0.113.10"
 
 [escrow]
 enabled = false               # assets chiffrés CFX (Windows + --features escrow)

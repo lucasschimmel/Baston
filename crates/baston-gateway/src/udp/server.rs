@@ -2,21 +2,24 @@
 //! session-host arbitration state.
 
 use std::collections::HashMap;
-use std::net::UdpSocket;
+use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::sync::Arc;
 use std::time::Instant;
 
-use baston_config::OneSyncMode;
+use baston_config::StateSyncConfig;
 use baston_protocol::events;
+use baston_protocol::rage::sync_parse::GameBuild;
 use baston_protocol::udp::host;
 use baston_protocol::PlayerDirectory;
-use baston_scripting::{NetOutbound, ScriptHost};
+use baston_scripting::{NetOutbound, RoutingLockdownMode, ScriptHost};
+use baston_zone::adaptive_tick::{AdaptiveTickConfig, AdaptiveTickController};
 use baston_zone::onesync::ServerGameState;
+use baston_zone::routing_bucket::LockdownMode;
 use baston_zone::StateIngest;
 use rusty_enet as enet;
 use tokio::sync::mpsc;
 
-use super::handle::{UdpCommand, UdpError, UdpHandle, CMD_CAPACITY};
+use super::handle::{UdpCommand, UdpError, UdpHandle, CONTROL_CAPACITY, SYNC_CAPACITY};
 use super::oob::{OobInfo, OobSocket};
 
 /// Channel count used by the FiveM client (`enet_host_create(..., 2, 0, 0)`).
@@ -54,10 +57,19 @@ pub(super) struct UdpServer {
     pub(super) onesync: Option<ServerGameState>,
     /// Interest-management tuning for the outbound tick.
     pub(super) onesync_cfg: baston_zone::interest_ng::InterestConfig,
-    /// Best-effort per-client focus positions (from the state-report path),
-    /// driving OneSync-NG interest management until sync-node position parsing
-    /// lands.
+    /// Feedback controller governing the outbound OneSync cadence.
+    pub(super) sync_controller: AdaptiveTickController,
+    /// Last position each client reported out-of-band (mesh state path).
+    ///
+    /// OneSync-NG derives interest from decoded sync-tree positions; this map
+    /// is only a bootstrap seed for a client whose first positional clone
+    /// record has not arrived yet, and the mesh state pipeline's own feed.
     pub(super) focus_positions: HashMap<u32, [f32; 3]>,
+    /// Last scripting routing revision mirrored into OneSync.
+    pub(super) routing_revision: u64,
+    /// Entity creations and deletions submitted by scripts, applied at the
+    /// start of each sync tick so they land on a consistent world.
+    pub(super) world_commands: Option<mpsc::Receiver<baston_scripting::WorldCommand>>,
 }
 
 /// Spawn the UDP/ENet server task. Returns a handle for outbound sends.
@@ -105,7 +117,7 @@ pub fn spawn_with_net(
         net_rx,
         state_ingest,
         None,
-        OneSyncMode::Off,
+        StateSyncConfig::default(),
     )
 }
 
@@ -120,10 +132,46 @@ pub fn spawn_with_mesh(
     net_rx: Option<mpsc::Receiver<NetOutbound>>,
     state_ingest: Option<Arc<StateIngest>>,
     mesh_forward: Option<crate::mesh_forward::MeshForwarder>,
-    onesync_mode: OneSyncMode,
+    state_sync: StateSyncConfig,
 ) -> Result<UdpHandle, UdpError> {
+    spawn_with_mesh_on(
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        port,
+        poll_interval_ms,
+        max_players,
+        players,
+        script_host,
+        net_rx,
+        state_ingest,
+        mesh_forward,
+        state_sync,
+        GameBuild::default(),
+    )
+}
+
+/// Full-fat spawn on one explicit local interface. Public CFX listing uses
+/// this to leave `127.0.0.1:<port>` available to the genuine FXServer broker.
+///
+/// `game_build` must be the enforced `sv_enforceGameBuild`: several sync-tree
+/// nodes changed width between builds, so decoding against the wrong one reads
+/// real fields at the wrong offset.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_with_mesh_on(
+    bind_address: IpAddr,
+    port: u16,
+    poll_interval_ms: u64,
+    max_players: u32,
+    players: Arc<PlayerDirectory>,
+    script_host: ScriptHost,
+    net_rx: Option<mpsc::Receiver<NetOutbound>>,
+    state_ingest: Option<Arc<StateIngest>>,
+    mesh_forward: Option<crate::mesh_forward::MeshForwarder>,
+    state_sync: StateSyncConfig,
+    game_build: GameBuild,
+) -> Result<UdpHandle, UdpError> {
+    let onesync_mode = state_sync.onesync;
     let socket =
-        UdpSocket::bind(("0.0.0.0", port)).map_err(|source| UdpError::Bind { port, source })?;
+        UdpSocket::bind((bind_address, port)).map_err(|source| UdpError::Bind { port, source })?;
     let socket = OobSocket::new(
         socket,
         OobInfo {
@@ -142,9 +190,15 @@ pub fn spawn_with_mesh(
     )
     .map_err(|e| UdpError::HostCreate(format!("{e:?}")))?;
 
-    tracing::info!(target: "baston", port, "UDP game transport (ENet) listening");
+    tracing::info!(
+        target: "baston",
+        %bind_address,
+        port,
+        "UDP game transport (ENet) listening"
+    );
 
-    let (cmd_tx, cmd_rx) = mpsc::channel(CMD_CAPACITY);
+    let (control_tx, control_rx) = mpsc::channel(CONTROL_CAPACITY);
+    let (sync_tx, sync_rx) = mpsc::channel(SYNC_CAPACITY);
     let server = UdpServer {
         host,
         players,
@@ -161,56 +215,61 @@ pub fn spawn_with_mesh(
         mesh_forward,
         // Big mode is implied by OneSync-on in BASTON (Infinity-style); the
         // length hack (Beyond, 16-bit ids) stays off until validated live.
+        // The decoder must use the build every client is forced onto, or the
+        // build-gated node layouts are read at the wrong width.
         onesync: onesync_mode
             .is_enabled()
-            .then(|| ServerGameState::new(true, false)),
-        onesync_cfg: baston_zone::interest_ng::InterestConfig::default(),
+            .then(|| ServerGameState::with_build(true, false, game_build)),
+        onesync_cfg: baston_zone::interest_ng::InterestConfig::from(&state_sync),
+        sync_controller: AdaptiveTickController::new(AdaptiveTickConfig::from(&state_sync)),
         focus_positions: HashMap::new(),
+        routing_revision: u64::MAX,
+        world_commands: None,
     };
     if onesync_mode.is_enabled() {
         tracing::info!(target: "baston", "OneSync-NG enabled: server-authoritative entity parsing");
     }
-    tokio::spawn(run(server, cmd_rx, net_rx, poll_interval_ms));
-    Ok(UdpHandle { cmd_tx })
+    tokio::spawn(run(server, control_rx, sync_rx, net_rx, poll_interval_ms));
+    Ok(UdpHandle::new(control_tx, sync_tx))
 }
 
 async fn run(
     mut server: UdpServer,
-    mut cmd_rx: mpsc::Receiver<UdpCommand>,
+    control_rx: mpsc::Receiver<UdpCommand>,
+    sync_rx: mpsc::Receiver<UdpCommand>,
     net_rx: Option<mpsc::Receiver<NetOutbound>>,
     poll_interval_ms: u64,
 ) {
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(poll_interval_ms.max(1)));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // OneSync-NG outbound sync cadence (~20 Hz). Idle when OneSync is off.
-    let mut sync_tick = tokio::time::interval(std::time::Duration::from_millis(50));
+    // Start at the configured safe rate. Rate changes reset from "now" so a
+    // downshift/upshift never produces a catch-up burst.
+    let initial_period = server.sync_controller.period();
+    let mut sync_tick =
+        tokio::time::interval_at(tokio::time::Instant::now() + initial_period, initial_period);
     sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // A closed/absent bridge must not wedge the select loop.
+    let onesync_enabled = server.onesync.is_some();
+    // Closed/absent channels must not wedge the select loop.
+    let mut control_rx = Some(control_rx);
+    let mut sync_rx = Some(sync_rx);
     let mut net_rx = net_rx;
     loop {
         tokio::select! {
+            biased;
             _ = tick.tick() => {
                 server.pump().await;
             }
-            _ = sync_tick.tick() => {
-                server.onesync_tick();
-            }
-            cmd = cmd_rx.recv() => {
-                match cmd {
-                    Some(cmd) => {
-                        server.handle_command(cmd);
-                        // Batch-drain: at 2000 clients the aggregator emits
-                        // tens of thousands of sends per second — one select
-                        // iteration per command starves the ENet pump.
-                        let mut drained = 0;
-                        while let Ok(cmd) = cmd_rx.try_recv() {
+            cmd = recv_command(&mut control_rx) => {
+                if let Some(cmd) = cmd {
+                    server.handle_command(cmd);
+                    // Bound each batch so ENet servicing remains prompt even
+                    // under a sustained control burst.
+                    if let Some(receiver) = control_rx.as_mut() {
+                        for _ in 0..255 {
+                            let Ok(cmd) = receiver.try_recv() else { break };
                             server.handle_command(cmd);
-                            drained += 1;
-                            if drained >= 4096 { break; }
                         }
                     }
-                    // All handles dropped: keep servicing ENet regardless.
-                    None => server.pump().await,
                 }
             }
             outbound = recv_net(&mut net_rx) => {
@@ -218,7 +277,84 @@ async fn run(
                     server.handle_net_outbound(outbound);
                 }
             }
+            _ = sync_tick.tick(), if onesync_enabled => {
+                let scheduled_period = server.sync_controller.period();
+                let started = Instant::now();
+                server.onesync_tick();
+                let work = started.elapsed();
+                let queue_pressure = sync_rx
+                    .as_ref()
+                    .map(|receiver| {
+                        receiver.len() as f64 / receiver.max_capacity().max(1) as f64
+                    })
+                    .unwrap_or(0.0);
+                let decision = server.sync_controller.observe(
+                    work,
+                    queue_pressure,
+                    work >= scheduled_period,
+                );
+                metrics::gauge!("onesync_tick_hz").set(f64::from(decision.hz));
+                metrics::gauge!("onesync_tick_utilization").set(decision.utilization);
+                metrics::histogram!("onesync_tick_work_seconds").record(work.as_secs_f64());
+                if work >= scheduled_period {
+                    metrics::counter!("onesync_tick_overruns_total").increment(1);
+                }
+                if decision.changed {
+                    metrics::counter!(
+                        "onesync_tick_rate_transitions_total",
+                        "reason" => format!("{:?}", decision.reason)
+                    )
+                    .increment(1);
+                    tracing::info!(
+                        target: "udp",
+                        previous_hz = decision.previous_hz,
+                        hz = decision.hz,
+                        utilization = decision.utilization,
+                        queue_pressure,
+                        reason = ?decision.reason,
+                        "adaptive OneSync tick rate changed"
+                    );
+                    let period = server.sync_controller.period();
+                    sync_tick = tokio::time::interval_at(
+                        tokio::time::Instant::now() + period,
+                        period,
+                    );
+                    sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                }
+            }
+            cmd = recv_command(&mut sync_rx) => {
+                if let Some(cmd) = cmd {
+                    server.handle_command(cmd);
+                    // State frames are cheaper to drain in larger batches,
+                    // but remain below control and the ENet pump in priority.
+                    if let Some(receiver) = sync_rx.as_mut() {
+                        for _ in 0..1023 {
+                            let Ok(cmd) = receiver.try_recv() else { break };
+                            server.handle_command(cmd);
+                        }
+                    }
+                }
+            }
         }
+        metrics::gauge!("udp_plane_queue_depth", "plane" => "control")
+            .set(control_rx.as_ref().map_or(0, mpsc::Receiver::len) as f64);
+        metrics::gauge!("udp_plane_queue_depth", "plane" => "sync")
+            .set(sync_rx.as_ref().map_or(0, mpsc::Receiver::len) as f64);
+    }
+}
+
+/// Await a command queue, disabling its select branch once all producers have
+/// gone away.
+async fn recv_command(rx: &mut Option<mpsc::Receiver<UdpCommand>>) -> Option<UdpCommand> {
+    match rx {
+        Some(receiver) => match receiver.recv().await {
+            Some(command) => Some(command),
+            None => {
+                *rx = None;
+                std::future::pending().await
+            }
+        },
+        None => std::future::pending().await,
     }
 }
 
@@ -241,6 +377,63 @@ async fn recv_net(rx: &mut Option<mpsc::Receiver<NetOutbound>>) -> Option<NetOut
 pub(super) const HOSTING_GRANT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl UdpServer {
+    /// Mirror the scripting-native routing surface into the authoritative
+    /// OneSync registry. The scripting store is process-wide and lock-free on
+    /// reads; the game-state registry remains transport-independent.
+    pub(super) fn refresh_routing_state(&mut self) {
+        let routing = self.script_host.routing_control();
+        let revision = routing.revision();
+        if revision == self.routing_revision {
+            return;
+        }
+        let Some(gs) = self.onesync.as_mut() else {
+            return;
+        };
+        let sources = gs.client_sources();
+        let entity_ids = gs.entity_ids();
+        let mut buckets = std::collections::BTreeSet::from([0]);
+
+        for source in sources {
+            let bucket = routing.player_bucket(source);
+            gs.set_player_routing_bucket(source, bucket);
+            buckets.insert(bucket);
+        }
+        for object_id in entity_ids {
+            let bucket = routing.entity_bucket(u32::from(object_id));
+            gs.set_entity_routing_bucket(object_id, bucket);
+            buckets.insert(bucket);
+        }
+        for bucket in buckets {
+            let lockdown = match routing.lockdown_mode(bucket) {
+                RoutingLockdownMode::Inactive => LockdownMode::Inactive,
+                RoutingLockdownMode::Relaxed => LockdownMode::Relaxed,
+                RoutingLockdownMode::Strict => LockdownMode::Strict,
+            };
+            gs.set_routing_bucket_lockdown(bucket, lockdown);
+            gs.set_routing_bucket_population_enabled(bucket, routing.population_enabled(bucket));
+        }
+        self.routing_revision = revision;
+    }
+
+    /// Refresh only the sender and its policy on ingress. Performing a full
+    /// entity scan per clone packet would let packet rate amplify O(world)
+    /// control-plane work.
+    pub(super) fn refresh_routing_source(&mut self, source: u32) {
+        let Some(gs) = self.onesync.as_mut() else {
+            return;
+        };
+        let routing = self.script_host.routing_control();
+        let bucket = routing.player_bucket(source);
+        gs.set_player_routing_bucket(source, bucket);
+        let lockdown = match routing.lockdown_mode(bucket) {
+            RoutingLockdownMode::Inactive => LockdownMode::Inactive,
+            RoutingLockdownMode::Relaxed => LockdownMode::Relaxed,
+            RoutingLockdownMode::Strict => LockdownMode::Strict,
+        };
+        gs.set_routing_bucket_lockdown(bucket, lockdown);
+        gs.set_routing_bucket_population_enabled(bucket, routing.population_enabled(bucket));
+    }
+
     /// Drain all pending ENet events.
     async fn pump(&mut self) {
         self.expire_hosting_grant();
@@ -306,6 +499,9 @@ impl UdpServer {
                 self.voice = Some(handle);
                 self.voice_advertise = advertise;
             }
+            UdpCommand::SetWorldCommands { rx } => {
+                self.world_commands = Some(rx);
+            }
         }
     }
 
@@ -316,22 +512,28 @@ impl UdpServer {
         if self.onesync.is_none() {
             return;
         }
-        // Phase 1: build every client's packets while borrowing the game state.
+        self.refresh_routing_state();
+        self.apply_world_commands();
+        // Phase 1: build one immutable world snapshot, then plan disjoint
+        // client views across Rayon workers.
         let cfg = self.onesync_cfg;
         let focus_positions = &self.focus_positions;
         let mut outbound: Vec<(u32, Vec<Vec<u8>>)> = Vec::new();
         {
             let gs = self.onesync.as_mut().expect("checked above");
-            gs.update_player_positions(focus_positions);
+            // Positions come from each entity's own sync tree. The reported
+            // focus is only a seed for players the clone stream has not placed
+            // yet, and never overwrites decoded state.
+            gs.seed_unknown_player_positions(focus_positions);
+            // Entities a script created have no simulator until a client
+            // adopts them, and an unowned entity is not cloned to anyone.
+            gs.reassign_ownerless_server_entities();
             gs.tick();
-            for source in gs.client_sources() {
-                let focus = focus_positions.get(&source).copied().unwrap_or([0.0; 3]);
-                let packets = gs.tick_client(source, focus, &cfg);
-                if !packets.is_empty() {
-                    outbound.push((source, packets));
-                }
+            for client_tick in gs.tick_clients(focus_positions, &cfg) {
+                outbound.push((client_tick.source, client_tick.packets));
             }
         }
+        self.publish_script_world();
         // Phase 2: send (borrows self.host / command path).
         for (source, packets) in outbound {
             for data in packets {
@@ -344,6 +546,98 @@ impl UdpServer {
                 });
             }
         }
+    }
+
+    /// Apply the entity creations and deletions scripts asked for.
+    ///
+    /// They are drained at the start of the tick so a creation is authored,
+    /// assigned an owner and cloned to clients within the same tick, rather
+    /// than landing halfway through one.
+    fn apply_world_commands(&mut self) {
+        use baston_scripting::WorldCommand;
+
+        let Some(rx) = self.world_commands.as_mut() else {
+            return;
+        };
+        let mut pending = Vec::new();
+        while let Ok(command) = rx.try_recv() {
+            pending.push(command);
+        }
+        if pending.is_empty() {
+            return;
+        }
+        let Some(gs) = self.onesync.as_mut() else {
+            // OneSync off: the script's own synthetic store already answered.
+            return;
+        };
+        for command in pending {
+            match command {
+                WorldCommand::Spawn {
+                    network_id,
+                    entity_type,
+                    model,
+                    position,
+                    heading,
+                    dynamic,
+                } => {
+                    let created = gs.spawn_server_entity_with_id(
+                        network_id as u16,
+                        crate::world_control::net_object_type(entity_type),
+                        model,
+                        position,
+                        heading,
+                        dynamic,
+                    );
+                    if !created {
+                        tracing::warn!(
+                            target: "onesync",
+                            network_id,
+                            "script entity creation refused: the id is already in use"
+                        );
+                        metrics::counter!("world_spawn_failures_total").increment(1);
+                    }
+                }
+                WorldCommand::Despawn { network_id } => {
+                    gs.despawn_entity(network_id as u16);
+                }
+            }
+        }
+    }
+
+    /// Mirror the authoritative world into the script-visible view.
+    ///
+    /// Entity natives must not lock the game state — it lives on this task's
+    /// hot path — so the world is published once per sync tick and scripts
+    /// read it lock-free. One tick of staleness is the same freshness any
+    /// server-side observation of a client-simulated entity would have.
+    fn publish_script_world(&self) {
+        use baston_protocol::rage::clone::NetObjEntityType;
+        use baston_scripting::{EntitySummary, ScriptEntityType};
+
+        let Some(gs) = self.onesync.as_ref() else {
+            return;
+        };
+        let world = gs
+            .entities()
+            // An entity the clone stream has not placed yet has no position to
+            // report, so it is not yet a thing scripts can reason about.
+            .filter(|entity| entity.position_known)
+            .map(|entity| EntitySummary {
+                network_id: u32::from(entity.object_id),
+                owner: entity.owner,
+                entity_type: match entity.entity_type {
+                    NetObjEntityType::Player | NetObjEntityType::Ped => ScriptEntityType::Ped,
+                    ty if ty.is_vehicle() => ScriptEntityType::Vehicle,
+                    _ => ScriptEntityType::Object,
+                },
+                position: entity.position,
+                velocity: entity.velocity,
+                routing_bucket: entity.routing_bucket,
+                health: entity.health,
+                armour: entity.armour,
+                model: entity.model,
+            });
+        self.script_host.entity_world().publish(world);
     }
 
     /// Send `onPlayerJoining`/`onPlayerDropped` (aboutNetId, name, slotId)
@@ -435,7 +729,10 @@ impl UdpServer {
         let Some(source) = self.peer_sources.remove(&peer_id) else {
             return;
         };
+        let routing = self.script_host.routing_control();
+        let source_bucket = routing.player_bucket(source);
         self.source_peers.remove(&source);
+        self.focus_positions.remove(&source);
         // Host left: clear and announce "no host" (GameServer.cpp drop path).
         if self.session_host.is_some_and(|(id, _)| id == source) {
             self.session_host = None;
@@ -456,6 +753,11 @@ impl UdpServer {
         if let Some(voice) = &self.voice {
             voice.on_player_dropped(source);
         }
+        // Mesh mode: the zone holding this player owns its ped, its entities
+        // and its directory entry. Nothing else tells it the client is gone.
+        if let Some(forwarder) = &self.mesh_forward {
+            forwarder.player_dropped(source);
+        }
         // OneSync-NG: release the client's object-id leases and orphan the
         // entities it owned (migration to a survivor is task 6/7).
         if let Some(gs) = self.onesync.as_mut() {
@@ -471,7 +773,12 @@ impl UdpServer {
             .unwrap_or_default();
         // Tell remaining clients so GTA despawns the leaver's ped
         // (`GameServer.cpp` drop path).
-        let remaining: Vec<u32> = self.peer_sources.values().copied().collect();
+        let remaining: Vec<u32> = self
+            .peer_sources
+            .values()
+            .copied()
+            .filter(|other| routing.player_bucket(*other) == source_bucket)
+            .collect();
         for other in remaining {
             let leaver_name = name.clone();
             self.send_player_event("onPlayerDropped", other, source, &leaver_name);
@@ -484,5 +791,6 @@ impl UdpServer {
         {
             tracing::error!(target: "udp", error = %e, "failed to fire playerDropped");
         }
+        routing.set_player_bucket(source, 0);
     }
 }

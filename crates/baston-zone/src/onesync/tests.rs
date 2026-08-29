@@ -3,6 +3,7 @@ use baston_protocol::rage::clone::{rec, write_end as clone_end};
 use baston_protocol::rage::lz4dict;
 use baston_protocol::rage::packet::NET_CLONES;
 use baston_protocol::rage::MessageBuffer;
+use std::collections::HashMap;
 
 /// Build a compressed `netClones` payload from hand-written records.
 fn build_clone_payload(build: impl FnOnce(&mut MessageBuffer)) -> Vec<u8> {
@@ -94,8 +95,10 @@ fn foreign_owner_cannot_sync_or_remove() {
         write_inbound_sync(b, 50, 0x1111, &[0xFF]);
     });
     gs.ingest_clone_payload(2, &steal);
-    assert_eq!(gs.entity(50).unwrap().data, vec![0x09]); // unchanged
-    assert_eq!(gs.entity(50).unwrap().owner, 1);
+    let entity = gs.entity(50).unwrap();
+    assert_eq!(entity.create_data, vec![0x09], "create payload untouched");
+    assert!(entity.data.is_empty(), "the foreign sync was not recorded");
+    assert_eq!(entity.owner, 1);
 }
 
 #[test]
@@ -245,7 +248,7 @@ fn two_clients_see_each_other_via_server_parsed_onesync() {
     // Both players stand near each other (within AoI).
     let focus: HashMap<u32, [f32; 3]> =
         HashMap::from([(1, [0.0, 0.0, 0.0]), (2, [20.0, 0.0, 0.0])]);
-    gs.update_player_positions(&focus);
+    gs.seed_unknown_player_positions(&focus);
     gs.tick();
 
     // Client 1's outbound tick must include a create for player 200
@@ -291,4 +294,293 @@ fn two_clients_see_each_other_via_server_parsed_onesync() {
         .expect("player 200 create present");
     assert_eq!(rec_200.0, 2); // owner net id
     assert_eq!(rec_200.1, Some(NetObjEntityType::Player));
+}
+
+#[test]
+fn world_snapshot_is_deterministically_ordered() {
+    let mut gs = ServerGameState::new(true, false);
+    for object_id in [300, 10, 200] {
+        gs.ingest_clone_payload(
+            u32::from(object_id),
+            &build_clone_payload(|b| {
+                write_inbound_create(b, object_id, object_id, NetObjEntityType::Object, &[1]);
+            }),
+        );
+    }
+    // The stub blobs carry no position node, so they are unplaced; place them
+    // explicitly, otherwise the snapshot correctly excludes them.
+    for object_id in [300, 10, 200] {
+        gs.set_entity_position(object_id, [f32::from(object_id), 0.0, 0.0]);
+    }
+    let ids: Vec<_> = gs
+        .world_snapshot()
+        .into_iter()
+        .map(|entity| entity.object_id)
+        .collect();
+    assert_eq!(ids, vec![10, 200, 300]);
+}
+
+/// An entity whose position was never decoded has no place in a spatial query:
+/// including it would park it at the world origin and make it a neighbour of
+/// everyone who spawns there.
+#[test]
+fn unplaced_entities_are_excluded_from_the_world_snapshot() {
+    let mut gs = ServerGameState::new(true, false);
+    gs.ingest_clone_payload(
+        1,
+        &build_clone_payload(|b| {
+            write_inbound_create(b, 42, 42, NetObjEntityType::Object, &[1]);
+        }),
+    );
+    assert_eq!(gs.entity_count(), 1, "the entity is tracked");
+    assert!(
+        gs.world_snapshot().is_empty(),
+        "but it is not spatially relevant until it reports a position"
+    );
+
+    gs.set_entity_position(42, [100.0, 200.0, 30.0]);
+    assert_eq!(gs.world_snapshot().len(), 1);
+}
+
+#[test]
+fn batch_planning_is_bucket_isolated_and_source_ordered() {
+    let cfg = crate::interest_ng::InterestConfig::default();
+    let mut gs = ServerGameState::new(true, false);
+    for source in [3, 1, 2] {
+        gs.add_client(source);
+        gs.set_player_routing_bucket(source, if source == 3 { 9 } else { 7 });
+        gs.ingest_clone_payload(
+            source,
+            &build_clone_payload(|b| {
+                write_inbound_create(
+                    b,
+                    source as u16 * 10,
+                    source as u16,
+                    NetObjEntityType::Player,
+                    &[source as u8],
+                );
+            }),
+        );
+    }
+    let focus = HashMap::from([
+        (1, [0.0, 0.0, 0.0]),
+        (2, [5.0, 0.0, 0.0]),
+        (3, [5.0, 0.0, 0.0]),
+    ]);
+    gs.seed_unknown_player_positions(&focus);
+    let ticks = gs.tick_clients(&focus, &cfg);
+    let sources: Vec<_> = ticks.iter().map(|tick| tick.source).collect();
+    assert_eq!(sources, vec![1, 2], "bucket 9 client has no visible peer");
+
+    for tick in ticks {
+        let decoded = baston_protocol::rage::packet::decode_downlink(&tick.packets[0]).unwrap();
+        let visible: Vec<_> = decoded
+            .records
+            .iter()
+            .filter_map(|record| match record {
+                baston_protocol::rage::clone::DownlinkRecord::Clone { object_id, .. } => {
+                    Some(*object_id)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            visible.iter().all(|id| *id != 30),
+            "cross-bucket entity leaked"
+        );
+    }
+}
+
+#[test]
+fn strict_bucket_lockdown_rejects_client_create_but_still_acks_protocol() {
+    use crate::routing_bucket::LockdownMode;
+
+    let mut gs = ServerGameState::new(true, false);
+    gs.set_player_routing_bucket(1, 5);
+    gs.set_routing_bucket_lockdown(5, LockdownMode::Strict);
+    let outcome = gs.ingest_clone_payload(
+        1,
+        &build_clone_payload(|b| {
+            write_inbound_create(b, 77, 1, NetObjEntityType::Object, &[1]);
+        }),
+    );
+    assert!(gs.entity(77).is_none());
+    assert_eq!(outcome.rejected_mutations, 1);
+    assert_eq!(outcome.ack_packets.len(), 1);
+}
+
+#[test]
+fn takeover_cannot_cross_routing_buckets() {
+    let mut gs = ServerGameState::new(true, false);
+    gs.set_player_routing_bucket(1, 1);
+    gs.set_player_routing_bucket(2, 2);
+    gs.ingest_clone_payload(
+        1,
+        &build_clone_payload(|b| {
+            write_inbound_create(b, 88, 1, NetObjEntityType::Object, &[1]);
+        }),
+    );
+    let outcome = gs.ingest_clone_payload(
+        1,
+        &build_clone_payload(|b| {
+            b.write_bits_single(rec::TAKEOVER, 3);
+            b.write_bits_single(2, 16);
+            b.write_bits_single(88, 13);
+        }),
+    );
+    assert_eq!(gs.entity(88).unwrap().owner, 1);
+    assert_eq!(outcome.rejected_mutations, 1);
+}
+
+// ── Server-created entities ──
+
+/// Give the state a player at `position` so reassignment has a candidate.
+fn with_player(gs: &mut ServerGameState, source: u32, object_id: u16, position: [f32; 3]) {
+    gs.ingest_clone_payload(
+        source,
+        &build_clone_payload(|b| {
+            write_inbound_create(b, object_id, object_id, NetObjEntityType::Player, &[1]);
+        }),
+    );
+    gs.set_entity_position(object_id, position);
+}
+
+#[test]
+fn a_server_entity_is_authored_with_its_model_and_position() {
+    let mut gs = ServerGameState::new(true, false);
+    let position = [120.5, -340.0, 42.0];
+
+    let id = gs
+        .spawn_server_entity(
+            NetObjEntityType::Automobile,
+            0xDEAD_BEEF,
+            position,
+            90.0,
+            false,
+        )
+        .expect("object id available");
+
+    let entity = gs.entity(id).expect("entity registered");
+    assert!(entity.server_owned);
+    assert_eq!(entity.model, Some(0xDEAD_BEEF));
+    assert!(entity.position_known);
+    for (axis, (got, want)) in entity.position.iter().zip(position).enumerate() {
+        assert!((got - want).abs() < 0.1, "axis {axis}: {got} != {want}");
+    }
+    assert!(
+        !entity.create_data.is_empty(),
+        "a create payload was authored for the client"
+    );
+    assert!(entity.data.is_empty(), "there is no delta yet");
+}
+
+/// Server ids come from the top of the space, client leases from the bottom,
+/// so the two allocators cannot collide until the space is genuinely full.
+#[test]
+fn server_ids_are_allocated_downward_away_from_client_leases() {
+    let mut gs = ServerGameState::new(true, false);
+    let (leased, _) = gs.lease_object_ids(1, 4);
+    assert_eq!(leased, vec![1, 2, 3, 4]);
+
+    let first = gs
+        .spawn_server_entity(NetObjEntityType::Object, 1, [0.0; 3], 0.0, false)
+        .unwrap();
+    let second = gs
+        .spawn_server_entity(NetObjEntityType::Object, 1, [0.0; 3], 0.0, false)
+        .unwrap();
+
+    assert_eq!(first, MAX_OBJECT_ID_NATIVE);
+    assert_eq!(second, MAX_OBJECT_ID_NATIVE - 1);
+}
+
+/// Until a client adopts it, a server entity has no simulator — and an entity
+/// nobody simulates must not be cloned to anyone.
+#[test]
+fn an_unowned_server_entity_is_not_broadcast_then_is_assigned() {
+    let mut gs = ServerGameState::new(true, false);
+    let id = gs
+        .spawn_server_entity(NetObjEntityType::Object, 1, [10.0, 0.0, 0.0], 0.0, false)
+        .unwrap();
+    assert_eq!(gs.entity(id).unwrap().owner, 0);
+    assert!(
+        !gs.world_snapshot().iter().any(|e| e.object_id == id),
+        "an ownerless entity is not spatially broadcast"
+    );
+
+    with_player(&mut gs, 5, 100, [12.0, 0.0, 0.0]);
+    gs.reassign_ownerless_server_entities();
+
+    assert_eq!(gs.entity(id).unwrap().owner, 5);
+    assert!(gs.world_snapshot().iter().any(|e| e.object_id == id));
+}
+
+#[test]
+fn reassignment_picks_the_nearest_player() {
+    let mut gs = ServerGameState::new(true, false);
+    with_player(&mut gs, 5, 100, [1000.0, 0.0, 0.0]);
+    with_player(&mut gs, 6, 101, [10.0, 0.0, 0.0]);
+    let id = gs
+        .spawn_server_entity(NetObjEntityType::Object, 1, [0.0; 3], 0.0, false)
+        .unwrap();
+
+    gs.reassign_ownerless_server_entities();
+
+    assert_eq!(gs.entity(id).unwrap().owner, 6);
+}
+
+/// The engine keeps script-created entities when their simulator leaves. A
+/// scripted vehicle must not vanish because whoever was driving disconnected.
+#[test]
+fn a_server_entity_survives_its_owner_leaving() {
+    let mut gs = ServerGameState::new(true, false);
+    with_player(&mut gs, 5, 100, [0.0; 3]);
+    let id = gs
+        .spawn_server_entity(NetObjEntityType::Object, 1, [0.0; 3], 0.0, false)
+        .unwrap();
+    gs.reassign_ownerless_server_entities();
+    assert_eq!(gs.entity(id).unwrap().owner, 5);
+
+    gs.remove_client(5);
+
+    let entity = gs.entity(id).expect("the entity outlives its simulator");
+    assert_eq!(entity.owner, 0, "it is ownerless, awaiting a new simulator");
+
+    with_player(&mut gs, 7, 101, [0.0; 3]);
+    gs.reassign_ownerless_server_entities();
+    assert_eq!(gs.entity(id).unwrap().owner, 7);
+}
+
+/// A client-created entity keeps the old behaviour: it dies with its owner.
+#[test]
+fn a_client_entity_still_dies_with_its_owner() {
+    let mut gs = ServerGameState::new(true, false);
+    gs.ingest_clone_payload(
+        5,
+        &build_clone_payload(|b| {
+            write_inbound_create(b, 77, 77, NetObjEntityType::Object, &[1]);
+        }),
+    );
+    assert!(gs.entity(77).is_some());
+
+    gs.remove_client(5);
+
+    assert!(gs.entity(77).is_none());
+}
+
+#[test]
+fn despawn_frees_the_object_id() {
+    let mut gs = ServerGameState::new(true, false);
+    let id = gs
+        .spawn_server_entity(NetObjEntityType::Object, 1, [0.0; 3], 0.0, false)
+        .unwrap();
+
+    assert!(gs.despawn_entity(id));
+    assert!(gs.entity(id).is_none());
+    assert!(!gs.despawn_entity(id), "despawning twice is not an error");
+
+    // The id is free again, so the next server entity reuses it.
+    assert_eq!(
+        gs.spawn_server_entity(NetObjEntityType::Object, 1, [0.0; 3], 0.0, false),
+        Some(id)
+    );
 }
