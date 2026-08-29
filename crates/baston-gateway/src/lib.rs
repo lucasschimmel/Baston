@@ -6,6 +6,7 @@ pub mod api;
 pub mod auth;
 pub mod cfx;
 pub mod connection_router;
+pub mod debug_info;
 pub mod http;
 pub mod mesh;
 pub mod mesh_forward;
@@ -19,6 +20,7 @@ pub mod world_control;
 pub mod zone_registry;
 
 pub use connection_router::ConnectionRouter;
+pub use debug_info::{DebugInfoFeed, MeshView};
 pub use mesh::GatewayMesh;
 pub use state_aggregator::StateAggregator;
 pub use world_control::GatewayWorldControl;

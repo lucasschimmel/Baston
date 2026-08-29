@@ -1,5 +1,6 @@
 //! Inbound game-message dispatch: `GameServer::ProcessPacket` parity.
 
+use baston_protocol::debug_info::DEBUG_INFO_TOGGLE_EVENT;
 use baston_protocol::events;
 use baston_protocol::native::NATIVE_RESULT_EVENT;
 use baston_protocol::rage::object_ids::MSG_REQUEST_OBJECT_IDS;
@@ -493,6 +494,19 @@ impl UdpServer {
                     let _ = ingest.apply(source, update);
                 }
             }
+            return;
+        }
+
+        // The overlay is a server feature, not a resource: its subscription
+        // request is answered here rather than dispatched to script runtimes,
+        // so it keeps working on a server running no resources at all, and no
+        // resource can subscribe a player the operator did not clear.
+        if event.name == DEBUG_INFO_TOGGLE_EVENT {
+            let on = args
+                .get(0)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            self.on_debug_info_toggle(source, on);
             return;
         }
 

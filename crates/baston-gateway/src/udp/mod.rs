@@ -11,8 +11,10 @@
 //!
 //! Module layout: [`handle`] holds the public handle + command channel,
 //! [`server`] the ENet host task and outbound path, [`inbound`] the inbound
-//! message dispatch, and [`oob`] the out-of-band query socket.
+//! message dispatch, [`oob`] the out-of-band query socket, and
+//! [`debug_feed`] the `displayinfo` snapshot producer.
 
+mod debug_feed;
 mod handle;
 mod inbound;
 mod oob;

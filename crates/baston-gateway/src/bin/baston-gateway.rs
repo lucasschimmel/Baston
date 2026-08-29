@@ -419,6 +419,16 @@ async fn main() -> anyhow::Result<()> {
                 .parse()
                 .unwrap_or_else(|_| baston_protocol::rage::sync_parse::GameBuild::default().0),
         ),
+        baston_gateway::debug_info::DebugFeedSetup {
+            config: config.debug.clone(),
+            server_name: config.server.name.clone(),
+            // The overlay's mesh section only exists where a federation does.
+            mesh: mesh.as_ref().map(|mesh| baston_gateway::MeshView {
+                registry: Arc::clone(&mesh.registry),
+                router: Arc::clone(&mesh.router),
+                handoff_margin: config.meshing.boundary_margin,
+            }),
+        },
     )?;
     // Entity creation from scripts: the control surface reserves network ids
     // synchronously (a script needs its handle back immediately) and queues the

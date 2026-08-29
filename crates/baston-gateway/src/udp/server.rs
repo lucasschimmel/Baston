@@ -6,6 +6,7 @@ use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::debug_info::{DebugFeedSetup, DebugInfoFeed, MeshView};
 use baston_config::StateSyncConfig;
 use baston_protocol::events;
 use baston_protocol::rage::sync_parse::GameBuild;
@@ -70,6 +71,19 @@ pub(super) struct UdpServer {
     /// Entity creations and deletions submitted by scripts, applied at the
     /// start of each sync tick so they land on a consistent world.
     pub(super) world_commands: Option<mpsc::Receiver<baston_scripting::WorldCommand>>,
+    /// `displayinfo` subscriptions and cadence.
+    pub(super) debug: DebugInfoFeed,
+    /// Zone topology for the overlay's mesh section. `None` without meshing.
+    pub(super) mesh_view: Option<MeshView>,
+    /// Server name shown in the overlay.
+    pub(super) server_name: String,
+    pub(super) max_players: u32,
+    /// The build every client is forced onto — reported so a sync-tree
+    /// misread can be traced back to a build mismatch.
+    pub(super) game_build: GameBuild,
+    /// Wall time of the most recent OneSync tick, for the overlay's server
+    /// health line.
+    pub(super) last_sync_tick: std::time::Duration,
 }
 
 /// Spawn the UDP/ENet server task. Returns a handle for outbound sends.
@@ -146,6 +160,7 @@ pub fn spawn_with_mesh(
         mesh_forward,
         state_sync,
         GameBuild::default(),
+        DebugFeedSetup::default(),
     )
 }
 
@@ -168,6 +183,7 @@ pub fn spawn_with_mesh_on(
     mesh_forward: Option<crate::mesh_forward::MeshForwarder>,
     state_sync: StateSyncConfig,
     game_build: GameBuild,
+    debug: DebugFeedSetup,
 ) -> Result<UdpHandle, UdpError> {
     let onesync_mode = state_sync.onesync;
     let socket =
@@ -225,6 +241,12 @@ pub fn spawn_with_mesh_on(
         focus_positions: HashMap::new(),
         routing_revision: u64::MAX,
         world_commands: None,
+        debug: DebugInfoFeed::new(debug.config),
+        mesh_view: debug.mesh,
+        server_name: debug.server_name,
+        max_players,
+        game_build,
+        last_sync_tick: std::time::Duration::ZERO,
     };
     if onesync_mode.is_enabled() {
         tracing::info!(target: "baston", "OneSync-NG enabled: server-authoritative entity parsing");
@@ -249,6 +271,14 @@ async fn run(
         tokio::time::interval_at(tokio::time::Instant::now() + initial_period, initial_period);
     sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let onesync_enabled = server.onesync.is_some();
+    // The overlay ticks on its own cadence: it must keep reporting when the
+    // sync tick is the thing that stalled, which is exactly when an operator
+    // is looking at it.
+    let debug_enabled = server.debug.enabled();
+    let debug_period = server.debug.period();
+    let mut debug_tick =
+        tokio::time::interval_at(tokio::time::Instant::now() + debug_period, debug_period);
+    debug_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Closed/absent channels must not wedge the select loop.
     let mut control_rx = Some(control_rx);
     let mut sync_rx = Some(sync_rx);
@@ -282,6 +312,7 @@ async fn run(
                 let started = Instant::now();
                 server.onesync_tick();
                 let work = started.elapsed();
+                server.last_sync_tick = work;
                 let queue_pressure = sync_rx
                     .as_ref()
                     .map(|receiver| {
@@ -321,6 +352,9 @@ async fn run(
                     );
                     sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 }
+            }
+            _ = debug_tick.tick(), if debug_enabled => {
+                server.debug_tick().await;
             }
             cmd = recv_command(&mut sync_rx) => {
                 if let Some(cmd) = cmd {
@@ -753,6 +787,7 @@ impl UdpServer {
         let source_bucket = routing.player_bucket(source);
         self.source_peers.remove(&source);
         self.focus_positions.remove(&source);
+        self.debug.remove(source);
         // Host left: clear and announce "no host" (GameServer.cpp drop path).
         if self.session_host.is_some_and(|(id, _)| id == source) {
             self.session_host = None;
