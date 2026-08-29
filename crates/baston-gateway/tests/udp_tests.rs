@@ -194,8 +194,13 @@ fn build_server_event(name: &str, args: &serde_json::Value) -> Vec<u8> {
     out
 }
 
-/// B4 exit criterion: a server script calls `GetPlayerPed(source)`; the
-/// (simulated) client executes the native and returns the ped id.
+/// B4 exit criterion: a server script invokes a client-only native; the
+/// (simulated) client executes it and returns the result.
+///
+/// The native under test has to be one that genuinely only exists on the
+/// client. `GetPlayerPed` used to serve here, but it is now answered from the
+/// server's own entity mirror — round-tripping it would return the client's
+/// local handle, which means nothing server-side.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_dispatch_roundtrip_through_simulated_client() {
     // Server with a script that answers 'test:requestPed'.
@@ -215,9 +220,11 @@ async fn native_dispatch_roundtrip_through_simulated_client() {
                 code: r#"
                 AddEventHandler('test:requestPed', async () => {
                   const source = globalThis.source;
-                  const ped = await GetPlayerPed(source);
-                  console.log('[axiom-core] player ped: ' + ped);
-                  TriggerClientEvent('test:pedResult', source, ped);
+                  // HAS_MODEL_LOADED only exists client-side.
+                  const loaded = await InvokeNativeOnClient(
+                    source, '0x98A4EB5D89A0C952', [1234], true);
+                  console.log('[axiom-core] model loaded: ' + loaded);
+                  TriggerClientEvent('test:pedResult', source, loaded);
                 });
                 "#
                 .into(),
@@ -268,14 +275,14 @@ async fn native_dispatch_roundtrip_through_simulated_client() {
             match name.as_str() {
                 "__baston:invokeNative" => {
                     let call = &args[0];
-                    assert_eq!(call["hash"], "0x43A66C31C68491C0", "GET_PLAYER_PED");
+                    assert_eq!(call["hash"], "0x98A4EB5D89A0C952", "HAS_MODEL_LOADED");
                     let id = call["id"].as_u64().unwrap();
-                    // "Execute" the native locally: ped id 1234.
+                    // "Execute" the native locally: the model is loaded.
                     client.send(
                         0,
                         &build_server_event(
                             "__baston:nativeResult",
-                            &serde_json::json!([id, 1234]),
+                            &serde_json::json!([id, true]),
                         ),
                     );
                 }
@@ -288,12 +295,12 @@ async fn native_dispatch_roundtrip_through_simulated_client() {
         }
     });
 
-    let ped = tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || {
         rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap()
     })
     .await
     .unwrap();
-    assert_eq!(ped, serde_json::json!(1234));
+    assert_eq!(result, serde_json::json!(true));
 }
 
 /// B5 exit criterion: full spawn sequence — playerJoining fires on UDP

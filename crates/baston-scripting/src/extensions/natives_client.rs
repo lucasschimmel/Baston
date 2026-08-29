@@ -18,6 +18,35 @@ use super::{RuntimeContext, SharedNet, SharedObservability};
 /// separately — it's a redesign of the execution model, not a local change).
 const NATIVE_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1000);
 
+/// Queue one native call on the net bridge, addressed to `source`'s client.
+///
+/// Shared by the awaited path ([`op_invoke_native_on_client`]) and by the
+/// fire-and-forget context dispatcher ([`super::rpc_natives`]) so both put the
+/// exact same `__baston:invokeNative` payload on the wire. Returns `false` when
+/// the bridge is full or closed — backpressure, not a fatal error.
+pub(super) fn queue_native_call(
+    net: &crate::net_bridge::NetBridge,
+    source: u32,
+    id: u64,
+    hash: u64,
+    args: Vec<serde_json::Value>,
+) -> bool {
+    use baston_protocol::native::{NativeCall, INVOKE_NATIVE_EVENT};
+
+    let call = NativeCall {
+        id,
+        hash: format!("0x{hash:016X}"),
+        args,
+    };
+    net.tx
+        .try_send(crate::net_bridge::NetOutbound::ClientEvent {
+            source,
+            event: INVOKE_NATIVE_EVENT.to_owned(),
+            args_json: serde_json::json!([call]).to_string(),
+        })
+        .is_ok()
+}
+
 /// Dispatch a GTA native to `source`'s client via the BASTON shim and await
 /// the result. Returns a JSON string; errors are `{"__error": "..."}` so the
 /// polyfill can throw without deno_core error plumbing.
@@ -30,8 +59,6 @@ pub(super) async fn op_invoke_native_on_client(
     #[string] args_json: String,
     expects_return: bool,
 ) -> String {
-    use baston_protocol::native::{NativeCall, INVOKE_NATIVE_EVENT};
-
     fn err(message: impl std::fmt::Display) -> String {
         serde_json::json!({ "__error": message.to_string() }).to_string()
     }
@@ -64,21 +91,7 @@ pub(super) async fn op_invoke_native_on_client(
     };
     let started = Instant::now();
     let (id, rx) = net.pending_natives.register();
-    let call = NativeCall {
-        id,
-        hash: format!("0x{hash:016X}"),
-        args,
-    };
-    let payload = serde_json::json!([call]);
-    if net
-        .tx
-        .try_send(crate::net_bridge::NetOutbound::ClientEvent {
-            source,
-            event: INVOKE_NATIVE_EVENT.to_owned(),
-            args_json: payload.to_string(),
-        })
-        .is_err()
-    {
+    if !queue_native_call(&net, source, id, hash, args) {
         net.pending_natives.cancel(id);
         observability.record_native_roundtrip(
             &resource,
