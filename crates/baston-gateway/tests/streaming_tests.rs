@@ -75,6 +75,7 @@ async fn app_with_downloads(dir: &Path) -> (axum::Router, std::sync::Arc<tokio::
     let semaphore = std::sync::Arc::clone(&downloads.semaphore);
     let app = router(Arc::new(AppState {
         downloads,
+        builtins: baston_gateway::http::BuiltinResources::from_config(&config),
         config,
         license_token: std::sync::RwLock::new(None),
         resource_manager,

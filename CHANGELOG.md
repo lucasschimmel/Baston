@@ -19,6 +19,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   port, and public-address configuration.
 - Added a real-FXServer authentication smoke test driven by uncommitted
   environment secrets.
+- Added the `displayinfo` debug overlay: a server-assembled in-game readout of
+  the zone mesh, OneSync state, and per-player link statistics, gated by
+  `[debug] display_info` and reachable with `/displayinfo`.
+- Added builtin resources — client code shipped inside the server binary,
+  advertised straight into `getConfiguration` and served from memory, with no
+  presence on disk and no way for a resources directory to replace it.
 
 ### Changed
 

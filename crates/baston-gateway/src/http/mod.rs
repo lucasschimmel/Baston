@@ -1,6 +1,7 @@
 //! axum HTTP gateway: `/info.json`, resource file serving, and the Phase A
 //! `POST /client` connection endpoint.
 
+mod builtin;
 mod client;
 mod configuration;
 mod files;
@@ -9,6 +10,7 @@ mod packfile_cache;
 mod resource_endpoint;
 mod stream_cache;
 
+pub use builtin::{BuiltinResources, DISPLAYINFO};
 pub use packfile_cache::PackfileCache;
 pub use stream_cache::StreamCache;
 
@@ -67,6 +69,8 @@ pub struct AppState {
     pub downloads: DownloadPolicy,
     /// Phase D zone federation (None when `[meshing]` is disabled).
     pub mesh: Option<Arc<crate::mesh::GatewayMesh>>,
+    /// Resources served from inside the binary rather than from disk.
+    pub builtins: BuiltinResources,
 }
 
 /// Build the gateway router.

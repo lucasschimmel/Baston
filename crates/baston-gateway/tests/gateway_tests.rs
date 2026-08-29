@@ -85,6 +85,7 @@ async fn app_with_mode(
     let auth = baston_gateway::AuthService::new(&config.auth).unwrap();
     router(Arc::new(AppState {
         downloads: baston_gateway::http::DownloadPolicy::new(&config.resources),
+        builtins: baston_gateway::http::BuiltinResources::from_config(&config),
         config,
         license_token: std::sync::RwLock::new(license_token),
         resource_manager,

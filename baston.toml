@@ -32,6 +32,20 @@ hot_reload = true
 # Phase B: real CFX auth. Flip to true only for offline dev without a launcher.
 auth_bypass = false
 
+# The `displayinfo` overlay: a server-assembled debug readout drawn in-game
+# (mesh topology, OneSync state, per-player link stats). The renderer ships
+# inside the BASTON binary — there is nothing to install. See docs/displayinfo.md.
+[debug]
+# "off"       : disabled; the overlay is not even sent to clients. Default.
+# "allowlist" : only players whose identifiers are listed in `allow` below.
+# "everyone"  : anyone connected — it exposes zone topology and per-player
+#               network stats, so keep this to development servers.
+display_info = "off"
+# Identifiers cleared for the overlay, as GetPlayerIdentifiers reports them.
+allow = []
+# Snapshots per second, per subscriber (1-30).
+refresh_hz = 5
+
 # CFX server-licence integration. BASTON never validates a licence itself and
 # never talks to CFX — the genuine, unmodified FXServer component does. See
 # docs/licensing.md.

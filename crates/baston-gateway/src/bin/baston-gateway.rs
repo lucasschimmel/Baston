@@ -574,6 +574,7 @@ async fn main() -> anyhow::Result<()> {
             cfx_runtime.as_ref().map(|runtime| runtime.token().clone()),
         ),
         downloads: baston_gateway::http::DownloadPolicy::new(&config.resources),
+        builtins: baston_gateway::http::BuiltinResources::from_config(&config),
         config,
         resource_manager,
         players,

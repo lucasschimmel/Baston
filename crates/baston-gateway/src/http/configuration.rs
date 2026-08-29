@@ -63,6 +63,32 @@ pub async fn get_configuration(state: &AppState, headers: &HeaderMap, body: &str
         });
     }
 
+    // Builtins last, and only when this server serves them. A disk resource
+    // that took the same name has already been added above; advertising the
+    // builtin too would give the client two entries for one mount point, so
+    // the shadowing is reported and the builtin stands down.
+    for name in state.builtins.names() {
+        if !filter.is_empty() && !filter.iter().any(|f| f == name) {
+            continue;
+        }
+        if resources.iter().any(|r| r.name == name) {
+            tracing::warn!(
+                target: "gateway",
+                resource = name,
+                "a resource on disk shadows a builtin; the builtin is not served"
+            );
+            continue;
+        }
+        let Some(pack) = state.builtins.packfile(name) else {
+            continue;
+        };
+        resources.push(ResourceConfiguration {
+            name: name.to_owned(),
+            files: BTreeMap::from([(DEFAULT_RESOURCE_SET.to_owned(), pack.sha1_hex.clone())]),
+            stream_files: BTreeMap::new(),
+        });
+    }
+
     tracing::info!(
         target: "baston",
         count = resources.len(),

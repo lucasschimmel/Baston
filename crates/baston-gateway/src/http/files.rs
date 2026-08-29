@@ -430,6 +430,18 @@ pub async fn serve_resource_file(
         return StatusCode::BAD_REQUEST.into_response();
     }
 
+    // Builtins are checked first: a resource on disk must not be able to claim
+    // a server-owned name and have its own bytes served under it.
+    if let Some(pack) = state.builtins.packfile(&resource) {
+        return if path == baston_protocol::connection::DEFAULT_RESOURCE_SET {
+            serve_memory(&state, &method, &headers, Arc::clone(&pack.bytes)).await
+        } else {
+            // Everything a builtin exposes lives inside its packfile; there is
+            // no directory behind it to fall through to.
+            StatusCode::NOT_FOUND.into_response()
+        };
+    }
+
     if path == baston_protocol::connection::DEFAULT_RESOURCE_SET {
         return match state
             .packfiles
