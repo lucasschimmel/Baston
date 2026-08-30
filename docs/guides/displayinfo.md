@@ -1,4 +1,7 @@
-# `displayinfo` — the in-game debug overlay
+---
+title: "The displayinfo overlay"
+description: "A server-assembled in-game readout of mesh topology, OneSync state and link statistics."
+---
 
 A server-assembled technical readout drawn over the game: mesh topology,
 OneSync state, and the network link, as **the server** measures them.

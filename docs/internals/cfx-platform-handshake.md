@@ -1,11 +1,14 @@
-# CFX platform handshake — captured spec
+---
+title: "CFX platform handshake"
+description: "What the client and the platform exchange before a player reaches the game."
+---
 
 > ⚠️ **NON-retained approach (ToS risk / outside the legal boundary) — reference only.**
 > This documents the *closed* CFX platform flow (licence validation → nucleus
 > register → server-list ingress) as captured by MITM. Reproducing it from a
 > non-FXServer binary means impersonating FXServer to CFX (spoofing) and is **not
 > implemented in BASTON**. The **retained** path is to run the genuine, unmodified
-> FXServer component as a sidecar — see [`licensing.md`](licensing.md). Do not turn
+> FXServer component as a sidecar — see [`operations/licensing.md`](../operations/licensing.md). Do not turn
 > this file into an implementation plan.
 
 

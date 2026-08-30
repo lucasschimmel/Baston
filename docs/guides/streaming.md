@@ -1,4 +1,7 @@
-# Asset streaming (`stream/`)
+---
+title: "Streaming assets"
+description: "How BASTON discovers and serves stream/ assets to clients."
+---
 
 BASTON serves streamed assets (custom vehicles, clothing, weapons, map props —
 `.yft`, `.ytd`, `.ydr`, `.ydd`, …) exactly like FXServer: drop files in a

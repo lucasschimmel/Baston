@@ -1,4 +1,7 @@
-# ADR-002: Four-tier module system
+---
+title: "ADR-002 — Four-tier module system"
+description: "Core, modules, capabilities and addons: the rule that decides where a feature lives."
+---
 
 Date: 2026-08-30
 Status: accepted
@@ -121,7 +124,7 @@ scoped, per-key permissions (`monitor.read`, `resource.control`, `player.kick`,
 **Consequence:** an administration dashboard is a Tier 3 addon, not a module. It
 consumes the API with a scoped key, deploys on its own cadence, and cannot take
 the server down when it fails. The existing Prometheus/Grafana setup under
-`monitoring/` is already exactly this and is the reference example.
+`deploy/monitoring/` is already exactly this and is the reference example.
 
 ### The selection rule
 
@@ -199,7 +202,7 @@ code, the issue tracker and the documentation ambiguous for no benefit.
 Modules resolve from a `[modules]` section. Legacy per-section flags
 (`[voice] enabled`, `[metrics] enabled`, `[debug] display_info`) continue to
 work and continue to be authoritative for their own module, so existing
-`baston.toml` files keep their meaning. Where both are present and disagree, the
+`config/baston.toml` files keep their meaning. Where both are present and disagree, the
 load fails with an error naming both sites rather than silently picking one.
 
 The single most likely operator failure mode is editing a section and observing
@@ -243,6 +246,6 @@ Tier 3 without revisiting this ADR.
 
 ## References
 
-- `docs/modules.md` — operator-facing module and bundle reference.
+- `docs/guides/modules.md` — operator-facing module and bundle reference.
 - ADR-001 — CFX trust broker; the escrow capability's Tier 2 placement follows
   from it.

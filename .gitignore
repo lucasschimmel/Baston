@@ -20,3 +20,9 @@
 # Machine-local runtime configs may contain CFX licence keys or admin tokens.
 *.local.toml
 baston-live-test.log
+
+# --- Node / the documentation website ---
+node_modules/
+apps/**/dist/
+apps/**/.astro/
+.pnpm-store/

@@ -1,0 +1,26 @@
+/*
+ * BASTON's accent, applied over Starlight's defaults.
+ *
+ * The orange is the one the server banner prints on boot (xterm 208), so the
+ * website and the terminal are recognisably the same product.
+ */
+:root {
+  --sl-color-accent-low: #3a1e05;
+  --sl-color-accent: #d2691e;
+  --sl-color-accent-high: #f5b98a;
+  --sl-color-white: #ffffff;
+}
+
+:root[data-theme="light"] {
+  --sl-color-accent-low: #ffe6d1;
+  --sl-color-accent: #b4530f;
+  --sl-color-accent-high: #5c2a06;
+}
+
+/* Wide reference tables (the natives coverage page) must scroll in place
+   rather than pushing the page sideways. */
+.sl-markdown-content table {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+}

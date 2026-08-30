@@ -1,8 +1,11 @@
-# BASTON local live test runbook
+---
+title: "Runbook: local live test"
+description: "Driving a real FiveM client against a local BASTON server."
+---
 
 This runbook uses the local TOML configs in the repository root:
 
-- `baston.mono.local.toml`
+- `config/baston.mono.local.toml`
 - `baston.gateway-mesh.local.toml`
 - `baston.gateway-onesync.local.toml`
 - `baston.zone-a.local.toml`
@@ -15,7 +18,7 @@ when needed.
 
 ```powershell
 cd D:\Dev\Fivem\Utils\Baston
-docker compose up -d nats prometheus grafana
+docker compose -f deploy/docker/docker-compose.yml up -d nats prometheus grafana
 cargo build --release -p baston-gateway -p baston-zone -p baston-loadtest
 ```
 
@@ -61,7 +64,7 @@ Expected: `world_state_entities 1`, accepted updates increasing, rejected at 0.
 Terminal infra:
 
 ```powershell
-docker compose up -d nats prometheus grafana
+docker compose -f deploy/docker/docker-compose.yml up -d nats prometheus grafana
 ```
 
 Terminal gateway:
@@ -150,7 +153,7 @@ Checklist:
 
 Shape-only gate:
 
-Edit `baston.mono.local.toml` or a zone config:
+Edit `config/baston.mono.local.toml` or a zone config:
 
 ```toml
 [license]
@@ -181,7 +184,7 @@ cargo run --release -p baston-gateway
 
 Expected: the gateway refuses to open its game listeners if the official
 FXServer broker cannot validate the licence. Zone processes do not create
-additional licence identities. See `docs/licensing.md` for public-list mode.
+additional licence identities. See `docs/operations/licensing.md` for public-list mode.
 
 ## 7. displayinfo overlay
 

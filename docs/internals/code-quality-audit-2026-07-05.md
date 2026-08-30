@@ -1,4 +1,7 @@
-# BASTON — Audit qualité de code
+---
+title: "Code quality audit, July 2026"
+description: "A point-in-time review of the codebase and what came out of it."
+---
 
 > Date : 2026-07-05 · Périmètre : workspace Rust `baston/` (8 crates, ~17 500 lignes de source, ~20 100 avec tests)
 > Méthode : outillage objectif (clippy, fmt, greps d'anti-patterns) + revue qualitative approfondie crate par crate.
@@ -279,7 +282,7 @@ Aucun n'est bloquant (cohésion généralement bonne), mais le découpage améli
 - **Parsing de données non fiables** (`baston-protocol`, `baston-zone`) : `Option`/`Result` partout, bornes systématiques, LZ4 plafonné (pas de bombe de décompression), boucles de décodage terminantes. Un modèle.
 - **Auth CFX** (`baston-gateway/src/auth/`) : RSA offline, anti-rejeu + GC, bien testée.
 - **`baston-core`** : fail-closed par construction, aucun chemin n'élève un droit de licence.
-- **Messages d'erreur de `baston-config`** : chaque variante embarque la correction exacte à écrire dans `baston.toml`. Parmi les meilleurs vus.
+- **Messages d'erreur de `baston-config`** : chaque variante embarque la correction exacte à écrire dans `config/baston.toml`. Parmi les meilleurs vus.
 - **Défauts sûrs** : `auth_bypass=false`, escrow off, aucun secret en dur, `admin_token` vide = API désactivée.
 - **`unsafe` FFI LZ4** : les 6 blocs sont *sound*, avec buffers pré-alloués au pire cas et commentaires `// SAFETY:` justes.
 - **Documentation** : ratio doc/code ~2:1, 61 docs de module `//!`.

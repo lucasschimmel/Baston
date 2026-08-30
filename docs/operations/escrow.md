@@ -1,4 +1,7 @@
-# CFX Asset Escrow support (Phase D-bis)
+---
+title: "Asset escrow"
+description: "Running CFX escrowed resources through an operator-supplied FXServer sidecar."
+---
 
 BASTON can run CFX Asset Escrow (encrypted) resources through an optional plugin,
 `baston-escrow-plugin`. The core runtime has **no** dependency on
@@ -49,7 +52,7 @@ actionable error; use `backend = "sidecar"`.
    cargo build -p baston-zone --features escrow
    ```
 
-2. Configure `baston.toml`:
+2. Configure `config/baston.toml`:
 
    ```toml
    [escrow]

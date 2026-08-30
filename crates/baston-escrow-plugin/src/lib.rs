@@ -24,7 +24,7 @@
 //! licence protocol. The sidecar is the genuine FXServer, running unmodified,
 //! doing exactly what it normally does with the operator's own licence; BASTON
 //! only reads the local result and enforces it restrictively. See
-//! `docs/licensing.md`.
+//! `docs/operations/licensing.md`.
 //!
 //! ## Backend
 //!

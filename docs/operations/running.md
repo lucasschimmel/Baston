@@ -1,4 +1,7 @@
-# BASTON — Operations (Phase D zone mesh)
+---
+title: "Running BASTON"
+description: "Topology, zone management, monitoring and alerting for a live deployment."
+---
 
 ## Topology
 
@@ -18,12 +21,12 @@ the script runtimes, entity state and boundary detection, and speak gRPC
 ## Adding a zone
 
 1. Pick bounds that tile the map without overlap (see `zone-config.md`).
-2. Add a service to `docker-compose.yml` (copy `zone-b`), setting:
+2. Add a service to `deploy/docker/docker-compose.yml` (copy `zone-b`), setting:
    - `ZONE_ID`: unique id (also the Docker DNS name),
    - `ZONE_BOUNDS`: `x_min,y_min,x_max,y_max`,
    - `ZONE_PUBLIC_GRPC_ADDR`: `<service-name>:50051`,
    - `GATEWAY_GRPC`, `NATS_URL` as the others.
-3. `docker compose up -d <service>` — the zone registers itself; check
+3. `docker compose -f deploy/docker/docker-compose.yml up -d <service>` — the zone registers itself; check
    `GET /admin/zones`.
 
 Registration is idempotent and retried (2s × 30); a zone can start before
@@ -36,7 +39,7 @@ players, zones, resources, ResMon, profiler status), profiler trace capture
 and audited control routes (kick, resource start/stop/restart, drain,
 profiler record/stop, bounded command execution) with per-key permissions
 declared in `[[api.keys]]`.
-See [api.md](api.md).
+See [api.md](../reference/api.md).
 
 Use `POST /api/v1/commands/execute` with `console.execute` for admin command
 compatibility:
@@ -158,7 +161,7 @@ climbing, `handoff_prepare_timeouts_total` climbing, `NATS > 500 MB/s`.
 ## Benchmark (Phase D exit criterion)
 
 ```bash
-docker compose up -d nats prometheus grafana
+docker compose -f deploy/docker/docker-compose.yml up -d nats prometheus grafana
 # host processes (Windows dev): gateway + two zones
 $env:BASTON_MESHING_ENABLED="true"; cargo run --release --bin baston-gateway
 $env:ZONE_ID="zone-a"; $env:ZONE_BOUNDS="-4000,-4000,0,4000"; $env:BASTON_METRICS_PORT="9092"; cargo run --release --bin baston-zone

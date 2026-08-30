@@ -1,4 +1,7 @@
-# ADR-001: Use official FXServer as the CFX trust broker
+---
+title: "ADR-001 — FXServer as the CFX trust broker"
+description: "Why BASTON delegates CFX identity to an unmodified official FXServer."
+---
 
 Date: 2026-07-26  
 Status: accepted
@@ -92,4 +95,4 @@ runtime. The selected design delegates only platform identity and listing.
 
 - [CFX `ServerLicensingComponent`](https://github.com/citizenfx/fivem/blob/master/code/components/citizen-server-impl/include/ServerLicensingComponent.h)
 - [CFX `NetLibrary.cpp` policy consumption](https://github.com/citizenfx/fivem/blob/master/code/components/net/src/NetLibrary.cpp)
-- [Baston CFX identity and listing runbook](../licensing.md)
+- [Baston CFX identity and listing runbook](../operations/licensing.md)

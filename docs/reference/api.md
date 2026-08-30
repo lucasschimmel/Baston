@@ -1,4 +1,7 @@
-# Monitoring & control API (`/api/v1`)
+---
+title: "Monitoring and control API"
+description: "The /api/v1 surface: routes, per-key permissions, and the audit log."
+---
 
 BASTON exposes an HTTP API on the admin port (`meshing.admin_port`, default
 8080) for external tooling: dashboards, Discord/Telegram bots, a future
@@ -6,7 +9,7 @@ TXAdmin-style panel. It is served next to the legacy `/admin/*` routes.
 
 ## Keys and permissions
 
-Access is per-key. Each key is a named bearer token declared in `baston.toml`
+Access is per-key. Each key is a named bearer token declared in `config/baston.toml`
 with an explicit permission list:
 
 ```toml

@@ -40,7 +40,7 @@ groups:
             The gateway removed {{ $labels.zone }} from the registry/quadtree
             after 3 missed heartbeats and rerouted its players automatically.
             Fix and restart the container to re-register. See the "Zone crash"
-            section of docs/operations.md.
+            section of docs/operations/running.md.
 
       - alert: ZoneHeartbeatFailing
         # Catches the partition case that ZoneDown misses: the zone is up and

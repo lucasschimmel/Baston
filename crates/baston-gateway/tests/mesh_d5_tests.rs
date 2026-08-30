@@ -3,7 +3,7 @@
 //! re-publication (loop prevention), and handler reactions ARE published.
 // Driven by JavaScript resources (deferral handlers, exports, dist/ layouts),
 // so they run in the bundles that contain V8. The Lua runtime has its own
-// tests in baston-scripting; see docs/modules.md for what it covers.
+// tests in baston-scripting; see docs/guides/modules.md for what it covers.
 #![cfg(feature = "scripting-js")]
 
 use std::sync::Arc;

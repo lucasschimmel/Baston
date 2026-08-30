@@ -1,6 +1,6 @@
 # BASTON runtime configuration (Phase B)
 
-# Which capabilities this process runs. See docs/modules.md and
+# Which capabilities this process runs. See docs/guides/modules.md and
 # docs/adr/002-module-tiers.md.
 #
 # Modules are additive deltas over the documented defaults, so a module shipping
@@ -53,7 +53,7 @@ auth_bypass = false
 
 # The `displayinfo` overlay: a server-assembled debug readout drawn in-game
 # (mesh topology, OneSync state, per-player link stats). The renderer ships
-# inside the BASTON binary — there is nothing to install. See docs/displayinfo.md.
+# inside the BASTON binary — there is nothing to install. See docs/guides/displayinfo.md.
 [debug]
 # "off"       : disabled; the overlay is not even sent to clients. Default.
 # "allowlist" : only players whose identifiers are listed in `allow` below.
@@ -67,7 +67,7 @@ refresh_hz = 5
 
 # CFX server-licence integration. BASTON never validates a licence itself and
 # never talks to CFX — the genuine, unmodified FXServer component does. See
-# docs/licensing.md.
+# docs/operations/licensing.md.
 [license]
 # "off"      : no check (dev/LAN only — warns every boot). Default for this dev cfg.
 # "gate"     : require a well-formed sv_license_key in config (shape only, no sidecar).
@@ -91,7 +91,7 @@ public_listing = false
 
 # Monitoring/control HTTP API keys (served on meshing.admin_port, default
 # 8080). Each key is a named bearer token with explicit permissions; control
-# actions are appended to the audit log. See docs/api.md.
+# actions are appended to the audit log. See docs/reference/api.md.
 [api]
 audit_log = "baston-audit.jsonl"
 # [[api.keys]]
@@ -113,7 +113,7 @@ external_address = ""
 
 # Pooled database access for scripts (the `db` module, off by default).
 # Enable with [modules] enable = ["db"]. Queries run on the server's runtime,
-# never on a script thread. See docs/modules.md.
+# never on a script thread. See docs/guides/modules.md.
 [db]
 # sqlite:baston.db · postgres://user:pass@host/base · mysql://user:pass@host/base
 # The driver must be in your bundle: `db` ships sqlite, `db-postgres` and
@@ -125,7 +125,7 @@ pool_size = 10
 query_timeout_secs = 15
 
 # CFX Asset Escrow support (Phase D-bis). Off by default. See
-# docs/escrow-support.md. Requires a Windows build with `--features escrow`.
+# docs/operations/escrow.md. Requires a Windows build with `--features escrow`.
 [escrow]
 enabled = false
 # "sidecar" (supported) — a minimal FXServer subprocess decrypts via svadhesive.

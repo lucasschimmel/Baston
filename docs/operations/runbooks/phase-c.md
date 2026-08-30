@@ -1,4 +1,7 @@
-# Phase C — Runbook pas-à-pas (commandes exactes)
+---
+title: "Runbook: Phase C"
+description: "Manual verification of the entity state pipeline."
+---
 
 Deux pipelines indépendants. Tout est en PowerShell, depuis
 `D:\Dev\Fivem\Servers\WTF\baston`. Chaque étape = commande → résultat attendu
@@ -12,7 +15,7 @@ Deux pipelines indépendants. Tout est en PowerShell, depuis
 
 ```powershell
 cd D:\Dev\Fivem\Servers\WTF\baston
-docker compose up -d nats prometheus grafana
+docker compose -f deploy/docker/docker-compose.yml up -d nats prometheus grafana
 docker compose ps
 ```
 
@@ -89,8 +92,8 @@ StateSyncEmitter jitter avg : <1ms
 dropped connections: 0, entity desyncs: 0
 exit criterion    : PASS
 ```
-❌ `initConnect refused … auth_bypass` → tu as lancé le serveur avec `baston.toml`
-au lieu de `baston-bench.toml` (vérifier `$env:BASTON_CONFIG` dans le terminal 1).
+❌ `initConnect refused … auth_bypass` → tu as lancé le serveur avec `config/baston.toml`
+au lieu de `config/baston-bench.toml` (vérifier `$env:BASTON_CONFIG` dans le terminal 1).
 ❌ `FAIL` sur une métrique → relancer une fois (warmup) ; si stable, me donner le rapport.
 
 ## A7. (optionnel) Grafana pendant le bench
@@ -124,7 +127,7 @@ docker compose stop prometheus grafana   # garder nats si tu enchaînes le pipel
 Prérequis : NATS up (A1), build fait (A2). **PAS de TLS** — le port jeu doit
 rester en HTTP clair (le client FiveM envoie des requêtes en plaintext ; un
 listener TLS-only les casse avec `Received HTTP/0.9 when not allowed`). Ne pas
-mettre de section `[tls]` dans `baston.toml`. Le download packfile passe en
+mettre de section `[tls]` dans `config/baston.toml`. Le download packfile passe en
 HTTP clair via un fileServer littéral (validé Phase B sur canary 31725).
 
 ## B1. Lancer le serveur en mode réel (terminal 1)
@@ -139,7 +142,7 @@ C:\Users\osiri\.cache\baston-target\release\baston-gateway.exe
 ✅ Attendu : mêmes lignes qu'en A4 **sans** le warn auth_bypass, et
 `HTTP gateway listening` (HTTP clair, c'est le mode correct — pas de TLS).
 ❌ Si tu vois `HTTPS gateway listening` : tu as une section `[tls]` dans
-`baston.toml`, à retirer (elle casse la connexion avec `Received HTTP/0.9`).
+`config/baston.toml`, à retirer (elle casse la connexion avec `Received HTTP/0.9`).
 
 ## B2. Client 1 — connexion + spawn (Phase B toujours OK ?)
 

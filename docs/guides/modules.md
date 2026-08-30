@@ -1,14 +1,17 @@
-# Modules, bundles and addons
+---
+title: "Modules, bundles and addons"
+description: "What your binary contains, how to switch capabilities on, and which bundle ships what."
+---
 
 BASTON ships only what you ask it to run. This page is the operator-facing
 reference; the reasoning behind it is in
-[ADR-002](adr/002-module-tiers.md).
+[ADR-002](../adr/002-module-tiers.md).
 
 Three words, three different things:
 
 | Term | What it is | How you change it |
 | --- | --- | --- |
-| **module** | a capability compiled into every binary | `[modules]` in `baston.toml`, at runtime |
+| **module** | a capability compiled into every binary | `[modules]` in `config/baston.toml`, at runtime |
 | **capability** | a capability whose code is selected at build time | pick a different **bundle** |
 | **addon** | something outside the binary entirely | deploy it yourself |
 
@@ -39,7 +42,7 @@ BASTON 0.1.0-alpha · bundle: js
 Three states, and the difference matters:
 
 - **on** — running.
-- **off** — in this binary, switched off. Fix it in `baston.toml`.
+- **off** — in this binary, switched off. Fix it in `config/baston.toml`.
 - **absent** — not in this binary at all. Fix it by using another bundle.
 
 The same summary prints on every boot and is served at `/api/v1/status`. When
@@ -252,7 +255,7 @@ provides the two surfaces an addon needs:
 
 - **the monitoring/control API** — `/api/v1/*` with per-key permissions
   (`monitor.read`, `resource.control`, `player.kick`, `zone.drain`,
-  `profiler.*`, `console.execute`) and an audit log. See [api.md](api.md).
+  `profiler.*`, `console.execute`) and an audit log. See [api.md](../reference/api.md).
 - **the NATS bus** carrying gateway/zone traffic.
 
 An administration dashboard is an addon, not a module: it consumes the API with
@@ -265,7 +268,7 @@ write it as a resource.
 
 ## Adding a module
 
-1. Decide the tier using the test in [ADR-002](adr/002-module-tiers.md). Most
+1. Decide the tier using the test in [ADR-002](../adr/002-module-tiers.md). Most
    ideas are tier 3 and need nothing here.
 2. Add a variant to `ModuleId` in `crates/baston-modules/src/lib.rs`, at the
    end, and add it to `ALL`.

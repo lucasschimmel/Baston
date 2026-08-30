@@ -1,0 +1,19 @@
+{
+  "name": "@baston/docs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build && node scripts/check-links.mjs",
+    "preview": "astro preview",
+    "check": "astro check",
+    "check:links": "node scripts/check-links.mjs"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.36.0",
+    "astro": "^5.14.0",
+    "sharp": "^0.34.0",
+    "unist-util-visit": "^5.0.0"
+  }
+}

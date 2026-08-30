@@ -1,4 +1,7 @@
-# BASTON — Getting Started (lancer, configurer, observer)
+---
+title: "Getting started"
+description: "Boot a server, declare resources, connect a database, and go multi-zone."
+---
 
 Guide de bout en bout : builder BASTON, lancer un serveur (mono-process ou mesh
 multi-zones), déclarer tes resources/scripts/assets, brancher ta base de données,
@@ -62,9 +65,9 @@ FiveM client ──▶ │ baston-gateway (seul process face au jeu) :30120     
 
 ---
 
-## 2. Configuration : `baston.toml`
+## 2. Configuration : `config/baston.toml`
 
-Le binaire charge le fichier pointé par `$env:BASTON_CONFIG`, sinon `baston.toml`
+Le binaire charge le fichier pointé par `$env:BASTON_CONFIG`, sinon `config/baston.toml`
 du répertoire courant (`baston-gateway.rs:71`). Les variables d'environnement
 écrasent ensuite certaines valeurs.
 
@@ -72,9 +75,9 @@ Fichiers fournis :
 
 | Fichier | Usage |
 |---|---|
-| `baston.toml` | dev réaliste (auth CFX réelle, 32 slots, licence `off`) |
-| `baston-bench.toml` | benchmark (auth **bypassée**, 128 slots, hot-reload off) |
-| `baston.docker.toml` | monté dans les conteneurs par `docker-compose.yml` |
+| `config/baston.toml` | dev réaliste (auth CFX réelle, 32 slots, licence `off`) |
+| `config/baston-bench.toml` | benchmark (auth **bypassée**, 128 slots, hot-reload off) |
+| `config/baston.docker.toml` | monté dans les conteneurs par `deploy/docker/docker-compose.yml` |
 
 ### Sections principales (défauts dans `baston-config/src/lib.rs`)
 
@@ -115,7 +118,7 @@ enabled = false               # serveur vocal Mumble embarqué (baston-voice)
 port = 30121                  # TCP(TLS) contrôle + UDP voix (même numéro)
 
 [license]
-mode = "off"                  # off | gate | verified   (cf docs/licensing.md)
+mode = "off"                  # off | gate | verified   (cf docs/operations/licensing.md)
 sv_license_key = ""
 # public_listing = true        # broker FXServer officiel → liste CFX
 # listing_ip_override = "203.0.113.10"
@@ -166,7 +169,7 @@ HTTP gateway listening
 Puis en jeu (console F8) : `connect localhost:30120`.
 
 Variante **sans launcher / sans ticket CFX** (LAN, tests) : lance avec
-`baston-bench.toml` (`auth_bypass = true`) ou mets `[dev] auth_bypass = true`.
+`config/baston-bench.toml` (`auth_bypass = true`) ou mets `[dev] auth_bypass = true`.
 
 ```powershell
 $env:BASTON_CONFIG = "baston-bench.toml"
@@ -211,7 +214,7 @@ Champs supportés (`baston-protocol/src/lib.rs`, struct `ResourceManifest`) :
 > `data_file`, pas de `exports`/`provide` déclaratifs dans le manifeste : ce que
 > tu vois ci-dessus est l'intégralité du schéma aujourd'hui.
 
-Exemple concret présent dans le repo : `resources/axiom-core/` (le gamemode),
+Exemple concret présent dans le repo : `examples/resources/axiom-core/` (le gamemode),
 avec ses bundles `dist/server/index.js` et `dist/client/index.js`.
 
 ### 4.3 « Mappings » = assets streamés (`stream/`)
@@ -219,7 +222,7 @@ avec ses bundles `dist/server/index.js` et `dist/client/index.js`.
 Comme FXServer : dépose tes `.yft/.ytd/.ydr/.ydd/...` (véhicules, vêtements,
 props, éléments de map) dans un dossier `stream/` de la resource, à n'importe
 quelle profondeur. **Aucune déclaration** dans le manifeste — le dossier est
-auto-scanné (`docs/streaming.md`).
+auto-scanné (`docs/guides/streaming.md`).
 
 ```
 resources/
@@ -301,7 +304,7 @@ Limite actuelle : pas encore de culling AoI serveur-autoritaire (le trait
 
 ## 6. Lancer le mesh multi-zones (Docker Compose)
 
-Le `docker-compose.yml` est la **source de vérité** du setup multi-zones :
+Le `deploy/docker/docker-compose.yml` est la **source de vérité** du setup multi-zones :
 NATS + gateway + `zone-a` + `zone-b` + Prometheus + Grafana.
 
 ### Tout d'un coup
@@ -309,7 +312,7 @@ NATS + gateway + `zone-a` + `zone-b` + Prometheus + Grafana.
 ```powershell
 cd D:\Dev\Fivem\Servers\WTF\baston
 $env:BASTON_ADMIN_TOKEN = "un-token-solide-32+caracteres"
-docker compose up -d
+docker compose -f deploy/docker/docker-compose.yml up -d
 docker compose ps
 ```
 
@@ -319,7 +322,7 @@ Plus rapide à itérer : NATS + monitoring en conteneurs, gateway et zones en
 process natifs.
 
 ```powershell
-docker compose up -d nats prometheus grafana
+docker compose -f deploy/docker/docker-compose.yml up -d nats prometheus grafana
 
 # terminal 1 — gateway
 $env:BASTON_MESHING_ENABLED = "true"
@@ -336,15 +339,15 @@ cargo run --release --bin baston-zone
 
 ### Ajouter une zone
 
-1. Choisis des bounds qui pavent la map sans recouvrement (`docs/zone-config.md`,
+1. Choisis des bounds qui pavent la map sans recouvrement (`docs/guides/zone-config.md`,
    bounds min-inclusif / max-exclusif, root −4000..+4000).
-2. Copie le service `zone-b` dans `docker-compose.yml`, change `ZONE_ID`,
+2. Copie le service `zone-b` dans `deploy/docker/docker-compose.yml`, change `ZONE_ID`,
    `ZONE_BOUNDS`, `ZONE_PUBLIC_GRPC_ADDR`.
-3. `docker compose up -d <service>` — la zone s'enregistre seule (retry 2s×30) ;
+3. `docker compose -f deploy/docker/docker-compose.yml up -d <service>` — la zone s'enregistre seule (retry 2s×30) ;
    vérifie `GET /admin/zones` ou `GET /api/v1/zones`.
 
 Layout conseillé en prod : 4 zones, le sud (Los Santos) découpé plus fin — table
-dans `docs/zone-config.md`. Drain / crash / recovery : `docs/operations.md`.
+dans `docs/guides/zone-config.md`. Drain / crash / recovery : `docs/operations/running.md`.
 
 ---
 
@@ -427,7 +430,7 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "content-type: application/
 
 Built-ins : `resmon [1|0|on|off]`, `profiler record [frames]`, `profiler stop`,
 `profiler status`, `profiler view`. Les commandes inconnues sont relayées aux
-resources qui ont fait `RegisterCommand`. Détails complets : `docs/api.md`.
+resources qui ont fait `RegisterCommand`. Détails complets : `docs/reference/api.md`.
 
 ---
 
@@ -446,7 +449,7 @@ Prometheus scrape gateway + zones toutes les 5s (`monitoring/prometheus.yml`).
 ### 8.2 Démarrer la stack
 
 ```powershell
-docker compose up -d prometheus grafana        # + nats si mesh
+docker compose -f deploy/docker/docker-compose.yml up -d prometheus grafana        # + nats si mesh
 ```
 
 - Prometheus : http://localhost:9091 — vérifie `/targets` (les jobs
@@ -477,14 +480,14 @@ et `/alerts`. **Pas d'Alertmanager** dans le compose dev → les alertes ne
 Chaque alerte a une `description` qui dit quoi vérifier. Cheminement type :
 `ScriptWatchdogTerminations`/`ScriptDispatchP99High` →
 `GET /api/v1/resmon/resources/{name}` pour trouver le handler lent → `profiler
-record` → `/profiler/latest/trace`. Détail complet : `docs/operations.md`.
+record` → `/profiler/latest/trace`. Détail complet : `docs/operations/running.md`.
 
 ---
 
 ## 9. Tester la charge (loadtest / benchmark)
 
 Le binaire `baston-loadtest` simule des clients (nécessite `auth_bypass = true`,
-donc `baston-bench.toml`).
+donc `config/baston-bench.toml`).
 
 ### Mono-zone (exit criterion Phase C)
 
@@ -500,7 +503,7 @@ Attendu : 100 connectés (0 dropped), p50 ~40ms / p99 ~70ms, CPU < 20%,
 ### Mesh (exit criterion Phase D)
 
 ```powershell
-docker compose up -d nats prometheus grafana
+docker compose -f deploy/docker/docker-compose.yml up -d nats prometheus grafana
 # gateway + 2 zones en natif (cf §6)
 cargo run --release --bin baston-loadtest -- --zones 2 --clients-per-zone 1000 \
   --handoffs true --duration 300s \
@@ -511,7 +514,7 @@ Cibles : handoff success > 99.9%, handoff p99 < 100ms, freeze client 0ms,
 CPU gateway < 50%, NATS < 100 MB/s, 0 zone failures.
 
 Runbook pas-à-pas (y compris tests avec 2 clients réels, véhicules, anti-cheat) :
-`docs/phase-c-runbook.md`.
+`docs/operations/runbooks/phase-c.md`.
 
 ---
 
@@ -529,10 +532,10 @@ C:\Users\osiri\.cache\baston-target\release\baston-gateway.exe
 $env:BASTON_CONFIG="baston-bench.toml"; ...\baston-gateway.exe
 
 # Mesh complet
-$env:BASTON_ADMIN_TOKEN="token32+"; docker compose up -d
+$env:BASTON_ADMIN_TOKEN="token32+"; docker compose -f deploy/docker/docker-compose.yml up -d
 
 # Monitoring seul
-docker compose up -d nats prometheus grafana
+docker compose -f deploy/docker/docker-compose.yml up -d nats prometheus grafana
 #   Prometheus  http://localhost:9091      Grafana http://localhost:3001
 
 # API admin (TOKEN = BASTON_ADMIN_TOKEN ou une [[api.keys]])
@@ -547,10 +550,10 @@ cargo fmt --check ; cargo clippy --workspace -- -D warnings ; cargo test --works
 
 ## Références internes
 
-- `docs/modules.md` — modules activables, bundles (js / lua / lite / full), addons
-- `docs/operations.md` — topologie, zones, monitoring, alerting détaillé
-- `docs/api.md` — API `/api/v1` complète (routes, permissions, audit)
-- `docs/streaming.md` — assets `stream/`
-- `docs/zone-config.md` — découpage des zones
-- `docs/phase-c-runbook.md` — runbook de test manuel (clients réels)
-- `docs/licensing.md`, `docs/escrow-support.md` — licence CFX & assets chiffrés
+- `docs/guides/modules.md` — modules activables, bundles (js / lua / lite / full), addons
+- `docs/operations/running.md` — topologie, zones, monitoring, alerting détaillé
+- `docs/reference/api.md` — API `/api/v1` complète (routes, permissions, audit)
+- `docs/guides/streaming.md` — assets `stream/`
+- `docs/guides/zone-config.md` — découpage des zones
+- `docs/operations/runbooks/phase-c.md` — runbook de test manuel (clients réels)
+- `docs/operations/licensing.md`, `docs/operations/escrow.md` — licence CFX & assets chiffrés

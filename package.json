@@ -1,0 +1,16 @@
+{
+  "name": "baston",
+  "private": true,
+  "packageManager": "pnpm@10.12.4",
+  "scripts": {
+    "docs:dev": "pnpm --filter @baston/docs dev",
+    "docs:build": "pnpm --filter @baston/docs build",
+    "docs:preview": "pnpm --filter @baston/docs preview"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "sharp"
+    ]
+  }
+}

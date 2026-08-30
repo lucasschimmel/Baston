@@ -1,4 +1,7 @@
-# Phase C — Guide de test
+---
+title: "Runbook: Phase C testing"
+description: "The test matrix behind the Phase C state-sync milestone."
+---
 
 Tout ce qu'il faut valider pour la Phase C (state sync multi-joueurs), du plus
 automatisé au plus manuel. Les niveaux 1-2 sont déjà passés en session dev ;
@@ -12,7 +15,7 @@ les niveaux 3-5 nécessitent de VRAIS clients FiveM et restent à valider.
 cd D:\Dev\Fivem\Servers\WTF\baston
 
 # NATS (obligatoire pour le state sync) + monitoring
-docker compose up -d nats prometheus grafana
+docker compose -f deploy/docker/docker-compose.yml up -d nats prometheus grafana
 docker compose ps nats        # → healthy
 
 # Build release (le dev build fausse CPU/latence)
@@ -21,11 +24,11 @@ cargo build --release -p baston-gateway -p baston-loadtest
 ```
 
 Deux configs :
-- `baston.toml` — auth CFX réelle, pour les tests avec vrai client. **Pas de
+- `config/baston.toml` — auth CFX réelle, pour les tests avec vrai client. **Pas de
   TLS** : le port jeu reste en HTTP clair (un listener TLS-only casse les
   requêtes plaintext du client → `Received HTTP/0.9`). Le download packfile
   passe en HTTP via un fileServer littéral (validé Phase B, canary 31725).
-- `baston-bench.toml` — `auth_bypass = true`, 128 slots, pour le loadtest.
+- `config/baston-bench.toml` — `auth_bypass = true`, 128 slots, pour le loadtest.
 
 Endpoints utiles :
 - Métriques brutes : http://localhost:9090/metrics
@@ -92,7 +95,7 @@ Points d'attention :
 Reprend le flow Phase B et vérifie que la Phase C n'a rien cassé + que le
 reporting d'état fonctionne.
 
-1. `baston.toml` (auth réelle, HTTP clair sans `[tls]`), lancer le serveur, `connect localhost:30120`.
+1. `config/baston.toml` (auth réelle, HTTP clair sans `[tls]`), lancer le serveur, `connect localhost:30120`.
 2. Checklist console serveur :
    - `player authenticated: license:...` → `UDP connection established` →
      `session host elected` → `[axiom-core] onCharacterSpawned` (= Phase B OK).

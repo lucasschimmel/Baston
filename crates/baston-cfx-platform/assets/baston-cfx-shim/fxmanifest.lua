@@ -8,7 +8,7 @@
 --
 -- The resource makes NO network call. Only the genuine FXServer it runs inside
 -- ever talks to CFX, doing exactly what it normally does with the operator's own
--- licence. See docs/licensing.md for the compliance boundary.
+-- licence. See docs/operations/licensing.md for the compliance boundary.
 fx_version 'cerulean'
 game 'gta5'
 

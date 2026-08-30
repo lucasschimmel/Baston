@@ -1,4 +1,7 @@
-# CFX identity, entitlements, and public listing
+---
+title: "CFX licensing"
+description: "How BASTON proves a legitimate CFX server identity without reimplementing it."
+---
 
 Baston integrates with the official CFX platform without copying or patching
 its closed authentication code. The operator supplies an official

@@ -405,7 +405,7 @@ fn default_sidecar_port() -> u16 {
 
 /// Licence enforcement mode (`[license] mode`). Missing → `Off` so existing
 /// dev/LAN configs keep booting; operators opt into `gate`/`verified` (see
-/// `docs/licensing.md`). Unknown values are rejected by serde at parse time.
+/// `docs/operations/licensing.md`). Unknown values are rejected by serde at parse time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LicenseMode {

@@ -1,4 +1,7 @@
-# BASTON — Zone layout for the GTA V map
+---
+title: "Zone configuration"
+description: "Splitting the map across zone processes without gaps or overlap."
+---
 
 The world plane is indexed from −4000 to +4000 on X and Y (quadtree root).
 Zone bounds are min-inclusive / max-exclusive so adjacent zones tile without

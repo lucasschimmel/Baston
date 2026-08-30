@@ -1,4 +1,7 @@
-# FiveM / CFX server+shared natives gap - Baston
+---
+title: "Server native coverage"
+description: "Which CFX server natives BASTON implements, and which it does not."
+---
 
 Generated: 2026-07-09
 
