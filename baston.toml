@@ -111,6 +111,19 @@ port = 30121
 # reach the server at ("127.0.0.1" for local tests).
 external_address = ""
 
+# Pooled database access for scripts (the `db` module, off by default).
+# Enable with [modules] enable = ["db"]. Queries run on the server's runtime,
+# never on a script thread. See docs/modules.md.
+[db]
+# sqlite:baston.db · postgres://user:pass@host/base · mysql://user:pass@host/base
+# The driver must be in your bundle: `db` ships sqlite, `db-postgres` and
+# `db-mysql` add theirs. Run `baston-gateway --modules` to see what you have.
+url = ""
+# Connections held open. Keep it under your database's own limit.
+pool_size = 10
+# A query over this many seconds is abandoned and reported to the script.
+query_timeout_secs = 15
+
 # CFX Asset Escrow support (Phase D-bis). Off by default. See
 # docs/escrow-support.md. Requires a Windows build with `--features escrow`.
 [escrow]

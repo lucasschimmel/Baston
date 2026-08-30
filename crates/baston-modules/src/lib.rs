@@ -80,6 +80,8 @@ pub enum ModuleId {
     ScriptingLua = 7,
     /// CFX Asset Escrow support (Windows, operator-supplied FXServer).
     Escrow = 8,
+    /// Pooled database access for scripts (SQLite, PostgreSQL, MySQL).
+    Db = 9,
 }
 
 /// Every module, in declaration order. Reports iterate this so their output
@@ -94,6 +96,7 @@ pub const ALL: &[ModuleId] = &[
     ModuleId::ScriptingJs,
     ModuleId::ScriptingLua,
     ModuleId::Escrow,
+    ModuleId::Db,
 ];
 
 impl ModuleId {
@@ -109,6 +112,7 @@ impl ModuleId {
             Self::ScriptingJs => "scripting-js",
             Self::ScriptingLua => "scripting-lua",
             Self::Escrow => "escrow",
+            Self::Db => "db",
         }
     }
 
@@ -120,7 +124,7 @@ impl ModuleId {
             | Self::DebugOverlay
             | Self::Profiler
             | Self::HotReload => Tier::Module,
-            Self::ScriptingJs | Self::ScriptingLua | Self::Escrow => Tier::Capability,
+            Self::ScriptingJs | Self::ScriptingLua | Self::Escrow | Self::Db => Tier::Capability,
         }
     }
 
@@ -136,6 +140,7 @@ impl ModuleId {
             Self::ScriptingJs => "JavaScript resources (deno_core / V8)",
             Self::ScriptingLua => "Lua resources (mlua / Lua 5.4)",
             Self::Escrow => "CFX Asset Escrow decryption (Windows)",
+            Self::Db => "pooled SQL access for scripts (sqlite / postgres / mysql)",
         }
     }
 
@@ -150,6 +155,7 @@ impl ModuleId {
             Self::AdminApi => Some("api"),
             Self::DebugOverlay => Some("debug"),
             Self::Escrow => Some("escrow"),
+            Self::Db => Some("db"),
             // Configured through `[dev]`, which also carries core settings, so
             // the section cannot be attributed to the module alone.
             Self::HotReload => None,
@@ -173,7 +179,9 @@ impl ModuleId {
             Self::Metrics => true,
             Self::HotReload => true,
             Self::ScriptingJs | Self::ScriptingLua => true,
-            Self::AdminApi | Self::DebugOverlay | Self::Profiler | Self::Escrow => false,
+            // `db` is compiled in but stays off until an operator points it
+            // at a database: a pool with no URL is not a useful default.
+            Self::AdminApi | Self::DebugOverlay | Self::Profiler | Self::Escrow | Self::Db => false,
         }
     }
 
@@ -190,6 +198,7 @@ impl ModuleId {
             Self::ScriptingJs => cfg!(feature = "scripting-js"),
             Self::ScriptingLua => cfg!(feature = "scripting-lua"),
             Self::Escrow => cfg!(feature = "escrow"),
+            Self::Db => cfg!(feature = "db"),
             // Tier 1 is compiled in unconditionally (ADR-002).
             _ => true,
         }
@@ -202,6 +211,7 @@ impl ModuleId {
             Self::ScriptingJs => Some("js (or full)"),
             Self::ScriptingLua => Some("lua (or full)"),
             Self::Escrow => Some("full, on Windows"),
+            Self::Db => Some("full (or any bundle built with --features db)"),
             _ => None,
         }
     }
@@ -434,7 +444,7 @@ mod tests {
     fn all_covers_every_discriminant() {
         // A module added to the enum but not to ALL would silently vanish from
         // every report and from `[modules]` resolution.
-        assert_eq!(ALL.len(), ModuleId::Escrow as usize + 1);
+        assert_eq!(ALL.len(), ModuleId::Db as usize + 1);
     }
 
     #[test]

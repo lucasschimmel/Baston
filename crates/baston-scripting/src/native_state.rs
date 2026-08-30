@@ -229,6 +229,51 @@ pub trait VoiceControl: Send + Sync {
 /// Voice control surface, absent when the voice module is off.
 pub struct SharedVoice(pub Option<Arc<dyn VoiceControl>>);
 
+/// Pooled database access behind the `db` module.
+///
+/// A trait rather than the concrete pool, for the same reason [`VoiceControl`]
+/// is one: it keeps `baston-scripting` from depending on sqlx. The gateway
+/// implements it on the real pool, so a build without the `db` capability
+/// compiles no database client at all.
+pub trait DbAccess: Send + Sync {
+    /// Start a query and return its job id.
+    ///
+    /// For a caller with no async context — a Lua runtime, which polls
+    /// [`Self::collect`] from a coroutine. `Err` is a usage error (an unknown
+    /// query kind); a failing *query* surfaces through `collect`.
+    fn submit(
+        &self,
+        resource: &str,
+        kind: &str,
+        sql: String,
+        params: Vec<serde_json::Value>,
+    ) -> Result<u64, String>;
+
+    /// Take a finished job's result. `None` means it is still running.
+    fn collect(&self, id: u64) -> Option<Result<serde_json::Value, String>>;
+
+    /// Run a query, awaited by the caller.
+    ///
+    /// For a caller that has an async context — the JavaScript path, where a
+    /// resource expects a promise.
+    fn query<'a>(
+        &'a self,
+        resource: &'a str,
+        kind: &'a str,
+        sql: String,
+        params: Vec<serde_json::Value>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'a>,
+    >;
+}
+
+/// The database pool, absent when the `db` module is off.
+///
+/// `None` means the natives refuse with a message naming the module, rather
+/// than handing back an empty result set a resource would read as "no rows".
+#[cfg_attr(not(any(feature = "js", feature = "lua")), allow(dead_code))]
+pub struct SharedDb(pub Option<Arc<dyn DbAccess>>);
+
 #[cfg(test)]
 mod tests {
     use super::*;

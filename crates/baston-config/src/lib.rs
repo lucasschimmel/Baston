@@ -142,6 +142,12 @@ pub enum ConfigError {
          → expected one of: true/false, 1/0, yes/no, on/off"
     )]
     ModuleEnvOverride { var: String, value: String },
+    #[error(
+        "[db] the db module is enabled but url is empty\n  \
+         → set [db] url = \"postgres://user:pass@host/base\" (or sqlite:baston.db)\n  \
+         → to disable database access: remove \"db\" from [modules] enable"
+    )]
+    DbMissingUrl,
 }
 
 /// `[tls]` section — HTTPS for packfile downloads (required by FiveM canary 31725+).
@@ -183,6 +189,8 @@ pub struct BastonConfig {
     pub api: ApiConfig,
     #[serde(default)]
     pub voice: VoiceConfig,
+    #[serde(default)]
+    pub db: DbConfig,
     #[serde(default)]
     pub modules: ModulesConfig,
     pub tls: Option<TlsConfig>,
@@ -751,6 +759,68 @@ impl StateSyncConfig {
     }
 }
 
+/// `[db]` section — pooled database access for scripts (ADR-002, Tier 2).
+///
+/// One `url` rather than discrete host/user/password fields: it is what every
+/// driver documents, what a hosting panel hands out, and it keeps the
+/// credential in one place an operator can move to an environment variable.
+#[derive(Clone, Deserialize)]
+pub struct DbConfig {
+    /// Connection URL. `sqlite:…`, `postgres://…` or `mysql://…`.
+    ///
+    /// Empty means the module has nothing to connect to; the loader says so
+    /// rather than starting a server whose first query fails.
+    #[serde(default)]
+    pub url: String,
+    #[serde(default = "default_db_pool_size")]
+    pub pool_size: u32,
+    #[serde(default = "default_db_query_timeout")]
+    pub query_timeout_secs: u64,
+}
+
+impl Default for DbConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            pool_size: default_db_pool_size(),
+            query_timeout_secs: default_db_query_timeout(),
+        }
+    }
+}
+
+/// The URL carries a password, so it never reaches a log or a bug report.
+impl fmt::Debug for DbConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DbConfig")
+            .field(
+                "url",
+                &if self.url.is_empty() {
+                    "<unset>"
+                } else {
+                    "<redacted>"
+                },
+            )
+            .field("pool_size", &self.pool_size)
+            .field("query_timeout_secs", &self.query_timeout_secs)
+            .finish()
+    }
+}
+
+impl DbConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.url.trim().is_empty() {
+            return Err(ConfigError::DbMissingUrl);
+        }
+        if self.pool_size == 0 {
+            return Err(ConfigError::Invalid {
+                section: "db",
+                reason: "pool_size must be at least 1".to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// `[metrics]` section — Prometheus exporter.
 #[derive(Debug, Clone, Deserialize)]
 pub struct MetricsConfig {
@@ -1142,6 +1212,14 @@ fn default_file_download_chunk_bytes() -> usize {
 fn default_file_download_concurrency() -> usize {
     64
 }
+fn default_db_pool_size() -> u32 {
+    // Enough for a busy resource set without exhausting a small managed
+    // database's connection budget.
+    10
+}
+fn default_db_query_timeout() -> u64 {
+    15
+}
 fn default_metrics_port() -> u16 {
     9090
 }
@@ -1346,6 +1424,11 @@ impl BastonConfig {
         self.state_sync.validate()?;
         self.resources.validate()?;
         self.debug.validate()?;
+        // Only held to its invariants when it actually runs: a `[db]` block
+        // left in a config with the module off is not a reason to refuse boot.
+        if self.enabled_modules.is_enabled(ModuleId::Db) {
+            self.db.validate()?;
+        }
         if self.license.public_listing {
             if self.license.mode != LicenseMode::Verified {
                 return Err(ConfigError::Invalid {

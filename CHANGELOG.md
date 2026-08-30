@@ -20,6 +20,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   resource selects its engine through its server-script extensions.
 - Added four CI-tested bundles — `lite`, `js`, `lua`, `full` — so a capability
   behind a Cargo feature cannot rot without the build noticing.
+- Added the `db` module: pooled SQL for scripts over SQLite, PostgreSQL or
+  MySQL/MariaDB, with the same four calls in both languages. Queries run on the
+  server's runtime and never on a script thread, so a slow statement cannot
+  stall a resource's events. Parameters are bound by the driver, never spliced
+  into the SQL.
+- The Lua runtime reaches parity with JavaScript: a watchdog that terminates a
+  runaway script, `playerConnecting` deferrals, `exports`, state-bag change
+  handlers, zone transfer state, and server → client native dispatch.
 
 - Added verified CFX server identity through an operator-supplied, unmodified
   FXServer broker.

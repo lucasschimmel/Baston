@@ -30,6 +30,7 @@ deno_core = "0.406"
 # is swappable behind this one feature later — the runtime code does not care.
 # Not `send`: like a V8 isolate, a Lua state lives on its own thread and is
 # never shared, so requiring Send from everything it touches buys nothing.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "json", "chrono", "macros"] }
 mlua = { version = "0.10", features = ["lua54", "vendored", "serialize"] }
 dashmap = "6"
 notify = "8"
@@ -65,6 +66,7 @@ subtle = "2"
 # OneSync clone stream uses. lz4_flex has no external-dictionary support.
 lz4-sys = "1.11"
 
+baston-db = { path = "crates/baston-db" }
 baston-modules = { path = "crates/baston-modules" }
 baston-config = { path = "crates/baston-config" }
 baston-core = { path = "crates/baston-core" }

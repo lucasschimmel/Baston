@@ -20,8 +20,8 @@ use mlua::{Lua, LuaSerdeExt, Value, Variadic};
 
 use crate::error::ScriptError;
 use crate::native_state::{
-    NativeState, RuntimeContext, SharedConvars, SharedDeferrals, SharedEntityWorld, SharedHttp,
-    SharedHttpHandlers, SharedKvp, SharedNet, SharedObservability, SharedPlayers,
+    NativeState, RuntimeContext, SharedConvars, SharedDb, SharedDeferrals, SharedEntityWorld,
+    SharedHttp, SharedHttpHandlers, SharedKvp, SharedNet, SharedObservability, SharedPlayers,
     SharedResourceControl, SharedResources, SharedRouting, SharedStateBags, SharedVoice,
     SharedWorldControl,
 };
@@ -153,6 +153,7 @@ impl LuaRuntime {
         native_state.put(SharedResourceControl(Arc::new(crate::NoResourceControl)));
         native_state.put(SharedVoice(None));
         native_state.put(SharedConvars(Arc::new(dashmap::DashMap::new())));
+        native_state.put(SharedDb(None));
 
         let runtime = Self {
             lua: Lua::new(),
@@ -651,6 +652,62 @@ impl LuaRuntime {
             .set("poll_client_native", poll_client_native)
             .map_err(|e| self.init_error(&e))?;
 
+        // --- database (the `db` module) ---
+        let state = Rc::clone(&self.state);
+        let db_submit = lua
+            .create_function(
+                move |_, (kind, sql, params_json): (String, String, String)| {
+                    let state = state.borrow();
+                    let Some(db) = state.borrow::<SharedDb>().0.as_ref() else {
+                        // A resource that queries with the module off gets told
+                        // why, not an empty result set it would read as "no rows".
+                        return Ok((
+                            None,
+                            Some(
+                                "the db module is disabled — add \"db\" to [modules] enable"
+                                    .to_owned(),
+                            ),
+                        ));
+                    };
+                    let params: Vec<serde_json::Value> =
+                        serde_json::from_str(&params_json).unwrap_or_default();
+                    let resource = state.borrow::<RuntimeContext>().resource_name.clone();
+                    match db.submit(&resource, &kind, sql, params) {
+                        Ok(id) => Ok((Some(id), None)),
+                        Err(e) => Ok((None, Some(e))),
+                    }
+                },
+            )
+            .map_err(|e| self.init_error(&e))?;
+        table
+            .set("db_submit", db_submit)
+            .map_err(|e| self.init_error(&e))?;
+
+        let state = Rc::clone(&self.state);
+        let db_collect = lua
+            .create_function(move |_, id: u64| {
+                let state = state.borrow();
+                let Some(db) = state.borrow::<SharedDb>().0.as_ref() else {
+                    return Ok((
+                        true,
+                        serde_json::json!({ "__error": "db module disabled" }).to_string(),
+                    ));
+                };
+                // `(ready, payload)` rather than nil-or-string: a query that
+                // legitimately returns nil must not read as "still running".
+                match db.collect(id) {
+                    None => Ok((false, String::new())),
+                    Some(Ok(value)) => Ok((true, value.to_string())),
+                    Some(Err(message)) => {
+                        Ok((true, serde_json::json!({ "__error": message }).to_string()))
+                    }
+                }
+            })
+            .map_err(|e| self.init_error(&e))?;
+        table
+            .set("db_collect", db_collect)
+            .map_err(|e| self.init_error(&e))?;
+
         // --- clock and error reporting ---
         let game_timer = lua
             .create_function(move |_, ()| Ok(host_started_at.elapsed().as_millis() as i64))
@@ -713,6 +770,11 @@ impl LuaRuntime {
 
     pub fn install_voice(&mut self, voice: SharedVoice) {
         self.state.borrow_mut().put(voice);
+    }
+
+    /// Install the database pool backing the `db` natives.
+    pub fn install_db(&mut self, db: crate::native_state::SharedDb) {
+        self.state.borrow_mut().put(db);
     }
 
     /// Run one resource script.
@@ -1467,6 +1529,143 @@ mod tests {
             err.to_string().contains("CreateThread"),
             "the error must name the fix: {err}"
         );
+    }
+
+    /// A stand-in pool: enough to prove the script-side contract without
+    /// pulling a SQL driver into this crate's tests. The real drivers are
+    /// exercised in baston-db's own suite.
+    struct FakeDb {
+        results:
+            std::sync::Mutex<std::collections::HashMap<u64, Result<serde_json::Value, String>>>,
+        next: std::sync::atomic::AtomicU64,
+        seen: std::sync::Mutex<Vec<(String, String, Vec<serde_json::Value>)>>,
+    }
+
+    impl crate::native_state::DbAccess for FakeDb {
+        fn submit(
+            &self,
+            _resource: &str,
+            kind: &str,
+            sql: String,
+            params: Vec<serde_json::Value>,
+        ) -> Result<u64, String> {
+            if kind == "nonsense" {
+                return Err("unknown query kind \"nonsense\"".to_owned());
+            }
+            self.seen
+                .lock()
+                .unwrap()
+                .push((kind.to_owned(), sql, params));
+            let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let answer = if kind == "scalar" {
+                Ok(serde_json::json!("Lucas"))
+            } else {
+                Err("table not found".to_owned())
+            };
+            self.results.lock().unwrap().insert(id, answer);
+            Ok(id)
+        }
+
+        fn collect(&self, id: u64) -> Option<Result<serde_json::Value, String>> {
+            self.results.lock().unwrap().remove(&id)
+        }
+
+        fn query<'a>(
+            &'a self,
+            _resource: &'a str,
+            _kind: &'a str,
+            _sql: String,
+            _params: Vec<serde_json::Value>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send + 'a>,
+        > {
+            Box::pin(async { Ok(serde_json::Value::Null) })
+        }
+    }
+
+    fn runtime_with_db(name: &str) -> (LuaRuntime, Arc<FakeDb>) {
+        let mut rt = runtime(name);
+        let db = Arc::new(FakeDb {
+            results: std::sync::Mutex::new(std::collections::HashMap::new()),
+            next: std::sync::atomic::AtomicU64::new(1),
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        rt.install_db(SharedDb(Some(
+            Arc::clone(&db) as Arc<dyn crate::native_state::DbAccess>
+        )));
+        (rt, db)
+    }
+
+    #[test]
+    fn a_query_yields_its_thread_and_resumes_with_the_rows() {
+        let (mut rt, db) = runtime_with_db("db-test");
+        rt.execute_script(
+            "main.lua",
+            r#"
+            name = nil
+            CreateThread(function()
+                name = Db.Scalar("SELECT name FROM players WHERE id = ?", { 1 })
+            end)
+            "#,
+        )
+        .unwrap();
+        rt.tick();
+        assert_eq!(rt.lua.globals().get::<String>("name").unwrap(), "Lucas");
+
+        // Parameters travel as parameters, never spliced into the SQL.
+        let seen = db.seen.lock().unwrap();
+        assert_eq!(seen[0].0, "scalar");
+        assert!(seen[0].1.contains('?'), "{}", seen[0].1);
+        assert_eq!(seen[0].2, vec![serde_json::json!(1)]);
+    }
+
+    #[test]
+    fn a_query_outside_a_thread_names_the_fix() {
+        let (mut rt, _db) = runtime_with_db("db-test");
+        let err = rt
+            .execute_script("main.lua", r#"Db.Query("SELECT 1")"#)
+            .expect_err("must refuse outside a coroutine");
+        assert!(err.to_string().contains("CreateThread"), "{err}");
+    }
+
+    #[test]
+    fn a_failing_query_raises_in_the_calling_thread() {
+        let (mut rt, _db) = runtime_with_db("db-test");
+        rt.execute_script(
+            "main.lua",
+            r#"
+            failed = nil
+            CreateThread(function()
+                local ok, err = pcall(function() return Db.Query("SELECT 1") end)
+                failed = (not ok) and tostring(err) or nil
+            end)
+            "#,
+        )
+        .unwrap();
+        rt.tick();
+        let failed = rt.lua.globals().get::<String>("failed").unwrap();
+        assert!(failed.contains("table not found"), "{failed}");
+    }
+
+    #[test]
+    fn querying_with_the_module_off_says_so() {
+        // Without this the resource sees an empty result set and reads it as
+        // "no rows", which is a much worse bug to chase.
+        let mut rt = runtime("db-test");
+        rt.execute_script(
+            "main.lua",
+            r#"
+            failed = nil
+            CreateThread(function()
+                local ok, err = pcall(function() return Db.Query("SELECT 1") end)
+                failed = (not ok) and tostring(err) or nil
+            end)
+            "#,
+        )
+        .unwrap();
+        rt.tick();
+        let failed = rt.lua.globals().get::<String>("failed").unwrap();
+        assert!(failed.contains("[modules]"), "{failed}");
     }
 
     #[test]

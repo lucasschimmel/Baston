@@ -144,6 +144,9 @@ pub struct ScriptHost {
     started_at: Instant,
     cross_zone: Arc<std::sync::RwLock<Option<CrossZonePublisher>>>,
     voice: Arc<std::sync::RwLock<Option<Arc<dyn crate::native_state::VoiceControl>>>>,
+    /// Database pool, set by the composition root when the `db` module is
+    /// on. Resources loaded before then see no database and say so.
+    db: Arc<std::sync::RwLock<Option<Arc<dyn crate::native_state::DbAccess>>>>,
 }
 
 /// Lifecycle/internal events that never leave the local zone.
@@ -216,6 +219,7 @@ impl ScriptHost {
             started_at: Instant::now(),
             cross_zone: Arc::new(std::sync::RwLock::new(None)),
             voice: Arc::new(std::sync::RwLock::new(None)),
+            db: Arc::new(std::sync::RwLock::new(None)),
         })
     }
 
@@ -223,6 +227,16 @@ impl ScriptHost {
     /// resources loaded afterwards — call before `load_resource`.
     pub fn set_voice_control(&self, voice: Arc<dyn crate::native_state::VoiceControl>) {
         *self.voice.write().unwrap_or_else(|e| e.into_inner()) = Some(voice);
+    }
+
+    /// Install the database pool backing the `db` natives. Applies to
+    /// resources loaded afterwards.
+    pub fn set_db(&self, db: Arc<dyn crate::native_state::DbAccess>) {
+        *self.db.write().unwrap_or_else(|e| e.into_inner()) = Some(db);
+    }
+
+    fn db(&self) -> Option<Arc<dyn crate::native_state::DbAccess>> {
+        self.db.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Install the authoritative world's write side, backing entity creation
@@ -509,6 +523,7 @@ impl ScriptHost {
             http_handlers: Arc::clone(&self.http_handlers),
             resource_control: self.resource_control(),
             voice: self.voice.read().unwrap_or_else(|e| e.into_inner()).clone(),
+            db: self.db(),
         })?;
         let mut queued = handle
             .send(|reply| RuntimeCommand::ExecuteScripts { scripts, reply })
@@ -786,6 +801,7 @@ struct RuntimeThreadParams<'a> {
     http_handlers: Arc<crate::HttpHandlerRegistry>,
     resource_control: Arc<dyn crate::ResourceControl>,
     voice: Option<Arc<dyn crate::native_state::VoiceControl>>,
+    db: Option<Arc<dyn crate::native_state::DbAccess>>,
 }
 
 /// The `lite` bundle has no scripting engine at all.
@@ -831,6 +847,7 @@ fn spawn_runtime_thread(
         http_handlers,
         resource_control,
         voice,
+        db,
         ..
     } = params;
     // Runtime creation happens on the isolate thread; report init errors
@@ -885,6 +902,7 @@ fn spawn_runtime_thread(
                     runtime.install_server_state(convars, resources);
                     runtime.install_shared_game_state(shared_game_state);
                     runtime.install_voice(crate::native_state::SharedVoice(voice));
+                    runtime.install_db(crate::native_state::SharedDb(db));
                     let _ = init_tx.send(Ok(()));
 
                     let local = tokio::task::LocalSet::new();
@@ -909,6 +927,7 @@ fn spawn_runtime_thread(
                     runtime.install_server_state(convars, resources);
                     runtime.install_shared_game_state(shared_game_state);
                     runtime.install_voice(crate::native_state::SharedVoice(voice));
+                    runtime.install_db(crate::native_state::SharedDb(db));
                     let _ = init_tx.send(Ok(()));
 
                     tokio_rt.block_on(run_lua_loop(runtime, rx));

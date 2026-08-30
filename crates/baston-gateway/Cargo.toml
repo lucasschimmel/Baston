@@ -41,6 +41,7 @@ baston-cfx-platform = { workspace = true }
 baston-protocol = { workspace = true }
 baston-scripting = { workspace = true, default-features = false }
 baston-zone = { workspace = true, default-features = false }
+baston-db = { workspace = true, optional = true }
 baston-voice = { workspace = true }
 
 # Tier 2 capabilities (ADR-002). Each forwards to the crate that implements it
@@ -51,6 +52,11 @@ default = ["scripting-js"]
 scripting-js = ["baston-modules/scripting-js", "baston-scripting/js", "baston-zone/scripting-js"]
 scripting-lua = ["baston-modules/scripting-lua", "baston-scripting/lua", "baston-zone/scripting-lua"]
 escrow = ["baston-modules/escrow", "baston-zone/escrow"]
+# The db capability, and its drivers. An operator running PostgreSQL should not
+# compile a MySQL client; `db` alone gives sqlite, which needs no server.
+db = ["dep:baston-db", "baston-modules/db", "baston-db/sqlite"]
+db-postgres = ["db", "baston-db/postgres"]
+db-mysql = ["db", "baston-db/mysql"]
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

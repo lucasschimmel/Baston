@@ -28,7 +28,7 @@ use crate::natives::{client, server};
 // natives stopped depending on V8. Re-exported so this module — and the
 // crate's public surface — keep their existing paths.
 pub use crate::native_state::{
-    RuntimeContext, SharedConvars, SharedDeferrals, SharedHttpHandlers, SharedNet,
+    RuntimeContext, SharedConvars, SharedDb, SharedDeferrals, SharedHttpHandlers, SharedNet,
     SharedObservability, SharedPlayers, SharedResources, SharedStateBags, SharedVoice,
 };
 
@@ -101,6 +101,46 @@ async fn op_invoke_native_on_client(
     )
     .await
 }
+
+// --- 0b. database (the `db` module) ---
+
+/// `Db.query(kind, sql, params)` — resolves with rows, a count, or a scalar.
+///
+/// JavaScript has an async context, so the query is awaited here and the
+/// resource gets a promise. Lua has none and polls instead; both go through the
+/// same pool.
+#[op2]
+#[string]
+async fn op_db_query(
+    state: std::rc::Rc<std::cell::RefCell<OpState>>,
+    #[string] kind: String,
+    #[string] sql: String,
+    #[string] params_json: String,
+) -> String {
+    fn err(message: impl std::fmt::Display) -> String {
+        serde_json::json!({ "__error": message.to_string() }).to_string()
+    }
+
+    // Cloned out before the await: a borrow must not span the query.
+    let (db, resource) = {
+        let op_state = state.borrow();
+        let natives = &op_state.borrow::<Natives>().0;
+        (
+            natives.borrow::<SharedDb>().0.clone(),
+            natives.borrow::<RuntimeContext>().resource_name.clone(),
+        )
+    };
+    let Some(db) = db else {
+        return err("the db module is disabled — add \"db\" to [modules] enable");
+    };
+    let params: Vec<serde_json::Value> = serde_json::from_str(&params_json).unwrap_or_default();
+    match db.query(&resource, &kind, sql, params).await {
+        Ok(value) => value.to_string(),
+        Err(message) => err(message),
+    }
+}
+
+deno_core::extension!(baston_db, ops = [op_db_query]);
 
 // --- 1. console ---
 
@@ -848,5 +888,6 @@ pub fn all_extensions() -> Vec<deno_core::Extension> {
         baston_deferrals::init(),
         baston_mesh::init(),
         baston_http::init(),
+        baston_db::init(),
     ]
 }

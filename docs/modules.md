@@ -60,6 +60,9 @@ nothing: no thread, no listener, no allocation, no generated certificate.
 | `debug-overlay` | off | `[debug]` | in-game `displayinfo` overlay |
 | `profiler` | off | — | script profiler capture and its API routes |
 
+Tier 2 capabilities have their own row in `--modules`; `db` is one, and it is
+covered under [Database access](#database-access) below.
+
 `admin-api`, `debug-overlay` and `profiler` default to off because each widens
 what a caller can do to a running server — kick players, stop resources, read
 zone topology. They open where you ask, not by default.
@@ -117,7 +120,7 @@ build time. You get them as prebuilt bundles — you never need a Rust toolchain
 | `lite` | no scripting runtime | zone worker, relay, benchmarking |
 | `js` | JavaScript (V8) | **the default** |
 | `lua` | Lua 5.4 | Lua-only servers |
-| `full` | JavaScript + Lua + escrow | migrations and mixed estates |
+| `full` | JavaScript + Lua + escrow + every db driver | migrations and mixed estates |
 
 Building from source:
 
@@ -125,8 +128,11 @@ Building from source:
 cargo build --release -p baston-gateway                                              # js
 cargo build --release -p baston-gateway --no-default-features                        # lite
 cargo build --release -p baston-gateway --no-default-features --features scripting-lua  # lua
-cargo build --release -p baston-gateway --features scripting-lua,escrow               # full
+cargo build --release -p baston-gateway --features scripting-lua,escrow,db-postgres,db-mysql  # full
 ```
+
+Database drivers are additive on top of any bundle: `--features db` adds SQLite,
+`db-postgres` and `db-mysql` add theirs.
 
 Other feature combinations build, but only these four are covered by CI. A
 binary built outside the list reports `bundle: custom` and says so.
@@ -160,25 +166,84 @@ values to and from JSON.
 A resource with no server scripts (client-only, or streaming assets) does not
 get a runtime at all.
 
-### What Lua supports today
+### What Lua supports
 
-Working: `AddEventHandler`, `RegisterNetEvent`, `TriggerEvent`,
-`TriggerClientEvent`, `RegisterCommand`, `Citizen.CreateThread` / `Wait` /
-`SetTimeout`, `print`, `Citizen.InvokeNative`, and the natives as globals
-(`GetPlayerName(1)` resolves on first use). Net events reach a resource only
-where it called `RegisterNetEvent`, as on the JS side.
+The same surface as JavaScript: events and net events (`RegisterNetEvent` gates
+client → server traffic on both), commands, `Citizen.CreateThread` / `Wait` /
+`SetTimeout`, `print`, `exports`, state-bag change handlers,
+`playerConnecting` deferrals, zone transfer state, client-native dispatch, the
+`Db` surface, and every native — including as globals, where `GetPlayerName(1)`
+resolves on first use rather than from thousands of generated stubs.
 
-Not yet, and worth knowing before you migrate a server:
+A runaway Lua script is terminated the same way a runaway JS one is. The
+mechanism differs: V8 needs a separate thread holding an isolate handle, while
+Lua interrupts itself from a debug hook.
 
-- **No watchdog.** The V8 path force-terminates a runaway script; the Lua path
-  does not yet. A Lua script that never yields blocks its own runtime — and
-  only its own, since every resource has its own thread.
-- **No client-native dispatch.** Calling a *client* native from a Lua server
-  resource is not wired yet. JS resources can.
-- **No zone transfer state.** `RegisterZoneTransferState` is JS-only, so a Lua
-  resource carries no state across a zone handoff.
+Two differences worth knowing before you migrate:
+
+- **Awaited calls need a thread.** Anything that waits on a reply — a client
+  native with a return value, any `Db` call — must run inside
+  `Citizen.CreateThread`. The reply arrives on a later tick, and blocking would
+  stop the loop that delivers it. Calling one outside a thread raises an error
+  that says so; it does not hang.
 - **Lua 5.4, not LuaJIT.** CFX supports both (`lua54`). The interpreter is
   swappable later without touching resource code.
+
+## Database access
+
+The `db` module gives scripts pooled SQL without letting a query touch the tick
+loop. Off by default: a pool with no URL is not a useful default.
+
+```toml
+[modules]
+enable = ["db"]
+
+[db]
+url = "postgres://user:pass@localhost/baston"
+pool_size = 10
+query_timeout_secs = 15
+```
+
+| Driver | URL | Bundle |
+| --- | --- | --- |
+| SQLite | `sqlite:baston.db` | any build with `--features db` |
+| PostgreSQL | `postgres://…` | `--features db-postgres` |
+| MySQL / MariaDB | `mysql://…`, `mariadb://…` | `--features db-mysql` |
+
+`full` carries all three. SQLite needs no server and is the fastest way to try
+the module; PostgreSQL is the recommendation for a new server; MySQL is there
+because the FiveM ecosystem runs on it and a migration should not have to
+rewrite its database first.
+
+Four calls, identical in both languages:
+
+```lua
+CreateThread(function()
+  local rows = Db.Query("SELECT * FROM players WHERE cash > ?", { 1000 })
+  local name = Db.Scalar("SELECT name FROM players WHERE id = ?", { 1 })
+  local n    = Db.Execute("UPDATE players SET cash = ? WHERE id = ?", { 0, 1 })
+  local id   = Db.Insert("INSERT INTO players (name) VALUES (?)", { "Lucas" })
+end)
+```
+
+```javascript
+const rows = await Db.query("SELECT * FROM players WHERE cash > ?", [1000]);
+const name = await Db.scalar("SELECT name FROM players WHERE id = ?", [1]);
+const n    = await Db.execute("UPDATE players SET cash = ? WHERE id = ?", [0, 1]);
+const id   = await Db.insert("INSERT INTO players (name) VALUES (?)", ["Lucas"]);
+```
+
+Notes that matter in practice:
+
+- **Always pass parameters as parameters.** They are bound by the driver, never
+  spliced into the SQL, which is what makes injection impossible.
+- **Queries run off-thread.** In Lua that means inside `CreateThread`; in
+  JavaScript, `await`. One slow statement cannot stall a resource's events.
+- **`Db.Insert` returns `nil` on PostgreSQL**, which reports generated ids
+  through `RETURNING` rather than out of band. Use
+  `Db.Scalar("INSERT … RETURNING id", …)` there.
+- A query with the module off raises an error naming the module. It does not
+  return an empty result set you would read as "no rows".
 
 ## Addons (tier 3)
 

@@ -16,7 +16,7 @@ use crate::error::ScriptError;
 use crate::extensions::{all_extensions, Natives};
 pub use crate::native_state::SharedGameState;
 use crate::native_state::{
-    RuntimeContext, SharedConvars, SharedDeferrals, SharedEntityWorld, SharedHttp,
+    RuntimeContext, SharedConvars, SharedDb, SharedDeferrals, SharedEntityWorld, SharedHttp,
     SharedHttpHandlers, SharedKvp, SharedNet, SharedObservability, SharedPlayers,
     SharedResourceControl, SharedResources, SharedRouting, SharedStateBags, SharedVoice,
     SharedWorldControl,
@@ -270,6 +270,7 @@ impl ScriptRuntime {
             natives.put(SharedResourceControl(Arc::new(crate::NoResourceControl)));
             natives.put(SharedVoice(None));
             natives.put(SharedConvars(Arc::new(DashMap::new())));
+            natives.put(SharedDb(None));
 
             let op_state = js.op_state();
             op_state.borrow_mut().put(Natives(natives));
@@ -330,6 +331,12 @@ impl ScriptRuntime {
     pub fn install_voice(&mut self, voice: crate::extensions::SharedVoice) {
         let op_state = self.js.op_state();
         op_state.borrow_mut().borrow_mut::<Natives>().0.put(voice);
+    }
+
+    /// Install the database pool backing the `db` natives.
+    pub fn install_db(&mut self, db: crate::native_state::SharedDb) {
+        let op_state = self.js.op_state();
+        op_state.borrow_mut().borrow_mut::<Natives>().0.put(db);
     }
 
     /// Execute a resource script (plain script semantics, like FXServer).

@@ -97,7 +97,8 @@ dependency graph. Shipped to operators as prebuilt **bundles**, so that
 selecting a capability never requires the operator to own a Rust toolchain.
 
 Current members: `scripting-js` (deno_core/V8), `scripting-lua` (mlua/Lua 5.4),
-`escrow` (Windows + operator-supplied FXServer).
+`escrow` (Windows + operator-supplied FXServer), and `db` with a driver per
+backend (`sqlite`, `postgres`, `mysql`).
 
 Lua 5.4 rather than LuaJIT because `luajit-src` bootstraps through `minilua`,
 which does not build on every target BASTON ships; CFX supports both (`lua54`),
@@ -135,8 +136,16 @@ answer to a request for it in the core is no.
 The corollary matters as much: a database access layer is *not* Tier 3, because
 implementing connection pooling and non-blocking queries on top of raw sockets
 from a script thread produces a structurally wrong result — this is precisely
-why `oxmysql` exists in the FiveM ecosystem. The driver and pool are Tier 2; the
-ORM, schema and business logic are Tier 3.
+why `oxmysql` exists in the FiveM ecosystem. The driver and pool are Tier 2 and
+ship as the `db` module; the ORM, schema and business logic stay Tier 3.
+
+`db` also settles the MySQL question. The industry has moved to PostgreSQL, but
+the FiveM ecosystem has not: every existing resource speaks MySQL, and a server
+migrating to BASTON arrives with a MariaDB dump. Shipping only PostgreSQL would
+not express a preference, it would refuse the migration. So the module ships
+three drivers — SQLite as the zero-configuration default, PostgreSQL as the
+documented recommendation, MySQL as the compatibility bridge — and the operator
+chooses.
 
 ### Bundles
 
@@ -148,7 +157,7 @@ small set of bundles is built and tested in CI:
 | `lite` | none | zone worker, relay, benchmarking |
 | `js` | `scripting-js` | **default** |
 | `lua` | `scripting-lua` | Lua-only servers |
-| `full` | `scripting-js`, `scripting-lua`, `escrow` | migration and mixed estates |
+| `full` | `scripting-js`, `scripting-lua`, `escrow`, every `db` driver | migration and mixed estates |
 
 This bounds the test matrix at four, instead of 2^n.
 

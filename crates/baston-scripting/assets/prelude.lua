@@ -198,6 +198,51 @@ end
 
 Citizen.InvokeNativeOnClient = InvokeNativeOnClient
 
+-- --------------------------------------------------------------- database ---
+
+--- Pooled SQL access (the `db` module).
+---
+--- Every call must run inside a `Citizen.CreateThread` coroutine: the query
+--- runs on the server's tokio runtime, not on this thread, and the script
+--- yields until the result lands. That is the point — a query never blocks the
+--- runtime, so one slow statement cannot stall a resource's events.
+Db = {}
+
+local function db_await(kind, sql, params)
+    if not coroutine.isyieldable() then
+        error(("Db.%s must run inside Citizen.CreateThread — the query runs "
+            .. "off-thread and the result arrives on a later tick"):format(kind), 3)
+    end
+    local id, err = host.db_submit(kind, sql, json_encode(params or {}))
+    if err then
+        error("Db." .. kind .. ": " .. err, 3)
+    end
+    while true do
+        local ready, raw = host.db_collect(id)
+        if ready then
+            local decoded = json_decode(raw)
+            if type(decoded) == "table" and decoded.__error then
+                error("Db." .. kind .. ": " .. tostring(decoded.__error), 3)
+            end
+            return decoded
+        end
+        coroutine.yield(0)
+    end
+end
+
+--- Every matching row, as a list of tables.
+function Db.Query(sql, params) return db_await("rows", sql, params) end
+
+--- The number of rows the statement affected.
+function Db.Execute(sql, params) return db_await("execute", sql, params) end
+
+--- The first column of the first row, or nil.
+function Db.Scalar(sql, params) return db_await("scalar", sql, params) end
+
+--- The id the insert generated. Nil on PostgreSQL, which reports ids through
+--- `RETURNING` rather than out of band.
+function Db.Insert(sql, params) return db_await("insert", sql, params) end
+
 -- --------------------------------------------------- zone transfer (mesh) ---
 
 local zone_transfer_callbacks = {}

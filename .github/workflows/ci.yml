@@ -43,7 +43,7 @@ jobs:
           # `escrow` is Windows-only at runtime but compiles everywhere; this
           # job proves the feature combination, not the runtime path.
           - bundle: full
-            features: "--features scripting-lua,escrow"
+            features: "--features scripting-lua,escrow,db-postgres,db-mysql"
     name: bundle (${{ matrix.bundle }})
     steps:
       - uses: actions/checkout@v4
@@ -55,6 +55,9 @@ jobs:
           key: bundle-${{ matrix.bundle }}
       - name: cargo test
         run: cargo test -p baston-gateway -p baston-scripting ${{ matrix.features }}
+      - name: cargo test (db)
+        if: matrix.bundle == 'full'
+        run: cargo test -p baston-db --features sqlite,postgres,mysql
       - name: cargo clippy
         run: cargo clippy -p baston-gateway --all-targets ${{ matrix.features }} -- -D warnings
       - name: report what the binary contains

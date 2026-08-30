@@ -48,7 +48,9 @@ pub use http_bridge::{
 pub use http_handler::{HttpHandlerRegistry, ScriptHttpResponse, HTTP_REQUEST_EVENT};
 pub use kvp::KvpStore;
 pub use native_state::SharedGameState;
-pub use native_state::{NativeState, RuntimeContext, SharedVoice, VoiceControl};
+pub use native_state::{
+    DbAccess, NativeState, RuntimeContext, SharedDb, SharedVoice, VoiceControl,
+};
 pub use net_bridge::{NetBridge, NetOutbound};
 pub use observability::{
     DispatchKind, HandlerPerfStats, Observability, ProfilerRecordOptions, ProfilerStatus,

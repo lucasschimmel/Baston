@@ -197,6 +197,30 @@ async fn main() -> anyhow::Result<()> {
     if let Some(voice) = &voice {
         script_host.set_voice_control(Arc::new(GatewayVoice(voice.clone())));
     }
+    // The database pool backing the `Db` surface in both engines. Connected
+    // before the first resource runs: a resource routinely queries from
+    // onResourceStart, and a pool that appears later would fail those calls
+    // for no reason the operator could see.
+    #[cfg(feature = "db")]
+    if modules.is_enabled(ModuleId::Db) {
+        let db = baston_db::Db::connect(&config.db).await?;
+        tracing::info!(target: "db", driver = %db.driver(), "db module ready");
+        // Results nobody collected would otherwise accumulate one entry per
+        // abandoned query, for the process lifetime.
+        {
+            let db = db.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    interval.tick().await;
+                    db.sweep();
+                }
+            });
+        }
+        script_host.set_db(Arc::new(baston_gateway::db::GatewayDb(db)));
+    }
+
     // Resource KVP is durable storage from a script's point of view, so it has
     // to be loaded before the first resource runs and swept afterwards: a
     // deferred write must not sit in memory until a crash takes it.
