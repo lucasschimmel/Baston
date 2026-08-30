@@ -55,8 +55,8 @@ static SIDECAR_INSTANCE: AtomicU64 = AtomicU64::new(0);
 pub const SHIM_RESOURCE: &str = "baston-cfx-shim";
 
 /// The shim source, embedded so the Lua stays in lockstep with this transport.
-const SHIM_MANIFEST: &str = include_str!("../../../resources/baston-cfx-shim/fxmanifest.lua");
-const SHIM_SERVER: &str = include_str!("../../../resources/baston-cfx-shim/server.lua");
+const SHIM_MANIFEST: &str = include_str!("../assets/baston-cfx-shim/fxmanifest.lua");
+const SHIM_SERVER: &str = include_str!("../assets/baston-cfx-shim/server.lua");
 
 /// Public-list metadata owned and transmitted by the official FXServer broker.
 #[derive(Debug, Clone)]

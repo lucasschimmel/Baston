@@ -323,7 +323,7 @@ async fn spawn_sequence_end_to_end() {
     // Load the real axiom-core server script from the repo.
     let server_js = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../resources/axiom-core/dist/server/index.js"),
+            .join("../../examples/resources/axiom-core/dist/server/index.js"),
     )
     .unwrap();
     // Observe onCharacterSpawned from Rust via a marker event.

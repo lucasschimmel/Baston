@@ -35,7 +35,7 @@ pubkey_url = "https://lambda.fivem.net/api/ticket/pubkey"
 http_timeout_secs = 5
 
 [resources]
-path = "resources"
+path = "examples/resources"
 
 [udp]
 # ENet game transport. Defaults to server.port (FiveM muxes TCP+UDP on one port).

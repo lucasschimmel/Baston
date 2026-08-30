@@ -5,7 +5,6 @@
 //! heartbeat, ZoneService gRPC). Clients never connect here — the Gateway
 //! is the only FiveM-facing process; state flows over NATS, control over gRPC.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use baston_config::BastonConfig;
@@ -114,8 +113,8 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(windows)]
     raise_timer_resolution();
 
-    let config_path = std::env::var("BASTON_CONFIG").unwrap_or_else(|_| "baston.toml".into());
-    let config = BastonConfig::load(Path::new(&config_path))?;
+    let config_path = BastonConfig::discover();
+    let config = BastonConfig::load(&config_path)?;
     let zone_id = config.nats.zone_id.clone();
 
     let bounds_str = config

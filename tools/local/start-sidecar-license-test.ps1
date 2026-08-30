@@ -64,7 +64,7 @@ name = "BASTON Sidecar License Test $Case"
 max_players = 64
 
 [resources]
-path = "resources"
+path = "examples/resources"
 
 [nats]
 url = "nats://127.0.0.1:4222"

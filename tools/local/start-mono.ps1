@@ -5,6 +5,6 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 Set-Location $Root
-$env:BASTON_CONFIG = "baston.mono.local.toml"
+$env:BASTON_CONFIG = "config/baston.mono.local.toml"
 $env:RUST_LOG = $Log
 & "C:\Users\osiri\.cache\baston-target\release\baston-gateway.exe"

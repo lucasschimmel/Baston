@@ -1,6 +1,5 @@
 //! BASTON gateway binary — Phase A runs gateway + zone in one process.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use baston_config::BastonConfig;
@@ -108,11 +107,14 @@ async fn main() -> anyhow::Result<()> {
     // without booting the server, so it stays usable on a host whose config is
     // broken — which is exactly when the question gets asked.
     if std::env::args().any(|arg| arg == "--modules") {
-        let config_path = std::env::var("BASTON_CONFIG").unwrap_or_else(|_| "baston.toml".into());
-        let set = match BastonConfig::load(Path::new(&config_path)) {
+        let config_path = BastonConfig::discover();
+        let set = match BastonConfig::load(&config_path) {
             Ok(config) => config.enabled_modules,
             Err(e) => {
-                eprintln!("note: {config_path} did not load ({e});\n      showing build defaults instead.\n");
+                eprintln!(
+                    "note: {} did not load ({e});\n      showing build defaults instead.\n",
+                    config_path.display()
+                );
                 ModuleSet::defaults()
             }
         };
@@ -136,8 +138,8 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(windows)]
     raise_timer_resolution();
 
-    let config_path = std::env::var("BASTON_CONFIG").unwrap_or_else(|_| "baston.toml".into());
-    let mut config = BastonConfig::load(Path::new(&config_path))?;
+    let config_path = BastonConfig::discover();
+    let mut config = BastonConfig::load(&config_path)?;
     let modules = config.enabled_modules;
     print_module_line(modules);
     // Settings whose module is off do nothing. Saying so at boot is the whole

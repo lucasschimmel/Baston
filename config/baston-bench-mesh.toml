@@ -6,7 +6,7 @@ port = 30120
 max_players = 2500
 
 [resources]
-path = "resources"
+path = "examples/resources"
 
 [udp]
 poll_interval_ms = 2

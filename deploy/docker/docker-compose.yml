@@ -1,5 +1,10 @@
 # BASTON Phase D — dev environment: gateway + 2 zones + NATS + monitoring.
 # The compose file is the source of truth for the multi-zone dev setup.
+#
+# Paths are relative to this file (deploy/docker/); the build context is the
+# repository root, because the Rust build needs the whole workspace.
+#
+#   docker compose -f deploy/docker/docker-compose.yml up
 services:
   nats:
     image: nats:2.11-alpine
@@ -15,8 +20,8 @@ services:
 
   gateway:
     build:
-      context: .
-      dockerfile: Dockerfile.gateway
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.gateway
     ports:
       - "30120:30120"       # FiveM TCP+UDP game port
       - "30120:30120/udp"
@@ -30,16 +35,16 @@ services:
       BASTON_ADMIN_TOKEN: "${BASTON_ADMIN_TOKEN:-dev-admin-token}"
       RUST_LOG: "info"
     volumes:
-      - ./resources:/app/resources
-      - ./baston.docker.toml:/app/baston.toml:ro
+      - ../../examples/resources:/app/resources
+      - ../../config/baston.docker.toml:/app/baston.toml:ro
     depends_on:
       nats:
         condition: service_healthy
 
   zone-a:
     build:
-      context: .
-      dockerfile: Dockerfile.zone
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.zone
     environment:
       ZONE_ID: "zone-a"
       ZONE_BOUNDS: "-4000,-4000,0,4000"
@@ -49,15 +54,15 @@ services:
       ZONE_PUBLIC_GRPC_ADDR: "zone-a:50051"
       RUST_LOG: "info"
     volumes:
-      - ./resources:/app/resources
-      - ./baston.docker.toml:/app/baston.toml:ro
+      - ../../examples/resources:/app/resources
+      - ../../config/baston.docker.toml:/app/baston.toml:ro
     depends_on:
       - gateway
 
   zone-b:
     build:
-      context: .
-      dockerfile: Dockerfile.zone
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.zone
     environment:
       ZONE_ID: "zone-b"
       ZONE_BOUNDS: "0,-4000,4000,4000"
@@ -67,16 +72,16 @@ services:
       ZONE_PUBLIC_GRPC_ADDR: "zone-b:50051"
       RUST_LOG: "info"
     volumes:
-      - ./resources:/app/resources
-      - ./baston.docker.toml:/app/baston.toml:ro
+      - ../../examples/resources:/app/resources
+      - ../../config/baston.docker.toml:/app/baston.toml:ro
     depends_on:
       - gateway
 
   prometheus:
     image: prom/prometheus:v3.4.0
     volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
     ports:
       - "9091:9090"
     extra_hosts:
@@ -88,9 +93,9 @@ services:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
     volumes:
-      - ./monitoring/grafana-datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
-      - ./monitoring/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/baston.yml:ro
-      - ./monitoring/dashboards:/var/lib/grafana/dashboards:ro
+      - ../monitoring/grafana-datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
+      - ../monitoring/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/baston.yml:ro
+      - ../monitoring/dashboards:/var/lib/grafana/dashboards:ro
     ports:
       - "3001:3000"
     depends_on:

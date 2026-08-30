@@ -1380,6 +1380,29 @@ impl BastonConfig {
         Ok(config)
     }
 
+    /// Where `load` looks when `BASTON_CONFIG` is not set, in order.
+    ///
+    /// `config/baston.toml` is where the repository keeps it; a bare
+    /// `baston.toml` next to the binary is what a deployed server usually has.
+    /// Both work, so neither layout has to know about the other.
+    pub const SEARCH_PATHS: &'static [&'static str] = &["baston.toml", "config/baston.toml"];
+
+    /// The configuration file to load: `BASTON_CONFIG` if set, else the first
+    /// of [`Self::SEARCH_PATHS`] that exists.
+    ///
+    /// Returns the last candidate when none exist, so the caller's error names
+    /// a concrete path instead of reporting that nothing was found anywhere.
+    pub fn discover() -> PathBuf {
+        if let Ok(path) = std::env::var("BASTON_CONFIG") {
+            return PathBuf::from(path);
+        }
+        Self::SEARCH_PATHS
+            .iter()
+            .map(PathBuf::from)
+            .find(|path| path.is_file())
+            .unwrap_or_else(|| PathBuf::from(Self::SEARCH_PATHS[Self::SEARCH_PATHS.len() - 1]))
+    }
+
     /// Parse a configuration document, including module resolution.
     ///
     /// `load` reads a file; this is the same pipeline over an in-memory
