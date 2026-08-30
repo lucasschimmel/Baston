@@ -18,7 +18,13 @@ mod http_handler;
 mod kvp;
 #[cfg(feature = "lua")]
 pub mod lua;
+// The natives and the state behind them exist to serve a scripting engine. The
+// `lite` bundle compiles none, so nothing calls them. They are still built —
+// the linker drops what is unreachable — rather than cfg-fragmented item by
+// item, which would make the neutral layer harder to read than it is useful.
+#[cfg_attr(not(any(feature = "js", feature = "lua")), allow(dead_code))]
 mod native_state;
+#[cfg_attr(not(any(feature = "js", feature = "lua")), allow(dead_code))]
 mod natives;
 pub mod net_bridge;
 pub mod observability;

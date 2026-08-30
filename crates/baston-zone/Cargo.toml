@@ -13,7 +13,7 @@ thiserror = { workspace = true }
 notify = { workspace = true }
 baston-core = { workspace = true }
 baston-protocol = { workspace = true }
-baston-scripting = { workspace = true }
+baston-scripting = { workspace = true, default-features = false }
 baston-modules = { workspace = true }
 baston-config = { workspace = true }
 dashmap = { workspace = true }
@@ -31,6 +31,12 @@ metrics-exporter-prometheus = { workspace = true }
 baston-escrow-plugin = { workspace = true, optional = true }
 
 [features]
+default = ["scripting-js"]
+# Tier 2 capabilities (ADR-002), forwarded from whichever binary links this
+# crate. baston-scripting is pulled with default-features off so a `lua` build
+# never compiles V8 by accident through this edge.
+scripting-js = ["baston-scripting/js"]
+scripting-lua = ["baston-scripting/lua"]
 # Optional CFX Asset Escrow support. Off by default so the core never pulls the
 # plugin. Enable on a Windows build that needs to run escrowed resources:
 #   cargo build -p baston-zone --features escrow

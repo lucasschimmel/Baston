@@ -32,6 +32,10 @@ pub struct ScriptSource {
 /// Events queued by JS `TriggerEvent` during a dispatch, to re-broadcast.
 type QueuedEvents = Vec<(String, String)>;
 
+// The `lite` bundle compiles no engine, so nothing consumes these — the
+// commands still describe the protocol every engine implements, and deleting
+// them per-bundle would fragment it.
+#[cfg_attr(not(any(feature = "js", feature = "lua")), allow(dead_code))]
 enum RuntimeCommand {
     ExecuteScripts {
         scripts: Vec<ScriptSource>,
@@ -758,6 +762,8 @@ impl ScriptHost {
     }
 }
 
+// Only an engine reads these; the `lite` bundle compiles none.
+#[cfg_attr(not(any(feature = "js", feature = "lua")), allow(dead_code))]
 struct RuntimeThreadParams<'a> {
     resource_name: &'a str,
     /// Chosen from the resource's script extensions before the thread starts,
@@ -782,7 +788,26 @@ struct RuntimeThreadParams<'a> {
     voice: Option<Arc<dyn crate::native_state::VoiceControl>>,
 }
 
-/// Spawn the dedicated isolate thread for one resource.
+/// The `lite` bundle has no scripting engine at all.
+///
+/// Unreachable in practice — [`crate::engine::select`] refuses every resource
+/// before a thread is ever spawned — but stating it here keeps the real
+/// function out of a build that could not use it, instead of leaving a body
+/// full of unused bindings.
+#[cfg(not(any(feature = "js", feature = "lua")))]
+fn spawn_runtime_thread(
+    params: RuntimeThreadParams<'_>,
+) -> Result<ResourceRuntimeHandle, ScriptError> {
+    Err(ScriptError::RuntimeInit {
+        resource: params.resource_name.to_owned(),
+        message: "this build has no scripting runtime\n  \
+                  → the `lite` bundle runs no resources; use the js, lua or full bundle"
+            .to_owned(),
+    })
+}
+
+/// Spawn the dedicated runtime thread for one resource.
+#[cfg(any(feature = "js", feature = "lua"))]
 fn spawn_runtime_thread(
     params: RuntimeThreadParams<'_>,
 ) -> Result<ResourceRuntimeHandle, ScriptError> {
