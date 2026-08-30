@@ -15,15 +15,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: 22
-          cache: pnpm
-      - name: pnpm install
-        run: pnpm install --frozen-lockfile
+          bun-version: latest
+      - name: bun install
+        run: bun install --frozen-lockfile
       - name: build the docs site
-        run: pnpm docs:build
+        run: bun run docs:build
 
   check:
     runs-on: ubuntu-latest

@@ -78,8 +78,8 @@ Gateway, two zones, NATS, Prometheus and Grafana. Details in
 The Markdown in `docs/` is the source of truth; `apps/docs` renders it.
 
 ```bash
-pnpm install
-pnpm --filter @baston/docs dev
+bun install
+bun run docs:dev
 ```
 
 ## Contributing

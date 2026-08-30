@@ -5,10 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "astro dev",
-    "build": "astro build && node scripts/check-links.mjs",
+    "build": "astro build",
     "preview": "astro preview",
-    "check": "astro check",
-    "check:links": "node scripts/check-links.mjs"
+    "check": "astro check"
   },
   "dependencies": {
     "@astrojs/starlight": "^0.36.0",

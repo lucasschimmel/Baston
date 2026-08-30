@@ -80,7 +80,7 @@ The crate map is in [Crates](crates.md).
 
 ## Building
 
-Two independent toolchains. Cargo builds the server; pnpm builds the docs site.
+Two independent toolchains. Cargo builds the server; bun builds the docs site.
 Neither needs the other.
 
 ```bash

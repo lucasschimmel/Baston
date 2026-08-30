@@ -1,16 +1,16 @@
 {
   "name": "baston",
   "private": true,
-  "packageManager": "pnpm@10.12.4",
+  "workspaces": [
+    "apps/*"
+  ],
   "scripts": {
-    "docs:dev": "pnpm --filter @baston/docs dev",
-    "docs:build": "pnpm --filter @baston/docs build",
-    "docs:preview": "pnpm --filter @baston/docs preview"
+    "docs:dev": "cd apps/docs && astro dev",
+    "docs:build": "cd apps/docs && astro build",
+    "docs:preview": "cd apps/docs && astro preview"
   },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "esbuild",
-      "sharp"
-    ]
-  }
+  "trustedDependencies": [
+    "esbuild",
+    "sharp"
+  ]
 }

@@ -158,7 +158,7 @@ touching the JS path.
 ## The documentation build is a test
 
 ```bash
-pnpm docs:build
+bun run docs:build
 ```
 
 It fails on any broken internal documentation link. If you move or rename a

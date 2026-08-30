@@ -16,7 +16,7 @@ something:
 | a sample or fixture resource | `examples/resources/` |
 | a developer script | `tools/` |
 
-Two independent toolchains: Cargo builds the server, pnpm builds the website.
+Two independent toolchains: Cargo builds the server, bun builds the website.
 Neither needs the other.
 
 ```sh
@@ -24,8 +24,8 @@ cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 
-pnpm install
-pnpm docs:build          # also fails on any broken documentation link
+bun install
+bun run docs:build          # also fails on any broken documentation link
 ```
 
 An asset a crate compiles into itself belongs to that crate — see

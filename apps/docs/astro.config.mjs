@@ -3,6 +3,7 @@ import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
 import { fileURLToPath } from "node:url";
 
+import { checkLinks } from "./src/plugins/check-links.mjs";
 import { rewriteDocLinks } from "./src/plugins/rewrite-doc-links.mjs";
 
 const DOCS_ROOT = fileURLToPath(new URL("../../docs", import.meta.url));
@@ -121,5 +122,9 @@ export default defineConfig({
       lastUpdated: true,
       pagination: true,
     }),
+    // Declared last on purpose: `astro:build:done` hooks fire in this
+    // order, and Starlight's writes the sitemap and search index that the
+    // check would otherwise report as missing.
+    checkLinks(),
   ],
 });

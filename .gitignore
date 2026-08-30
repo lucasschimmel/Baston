@@ -25,4 +25,3 @@ baston-live-test.log
 node_modules/
 apps/**/dist/
 apps/**/.astro/
-.pnpm-store/

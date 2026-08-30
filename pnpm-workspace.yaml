@@ -1,5 +1,0 @@
-# The Node half of the monorepo. The Rust half is the Cargo workspace in
-# Cargo.toml, and the two are independent on purpose: building the server never
-# needs Node, and building the website never needs a Rust toolchain.
-packages:
-  - "apps/*"
