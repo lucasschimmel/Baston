@@ -639,3 +639,42 @@ fn per_client_counters_answer_for_the_right_client() {
     assert!(gs.client_scope_len(99).is_none());
     assert!(gs.client_frame_index(99).is_none());
 }
+
+#[test]
+fn a_client_create_decodes_its_creation_nodes() {
+    // Regression: `apply_create` parsed the sync tree against the entity's
+    // *sync* blob, which it had just set empty, instead of the create blob.
+    // The creation nodes — model, population type, a ped's seat — appear only
+    // in a create record, and no later sync carries them, so a client-created
+    // vehicle kept `model: None` for its whole life. Server-authored entities
+    // masked it by setting `model` directly.
+    use baston_protocol::rage::sync_write::{author_vehicle, write_sync_tree};
+
+    const MODEL: u32 = 0x3C4B_A96B;
+
+    let blob = write_sync_tree(
+        NetObjEntityType::Automobile,
+        true,
+        false,
+        GameBuild::default(),
+        &author_vehicle(MODEL, [100.0, 200.0, 30.0], 0.0, 0xABCD),
+    )
+    .expect("the create tree is writable");
+
+    let mut gs = ServerGameState::new(true, false);
+    let payload = build_clone_payload(|b| {
+        write_inbound_create(b, 300, 0x2222, NetObjEntityType::Automobile, &blob);
+    });
+    let outcome = gs.ingest_clone_payload(9, &payload);
+    assert_eq!(outcome.creates, 1);
+
+    let entity = gs.entity(300).expect("entity created");
+    assert_eq!(
+        entity.model,
+        Some(MODEL),
+        "the create blob must be parsed, not the empty sync blob"
+    );
+    // The blob itself is still retained, for replay to other clients.
+    assert_eq!(entity.create_data, blob);
+    assert!(entity.data.is_empty(), "a create leaves no sync delta");
+}
