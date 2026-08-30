@@ -7,8 +7,10 @@
 //!   HTTP gateway.
 
 mod deferrals;
+mod engine;
 mod entity_world;
 mod error;
+#[cfg(feature = "js")]
 mod extensions;
 mod host;
 mod http_bridge;
@@ -22,6 +24,7 @@ pub mod net_bridge;
 pub mod observability;
 mod resource_control;
 mod resource_registry;
+#[cfg(feature = "js")]
 mod runtime;
 mod state_bag;
 
@@ -29,6 +32,7 @@ pub use deferrals::{DeferralOutcome, DeferralRegistry};
 pub use entity_world::{
     EntitySummary, EntityWorldView, NoWorldControl, ScriptEntityType, WorldCommand, WorldControl,
 };
+pub use engine::Engine;
 pub use error::ScriptError;
 pub use native_state::{NativeState, RuntimeContext, SharedVoice, VoiceControl};
 pub use host::{ScriptHost, ScriptSource};
@@ -47,7 +51,9 @@ pub use resource_control::{
     NoResourceControl, QueuedResourceControl, ResourceCommand, ResourceControl,
 };
 pub use resource_registry::{ResourceRegistry, ScriptResourceState};
-pub use runtime::{ScriptRuntime, SharedGameState};
+#[cfg(feature = "js")]
+pub use runtime::ScriptRuntime;
+pub use native_state::SharedGameState;
 pub use state_bag::{
     entity_from_state_bag_name, entity_state_bag_name, player_from_state_bag_name,
     player_state_bag_name, InMemoryRoutingControl, RoutingControl, RoutingLockdownMode,

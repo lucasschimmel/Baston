@@ -261,7 +261,7 @@ impl LuaRuntime {
         state.put(SharedResources(resources));
     }
 
-    pub fn install_shared_game_state(&mut self, shared: crate::runtime::SharedGameState) {
+    pub fn install_shared_game_state(&mut self, shared: crate::native_state::SharedGameState) {
         let mut state = self.state.borrow_mut();
         state.put(SharedStateBags(shared.state_bags));
         state.put(SharedRouting(shared.routing));

@@ -30,7 +30,7 @@ use crate::natives::{client, server};
 // crate's public surface — keep their existing paths.
 pub use crate::native_state::{
     RuntimeContext, SharedConvars, SharedDeferrals,
-    SharedHttpHandlers, SharedNet, SharedObservability, SharedPlayers, SharedResources, SharedStateBags, SharedVoice, VoiceControl,
+    SharedHttpHandlers, SharedNet, SharedObservability, SharedPlayers, SharedResources, SharedStateBags, SharedVoice,
 };
 
 /// The engine-neutral [`NativeState`](crate::native_state::NativeState) for

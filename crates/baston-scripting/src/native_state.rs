@@ -127,8 +127,28 @@ impl RuntimeContext {
     }
 }
 
+/// The authoritative surfaces every resource isolate shares, installed once
+/// per isolate before any resource script runs.
+///
+/// All of it is cheap to clone (`Arc` handles or handles over one) — the host
+/// builds a fresh value per resource thread.
+pub struct SharedGameState {
+    pub state_bags: StateBagStore,
+    pub routing: Arc<dyn RoutingControl>,
+    pub entity_world: Arc<crate::EntityWorldView>,
+    pub world_control: Arc<dyn crate::WorldControl>,
+    pub kvp: Arc<crate::KvpStore>,
+    /// `None` until a composition root wires an outbound HTTP worker.
+    pub http: Option<crate::HttpBridge>,
+    pub http_handlers: Arc<crate::HttpHandlerRegistry>,
+    pub resource_control: Arc<dyn crate::ResourceControl>,
+}
+
 /// Shared deferral registry handle (one per process, cloned into every
 /// runtime).
+// Read by the JS deferral ops. Installed on both engines regardless: the
+// Lua prelude will expose deferrals against the same registry.
+#[cfg_attr(not(feature = "js"), allow(dead_code))]
 pub struct SharedDeferrals(pub Arc<DeferralRegistry>);
 
 /// Shared player directory handle (owned by the gateway, read by player
@@ -183,6 +203,7 @@ pub struct SharedResourceControl(pub Arc<dyn crate::ResourceControl>);
 /// Inbound HTTP handler registry (`SetHttpHandler`). Shared with the gateway,
 /// which owns the route that feeds it.
 #[derive(Clone)]
+#[cfg_attr(not(feature = "js"), allow(dead_code))]
 pub struct SharedHttpHandlers(pub Arc<crate::HttpHandlerRegistry>);
 
 /// Server-side voice control surface backing the `MUMBLE_*` natives. The

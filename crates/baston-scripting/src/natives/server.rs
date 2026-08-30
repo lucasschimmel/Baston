@@ -71,6 +71,10 @@ pub(super) fn json_arg_bool(args: &[serde_json::Value], index: usize) -> bool {
 }
 
 /// The shared CFX natives (KVP, state bags, convars, resources).
+///
+/// The JS polyfill knows which dispatcher owns a name and calls this one
+/// directly; Lua cannot, and goes through [`cfx_native`].
+#[cfg(feature = "js")]
 pub(crate) fn cfx_shared_native(
     state: &mut NativeState,
     name: String,
@@ -88,6 +92,7 @@ pub(crate) fn cfx_shared_native(
 /// A caller that does not already know whether a name is shared or
 /// server-only — the Lua global resolver, for one — asks here. The shared set
 /// is tried first because it is the one whose names are exact.
+#[cfg(feature = "lua")]
 pub(crate) fn cfx_native(
     state: &mut NativeState,
     name: String,

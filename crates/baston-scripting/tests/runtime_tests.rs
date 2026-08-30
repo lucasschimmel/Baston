@@ -1,5 +1,9 @@
 //! Milestone A2 exit-criterion tests: FiveM-style JS runs in a deno_core
 //! isolate through the ScriptHost, including the playerConnecting flow.
+// These load JavaScript resources, so they only exist in a bundle that
+// contains the JS runtime. The Lua path has its own tests in src/lua.rs.
+#![cfg(feature = "js")]
+
 
 use std::sync::Arc;
 use std::time::Duration;

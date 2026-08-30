@@ -1,5 +1,6 @@
 //! Server → client native dispatch (`op_invoke_native_on_client`).
 
+#[cfg(feature = "js")]
 use std::time::Instant;
 
 
@@ -14,6 +15,9 @@ use std::time::Instant;
 /// legitimate results aren't dropped. Removing the stall entirely needs the
 /// host loop to drive dispatches concurrently on the shared isolate (tracked
 /// separately — it's a redesign of the execution model, not a local change).
+// Gap: the Lua prelude does not expose client-native dispatch yet, so this
+// path exists only where the JS polyfill can reach it. See docs/modules.md.
+#[cfg(feature = "js")]
 const NATIVE_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1000);
 
 /// Queue one native call on the net bridge, addressed to `source`'s client.
@@ -53,6 +57,7 @@ pub(super) fn queue_native_call(
 /// Takes the three services it needs by value rather than borrowing
 /// [`NativeState`]: the call awaits a client round trip, and holding a borrow
 /// across that await would pin the runtime's state for the whole flight.
+#[cfg(feature = "js")]
 pub(crate) async fn invoke_native_on_client(
     net: crate::net_bridge::NetBridge,
     observability: std::sync::Arc<crate::observability::Observability>,

@@ -14,6 +14,7 @@ use dashmap::DashMap;
 use crate::deferrals::DeferralRegistry;
 use crate::error::ScriptError;
 use crate::extensions::{all_extensions, Natives};
+pub use crate::native_state::SharedGameState;
 use crate::native_state::{
     RuntimeContext, SharedConvars, SharedDeferrals, SharedEntityWorld, SharedHttp,
     SharedHttpHandlers, SharedKvp, SharedNet, SharedObservability, SharedPlayers,
@@ -23,7 +24,7 @@ use crate::native_state::{
 use crate::net_bridge::NetBridge;
 use crate::observability::{DispatchKind, DispatchMeasurement, Observability, V8MemoryStats};
 use crate::resource_registry::ResourceRegistry;
-use crate::{InMemoryRoutingControl, RoutingControl, StateBagStore};
+use crate::{InMemoryRoutingControl, StateBagStore};
 
 const BOOTSTRAP_JS: &str = include_str!("../assets/bootstrap.js");
 
@@ -191,23 +192,6 @@ pub struct DispatchMeta {
 pub struct DispatchTicket {
     pub started: Result<Option<v8::Global<v8::Value>>, ScriptError>,
     pub meta: DispatchMeta,
-}
-
-/// The authoritative surfaces every resource isolate shares, installed once
-/// per isolate before any resource script runs.
-///
-/// All of it is cheap to clone (`Arc` handles or handles over one) — the host
-/// builds a fresh value per resource thread.
-pub struct SharedGameState {
-    pub state_bags: StateBagStore,
-    pub routing: Arc<dyn RoutingControl>,
-    pub entity_world: Arc<crate::EntityWorldView>,
-    pub world_control: Arc<dyn crate::WorldControl>,
-    pub kvp: Arc<crate::KvpStore>,
-    /// `None` until a composition root wires an outbound HTTP worker.
-    pub http: Option<crate::HttpBridge>,
-    pub http_handlers: Arc<crate::HttpHandlerRegistry>,
-    pub resource_control: Arc<dyn crate::ResourceControl>,
 }
 
 /// A single resource's V8 isolate with the BASTON extensions and bootstrap

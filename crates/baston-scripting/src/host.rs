@@ -17,6 +17,7 @@ use crate::deferrals::DeferralRegistry;
 use crate::error::ScriptError;
 use crate::observability::Observability;
 use crate::resource_registry::ResourceRegistry;
+#[cfg(feature = "js")]
 use crate::runtime::ScriptRuntime;
 use crate::{InMemoryRoutingControl, RoutingControl, StateBagChange, StateBagStore};
 
@@ -60,6 +61,8 @@ enum RuntimeCommand {
         reply: oneshot::Sender<Result<QueuedEvents, ScriptError>>,
     },
     CollectTransferState {
+        // Only the JS collector reads it; Lua has no transfer-state surface.
+        #[cfg_attr(not(feature = "js"), allow(dead_code))]
         source: u32,
         reply: oneshot::Sender<Result<Option<String>, ScriptError>>,
     },
@@ -136,7 +139,7 @@ pub struct ScriptHost {
     http_handlers: Arc<crate::HttpHandlerRegistry>,
     started_at: Instant,
     cross_zone: Arc<std::sync::RwLock<Option<CrossZonePublisher>>>,
-    voice: Arc<std::sync::RwLock<Option<Arc<dyn crate::extensions::VoiceControl>>>>,
+    voice: Arc<std::sync::RwLock<Option<Arc<dyn crate::native_state::VoiceControl>>>>,
 }
 
 /// Lifecycle/internal events that never leave the local zone.
@@ -214,7 +217,7 @@ impl ScriptHost {
 
     /// Install the voice control surface (`MUMBLE_*` natives). Applies to
     /// resources loaded afterwards — call before `load_resource`.
-    pub fn set_voice_control(&self, voice: Arc<dyn crate::extensions::VoiceControl>) {
+    pub fn set_voice_control(&self, voice: Arc<dyn crate::native_state::VoiceControl>) {
         *self.voice.write().unwrap_or_else(|e| e.into_inner()) = Some(voice);
     }
 
@@ -464,8 +467,28 @@ impl ScriptHost {
         // if it still calls SetHttpHandler.
         self.http_handlers.unregister(name);
 
+        // A client-only or files-only resource has nothing to run here.
+        // Spawning a runtime for it would cost a V8 isolate (or a Lua state)
+        // per such resource and buy nothing — and a server with a large
+        // streaming set has many of them.
+        if scripts.is_empty() {
+            tracing::info!(target: "scripting", resource = %name,
+                "no server scripts — no runtime spawned");
+            self.trigger_event(
+                "onResourceStart",
+                std::slice::from_ref(&serde_json::Value::String(name.to_owned())),
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let script_paths: Vec<String> = scripts.iter().map(|s| s.path.clone()).collect();
+        let engine = crate::engine::select(name, &script_paths)?;
+        tracing::info!(target: "scripting", resource = %name, %engine, "runtime selected");
+
         let handle = spawn_runtime_thread(RuntimeThreadParams {
             resource_name: name,
+            engine,
             started_at: self.started_at,
             deferrals: Arc::clone(&self.deferrals),
             players: Arc::clone(&self.players),
@@ -737,6 +760,10 @@ impl ScriptHost {
 
 struct RuntimeThreadParams<'a> {
     resource_name: &'a str,
+    /// Chosen from the resource's script extensions before the thread starts,
+    /// so an unsupported resource fails at load with a bundle hint rather than
+    /// after spawning a runtime it cannot use.
+    engine: crate::engine::Engine,
     started_at: Instant,
     deferrals: Arc<DeferralRegistry>,
     players: Arc<PlayerDirectory>,
@@ -752,7 +779,7 @@ struct RuntimeThreadParams<'a> {
     http: Option<crate::HttpBridge>,
     http_handlers: Arc<crate::HttpHandlerRegistry>,
     resource_control: Arc<dyn crate::ResourceControl>,
-    voice: Option<Arc<dyn crate::extensions::VoiceControl>>,
+    voice: Option<Arc<dyn crate::native_state::VoiceControl>>,
 }
 
 /// Spawn the dedicated isolate thread for one resource.
@@ -762,6 +789,7 @@ fn spawn_runtime_thread(
     let (tx, rx) = mpsc::channel::<RuntimeCommand>(64);
     let name = params.resource_name.to_owned();
     let RuntimeThreadParams {
+        engine,
         started_at,
         deferrals,
         players,
@@ -797,17 +825,7 @@ fn spawn_runtime_thread(
                     return;
                 }
             };
-            let mut runtime =
-                match ScriptRuntime::new(&name, started_at, deferrals, players, net, observability)
-                {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let _ = init_tx.send(Err(e));
-                        return;
-                    }
-                };
-            runtime.install_server_state(convars, resources);
-            runtime.install_shared_game_state(crate::runtime::SharedGameState {
+            let shared_game_state = crate::native_state::SharedGameState {
                 state_bags,
                 routing,
                 entity_world,
@@ -816,12 +834,71 @@ fn spawn_runtime_thread(
                 http,
                 http_handlers,
                 resource_control,
-            });
-            runtime.install_voice(crate::extensions::SharedVoice(voice));
-            let _ = init_tx.send(Ok(()));
+            };
 
-            let local = tokio::task::LocalSet::new();
-            local.block_on(&tokio_rt, run_isolate_loop(runtime, rx));
+            // Each engine drives its own loop. The V8 loop is intricate
+            // (tickets, settle tasks, an event-loop pump); Lua has no event
+            // loop of its own and only needs a tick. Keeping them separate is
+            // what stops one engine's complexity from taxing the other.
+            match engine {
+                #[cfg(feature = "js")]
+                crate::engine::Engine::Js => {
+                    let mut runtime = match ScriptRuntime::new(
+                        &name,
+                        started_at,
+                        deferrals,
+                        players,
+                        net,
+                        observability,
+                    ) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let _ = init_tx.send(Err(e));
+                            return;
+                        }
+                    };
+                    runtime.install_server_state(convars, resources);
+                    runtime.install_shared_game_state(shared_game_state);
+                    runtime.install_voice(crate::native_state::SharedVoice(voice));
+                    let _ = init_tx.send(Ok(()));
+
+                    let local = tokio::task::LocalSet::new();
+                    local.block_on(&tokio_rt, run_isolate_loop(runtime, rx));
+                }
+                #[cfg(feature = "lua")]
+                crate::engine::Engine::Lua => {
+                    let mut runtime = match crate::lua::LuaRuntime::new(
+                        &name,
+                        started_at,
+                        deferrals,
+                        players,
+                        net,
+                        observability,
+                    ) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let _ = init_tx.send(Err(e));
+                            return;
+                        }
+                    };
+                    runtime.install_server_state(convars, resources);
+                    runtime.install_shared_game_state(shared_game_state);
+                    runtime.install_voice(crate::native_state::SharedVoice(voice));
+                    let _ = init_tx.send(Ok(()));
+
+                    tokio_rt.block_on(run_lua_loop(runtime, rx));
+                }
+                // `engine::select` already refused anything this build cannot
+                // run, so the remaining arms are unreachable — but the match
+                // must still compile in every bundle.
+                #[allow(unreachable_patterns)]
+                other => {
+                    let _ = init_tx.send(Err(ScriptError::RuntimeInit {
+                        resource: name.clone(),
+                        message: format!("no {other} runtime in this build"),
+                    }));
+                }
+            }
         })
         .map_err(|e| ScriptError::HostStart(e.to_string()))?;
 
@@ -830,9 +907,103 @@ fn spawn_runtime_thread(
     Ok(ResourceRuntimeHandle { tx })
 }
 
+/// The Lua thread's command loop.
+///
+/// Far simpler than its V8 counterpart, and that is the point: a Lua dispatch
+/// is a synchronous call, so there is no event loop to pump and no ticket to
+/// settle. The only asynchrony is cooperative — `Citizen.CreateThread`
+/// coroutines resumed by `tick`, which runs between commands and while idle.
+#[cfg(feature = "lua")]
+async fn run_lua_loop(mut runtime: crate::lua::LuaRuntime, mut rx: mpsc::Receiver<RuntimeCommand>) {
+    use crate::observability::DispatchKind;
+
+    loop {
+        // Resume coroutines, then wait for the next command for no longer than
+        // the runtime asked to sleep — a thread doing `Wait(0)` must not have
+        // to wait for a command to arrive before it runs again.
+        let idle = runtime.tick();
+        let command = match tokio::time::timeout(idle, rx.recv()).await {
+            Err(_elapsed) => continue,
+            Ok(None) => break,
+            Ok(Some(command)) => command,
+        };
+
+        match command {
+            RuntimeCommand::ExecuteScripts { scripts, reply } => {
+                let mut result = Ok(());
+                for script in scripts {
+                    if let Err(e) = runtime.execute_script(&script.path, &script.code) {
+                        result = Err(e);
+                        break;
+                    }
+                }
+                let _ = reply.send(result.map(|()| runtime.drain_queued_events()));
+            }
+            RuntimeCommand::DispatchEvent {
+                event,
+                args_json,
+                reply,
+            } => {
+                let result = runtime.dispatch_event(&event, &args_json, None, DispatchKind::Event);
+                let _ = reply.send(result.map(|()| runtime.drain_queued_events()));
+            }
+            RuntimeCommand::DispatchNetEvent {
+                event,
+                source,
+                args_json,
+                reply,
+            } => {
+                let result = runtime.dispatch_event(
+                    &event,
+                    &args_json,
+                    Some(source),
+                    DispatchKind::NetEvent,
+                );
+                let _ = reply.send(result.map(|()| runtime.drain_queued_events()));
+            }
+            RuntimeCommand::DispatchPlayerConnecting {
+                source,
+                player_name,
+                reply,
+            } => {
+                let args = serde_json::json!([player_name]).to_string();
+                let result = runtime.dispatch_event(
+                    "playerConnecting",
+                    &args,
+                    Some(source),
+                    DispatchKind::PlayerConnecting,
+                );
+                let _ = reply.send(result.map(|()| runtime.drain_queued_events()));
+            }
+            RuntimeCommand::DispatchCommand {
+                command,
+                source,
+                args,
+                raw,
+                reply,
+            } => {
+                let result = runtime
+                    .dispatch_command(&command, source, &args, &raw)
+                    .map(|_handled| runtime.drain_queued_events());
+                let _ = reply.send(result);
+            }
+            // Zone transfer state is a JS-only surface today: no Lua resource
+            // can register a collector, so there is nothing to collect. `None`
+            // is the honest answer, not an error.
+            RuntimeCommand::CollectTransferState { reply, .. } => {
+                let _ = reply.send(Ok(None));
+            }
+            RuntimeCommand::DispatchStateBagChanges { reply } => {
+                let _ = reply.send(Ok(runtime.drain_queued_events()));
+            }
+        }
+    }
+}
+
 /// Shared coordination state between the event-loop pump task, the command
 /// loop, and the per-dispatch settle tasks. Single-threaded (`Rc`) — all of it
 /// lives on the resource's isolate thread.
+#[cfg(feature = "js")]
 struct PumpShared {
     /// Signaled whenever a dispatch starts, so an idle pump resumes polling.
     wake: tokio::sync::Notify,
@@ -843,6 +1014,7 @@ struct PumpShared {
     idle_gen: std::cell::Cell<u64>,
 }
 
+#[cfg(feature = "js")]
 type SharedRuntime = std::rc::Rc<std::cell::RefCell<ScriptRuntime>>;
 
 /// The isolate thread's command loop (audit ROB-2). One pump task drives the
@@ -851,6 +1023,7 @@ type SharedRuntime = std::rc::Rc<std::cell::RefCell<ScriptRuntime>>;
 /// from a `spawn_local` task. A handler stalled on a client-native await no
 /// longer blocks the next command. Invariant: the `RefCell` borrow is never
 /// held across an await.
+#[cfg(feature = "js")]
 async fn run_isolate_loop(runtime: ScriptRuntime, mut rx: mpsc::Receiver<RuntimeCommand>) {
     let rt: SharedRuntime = std::rc::Rc::new(std::cell::RefCell::new(runtime));
     let shared = std::rc::Rc::new(PumpShared {
@@ -946,6 +1119,7 @@ async fn run_isolate_loop(runtime: ScriptRuntime, mut rx: mpsc::Receiver<Runtime
 /// The single event-loop poller. Waits for `wake` while the loop is idle,
 /// re-polls whenever new dispatches start, and signals `progress` after each
 /// pass so settle tasks re-check their promises.
+#[cfg(feature = "js")]
 async fn drive_event_loop(rt: SharedRuntime, shared: std::rc::Rc<PumpShared>) {
     loop {
         let drive = std::future::poll_fn(|cx| {
@@ -968,6 +1142,7 @@ async fn drive_event_loop(rt: SharedRuntime, shared: std::rc::Rc<PumpShared>) {
     }
 }
 
+#[cfg(feature = "js")]
 fn spawn_settle(
     rt: &SharedRuntime,
     shared: &std::rc::Rc<PumpShared>,
@@ -989,6 +1164,7 @@ fn spawn_settle(
 
 /// Wait until the event loop has drained to idle at least once since
 /// `since_idle` was sampled.
+#[cfg(feature = "js")]
 async fn wait_event_loop_idle(shared: &std::rc::Rc<PumpShared>, since_idle: u64) {
     loop {
         let notified = shared.progress.notified();
@@ -1005,6 +1181,7 @@ async fn wait_event_loop_idle(shared: &std::rc::Rc<PumpShared>, since_idle: u64)
 /// once the event loop drains to idle is dangling (nothing left can resolve
 /// it) and is treated as complete — the pre-ROB-2 host replied at event-loop
 /// idle too, so this preserves the old contract for such handlers.
+#[cfg(feature = "js")]
 async fn settle_ticket(
     rt: &SharedRuntime,
     shared: &std::rc::Rc<PumpShared>,
