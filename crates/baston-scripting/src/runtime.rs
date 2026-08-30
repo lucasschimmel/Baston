@@ -1,6 +1,6 @@
 //! `ScriptRuntime` — one deno_core `JsRuntime` (V8 isolate) per resource.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
@@ -13,10 +13,12 @@ use dashmap::DashMap;
 
 use crate::deferrals::DeferralRegistry;
 use crate::error::ScriptError;
-use crate::extensions::{
-    all_extensions, RuntimeContext, SharedConvars, SharedDeferrals, SharedEntityWorld, SharedHttp,
+use crate::extensions::{all_extensions, Natives};
+use crate::native_state::{
+    RuntimeContext, SharedConvars, SharedDeferrals, SharedEntityWorld, SharedHttp,
     SharedHttpHandlers, SharedKvp, SharedNet, SharedObservability, SharedPlayers,
-    SharedResourceControl, SharedResources, SharedRouting, SharedStateBags, SharedWorldControl,
+    SharedResourceControl, SharedResources, SharedRouting, SharedStateBags, SharedVoice,
+    SharedWorldControl,
 };
 use crate::net_bridge::NetBridge;
 use crate::observability::{DispatchKind, DispatchMeasurement, Observability, V8MemoryStats};
@@ -259,33 +261,34 @@ impl ScriptRuntime {
         let isolate_handle = js.v8_isolate().thread_safe_handle();
 
         {
-            let op_state = js.op_state();
-            let mut op_state = op_state.borrow_mut();
-            op_state.put(RuntimeContext {
-                resource_name: resource_name.to_owned(),
-                host_started_at,
-                queued_events: VecDeque::new(),
-                handled_events: Default::default(),
-                exports: Default::default(),
-                commands: Default::default(),
-                has_zone_transfer_state: false,
-                collected_transfer_state: None,
-                handler_errors: 0,
-            });
-            op_state.put(SharedDeferrals(deferrals));
-            op_state.put(SharedPlayers(players));
-            op_state.put(SharedNet(net));
-            op_state.put(SharedObservability(observability.clone()));
-            op_state.put(SharedStateBags(StateBagStore::default()));
-            op_state.put(SharedRouting(Arc::new(InMemoryRoutingControl::default())));
-            op_state.put(SharedEntityWorld(Arc::new(crate::EntityWorldView::new())));
-            op_state.put(SharedWorldControl(Arc::new(crate::NoWorldControl)));
-            op_state.put(SharedKvp(Arc::new(crate::KvpStore::in_memory())));
-            op_state.put(SharedHttp(None));
-            op_state.put(SharedHttpHandlers(Arc::new(
+            // The natives read from an engine-neutral state so one
+            // implementation serves both VMs (ADR-002). `OpState` holds it
+            // under a single key; everything else the natives touch lives
+            // inside it, never alongside it.
+            let mut natives = crate::native_state::NativeState::new();
+            natives.put(RuntimeContext::new(resource_name, host_started_at));
+            natives.put(SharedDeferrals(deferrals));
+            natives.put(SharedPlayers(players));
+            natives.put(SharedNet(net));
+            natives.put(SharedObservability(observability.clone()));
+            // Placeholders until the host installs the process-wide services;
+            // a resource that runs before then sees empty state, never a
+            // missing-service panic.
+            natives.put(SharedStateBags(StateBagStore::default()));
+            natives.put(SharedRouting(Arc::new(InMemoryRoutingControl::default())));
+            natives.put(SharedEntityWorld(Arc::new(crate::EntityWorldView::new())));
+            natives.put(SharedWorldControl(Arc::new(crate::NoWorldControl)));
+            natives.put(SharedKvp(Arc::new(crate::KvpStore::in_memory())));
+            natives.put(SharedHttp(None));
+            natives.put(SharedHttpHandlers(Arc::new(
                 crate::HttpHandlerRegistry::new(),
             )));
-            op_state.put(SharedResourceControl(Arc::new(crate::NoResourceControl)));
+            natives.put(SharedResourceControl(Arc::new(crate::NoResourceControl)));
+            natives.put(SharedVoice(None));
+            natives.put(SharedConvars(Arc::new(DashMap::new())));
+
+            let op_state = js.op_state();
+            op_state.borrow_mut().put(Natives(natives));
         }
 
         js.execute_script("baston:bootstrap.js", BOOTSTRAP_JS)
@@ -313,8 +316,9 @@ impl ScriptRuntime {
     ) {
         let op_state = self.js.op_state();
         let mut op_state = op_state.borrow_mut();
-        op_state.put(SharedConvars(convars));
-        op_state.put(SharedResources(resources));
+        let natives = &mut op_state.borrow_mut::<Natives>().0;
+        natives.put(SharedConvars(convars));
+        natives.put(SharedResources(resources));
     }
 
     /// Install process-wide authoritative state shared by all resource
@@ -327,20 +331,21 @@ impl ScriptRuntime {
     pub fn install_shared_game_state(&mut self, shared: SharedGameState) {
         let op_state = self.js.op_state();
         let mut op_state = op_state.borrow_mut();
-        op_state.put(SharedStateBags(shared.state_bags));
-        op_state.put(SharedRouting(shared.routing));
-        op_state.put(SharedEntityWorld(shared.entity_world));
-        op_state.put(SharedWorldControl(shared.world_control));
-        op_state.put(SharedKvp(shared.kvp));
-        op_state.put(SharedHttp(shared.http));
-        op_state.put(SharedHttpHandlers(shared.http_handlers));
-        op_state.put(SharedResourceControl(shared.resource_control));
+        let natives = &mut op_state.borrow_mut::<Natives>().0;
+        natives.put(SharedStateBags(shared.state_bags));
+        natives.put(SharedRouting(shared.routing));
+        natives.put(SharedEntityWorld(shared.entity_world));
+        natives.put(SharedWorldControl(shared.world_control));
+        natives.put(SharedKvp(shared.kvp));
+        natives.put(SharedHttp(shared.http));
+        natives.put(SharedHttpHandlers(shared.http_handlers));
+        natives.put(SharedResourceControl(shared.resource_control));
     }
 
     /// Install the voice control surface backing the `MUMBLE_*` natives.
     pub fn install_voice(&mut self, voice: crate::extensions::SharedVoice) {
         let op_state = self.js.op_state();
-        op_state.borrow_mut().put(voice);
+        op_state.borrow_mut().borrow_mut::<Natives>().0.put(voice);
     }
 
     /// Execute a resource script (plain script semantics, like FXServer).
@@ -667,7 +672,7 @@ impl ScriptRuntime {
         let handler_errors = {
             let op_state = self.js.op_state();
             let mut op_state = op_state.borrow_mut();
-            let ctx = op_state.borrow_mut::<RuntimeContext>();
+            let ctx = op_state.borrow_mut::<Natives>().0.borrow_mut::<RuntimeContext>();
             let errors = ctx.handler_errors;
             ctx.handler_errors = 0;
             errors
@@ -700,14 +705,14 @@ impl ScriptRuntime {
             let op_state = self.js.op_state();
             let has = op_state
                 .borrow()
-                .borrow::<RuntimeContext>()
+                .borrow::<Natives>().0.borrow::<RuntimeContext>()
                 .has_zone_transfer_state;
             if !has {
                 return Ok(None);
             }
             op_state
                 .borrow_mut()
-                .borrow_mut::<RuntimeContext>()
+                .borrow_mut::<Natives>().0.borrow_mut::<RuntimeContext>()
                 .collected_transfer_state = None;
         }
         let code = format!("globalThis.__baston.collectZoneTransferState({source});");
@@ -726,7 +731,7 @@ impl ScriptRuntime {
         let op_state = self.js.op_state();
         let mut op_state = op_state.borrow_mut();
         Ok(op_state
-            .borrow_mut::<RuntimeContext>()
+            .borrow_mut::<Natives>().0.borrow_mut::<RuntimeContext>()
             .collected_transfer_state
             .take())
     }
@@ -796,7 +801,7 @@ impl ScriptRuntime {
         let handler_errors = {
             let op_state = self.js.op_state();
             let mut op_state = op_state.borrow_mut();
-            let ctx = op_state.borrow_mut::<RuntimeContext>();
+            let ctx = op_state.borrow_mut::<Natives>().0.borrow_mut::<RuntimeContext>();
             let errors = ctx.handler_errors;
             ctx.handler_errors = 0;
             errors
@@ -850,14 +855,14 @@ impl ScriptRuntime {
             let op_state = self.js.op_state();
             let has = op_state
                 .borrow()
-                .borrow::<RuntimeContext>()
+                .borrow::<Natives>().0.borrow::<RuntimeContext>()
                 .has_zone_transfer_state;
             if !has {
                 return Ok(None);
             }
             op_state
                 .borrow_mut()
-                .borrow_mut::<RuntimeContext>()
+                .borrow_mut::<Natives>().0.borrow_mut::<RuntimeContext>()
                 .collected_transfer_state = None;
         }
         let code = format!("globalThis.__baston.collectZoneTransferState({source});");
@@ -871,7 +876,7 @@ impl ScriptRuntime {
         let op_state = self.js.op_state();
         let mut op_state = op_state.borrow_mut();
         Ok(op_state
-            .borrow_mut::<RuntimeContext>()
+            .borrow_mut::<Natives>().0.borrow_mut::<RuntimeContext>()
             .collected_transfer_state
             .take())
     }
@@ -880,7 +885,7 @@ impl ScriptRuntime {
     pub fn drain_queued_events(&mut self) -> Vec<(String, String)> {
         let op_state = self.js.op_state();
         let mut op_state = op_state.borrow_mut();
-        let ctx = op_state.borrow_mut::<RuntimeContext>();
+        let ctx = op_state.borrow_mut::<Natives>().0.borrow_mut::<RuntimeContext>();
         ctx.queued_events.drain(..).collect()
     }
 
@@ -889,7 +894,7 @@ impl ScriptRuntime {
         let op_state = self.js.op_state();
         let op_state = op_state.borrow();
         op_state
-            .borrow::<RuntimeContext>()
+            .borrow::<Natives>().0.borrow::<RuntimeContext>()
             .handled_events
             .contains(event)
     }
@@ -898,7 +903,7 @@ impl ScriptRuntime {
         let op_state = self.js.op_state();
         let op_state = op_state.borrow();
         op_state
-            .borrow::<RuntimeContext>()
+            .borrow::<Natives>().0.borrow::<RuntimeContext>()
             .commands
             .contains_key(command)
     }

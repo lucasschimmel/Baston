@@ -14,6 +14,8 @@ mod host;
 mod http_bridge;
 mod http_handler;
 mod kvp;
+mod native_state;
+mod natives;
 pub mod net_bridge;
 pub mod observability;
 mod resource_control;
@@ -26,7 +28,7 @@ pub use entity_world::{
     EntitySummary, EntityWorldView, NoWorldControl, ScriptEntityType, WorldCommand, WorldControl,
 };
 pub use error::ScriptError;
-pub use extensions::{SharedVoice, VoiceControl};
+pub use native_state::{NativeState, RuntimeContext, SharedVoice, VoiceControl};
 pub use host::{ScriptHost, ScriptSource};
 pub use http_bridge::{
     parse_request as parse_http_request, HttpBridge, HttpReply, HttpRequest, HttpRequestSpec,

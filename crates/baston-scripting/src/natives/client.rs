@@ -2,9 +2,7 @@
 
 use std::time::Instant;
 
-use deno_core::{op2, OpState};
 
-use super::{RuntimeContext, SharedNet, SharedObservability};
 
 /// How long a server → client native call may wait for its result.
 ///
@@ -50,13 +48,18 @@ pub(super) fn queue_native_call(
 /// Dispatch a GTA native to `source`'s client via the BASTON shim and await
 /// the result. Returns a JSON string; errors are `{"__error": "..."}` so the
 /// polyfill can throw without deno_core error plumbing.
-#[op2]
-#[string]
-pub(super) async fn op_invoke_native_on_client(
-    state: std::rc::Rc<std::cell::RefCell<OpState>>,
+/// Dispatch a native to a client and await its answer.
+///
+/// Takes the three services it needs by value rather than borrowing
+/// [`NativeState`]: the call awaits a client round trip, and holding a borrow
+/// across that await would pin the runtime's state for the whole flight.
+pub(crate) async fn invoke_native_on_client(
+    net: crate::net_bridge::NetBridge,
+    observability: std::sync::Arc<crate::observability::Observability>,
+    resource: String,
     source: u32,
-    #[string] hash_hex: String,
-    #[string] args_json: String,
+    hash_hex: String,
+    args_json: String,
     expects_return: bool,
 ) -> String {
     fn err(message: impl std::fmt::Display) -> String {
@@ -81,14 +84,6 @@ pub(super) async fn op_invoke_native_on_client(
         return err(e);
     }
 
-    let (net, observability, resource) = {
-        let state_ref = state.borrow();
-        (
-            state_ref.borrow::<SharedNet>().0.clone(),
-            state_ref.borrow::<SharedObservability>().0.clone(),
-            state_ref.borrow::<RuntimeContext>().resource_name.clone(),
-        )
-    };
     let started = Instant::now();
     let (id, rx) = net.pending_natives.register();
     if !queue_native_call(&net, source, id, hash, args) {

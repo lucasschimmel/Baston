@@ -19,9 +19,9 @@
 //! then returns the same neutral value the engine does, so a script sees "not
 //! known yet" rather than a fabricated reading.
 
-use deno_core::OpState;
+use super::NativeState;
 
-use super::natives_server::{json_arg_bool, json_arg_i64, json_arg_netid};
+use super::server::{json_arg_bool, json_arg_i64, json_arg_netid};
 use super::{SharedEntityWorld, SharedResources};
 use crate::entity_world::EntitySummary;
 use baston_protocol::rage::sync_parse::{
@@ -33,7 +33,7 @@ use baston_protocol::rage::sync_parse::{
 /// `None` means "not one of ours" and the caller falls through to the rest of
 /// its dispatch.
 pub(super) fn try_dispatch(
-    state: &OpState,
+    state: &NativeState,
     name: &str,
     args: &[serde_json::Value],
 ) -> Option<serde_json::Value> {
@@ -382,36 +382,36 @@ pub(super) fn try_dispatch(
     }
 }
 
-fn world(state: &OpState) -> std::sync::Arc<crate::EntityWorldView> {
+fn world(state: &NativeState) -> std::sync::Arc<crate::EntityWorldView> {
     std::sync::Arc::clone(&state.borrow::<SharedEntityWorld>().0)
 }
 
-fn entity(state: &OpState, args: &[serde_json::Value]) -> Option<EntitySummary> {
+fn entity(state: &NativeState, args: &[serde_json::Value]) -> Option<EntitySummary> {
     world(state).get(json_arg_netid(args, 0))
 }
 
-fn vehicle_state(state: &OpState, args: &[serde_json::Value]) -> Option<VehicleGameState> {
+fn vehicle_state(state: &NativeState, args: &[serde_json::Value]) -> Option<VehicleGameState> {
     entity(state, args)?.sync.vehicle_game_state
 }
 
-fn vehicle_health(state: &OpState, args: &[serde_json::Value]) -> Option<VehicleHealth> {
+fn vehicle_health(state: &NativeState, args: &[serde_json::Value]) -> Option<VehicleHealth> {
     entity(state, args)?.sync.vehicle_health
 }
 
-fn appearance(state: &OpState, args: &[serde_json::Value]) -> Option<VehicleAppearance> {
+fn appearance(state: &NativeState, args: &[serde_json::Value]) -> Option<VehicleAppearance> {
     entity(state, args)?.sync.vehicle_appearance
 }
 
-fn damage(state: &OpState, args: &[serde_json::Value]) -> Option<VehicleDamage> {
+fn damage(state: &NativeState, args: &[serde_json::Value]) -> Option<VehicleDamage> {
     entity(state, args)?.sync.vehicle_damage
 }
 
-fn ped_state(state: &OpState, args: &[serde_json::Value]) -> Option<PedGameState> {
+fn ped_state(state: &NativeState, args: &[serde_json::Value]) -> Option<PedGameState> {
     entity(state, args)?.sync.ped_game_state
 }
 
 /// A ped's task tree, or the engine's "nothing running" defaults.
-fn ped_tasks(state: &OpState, args: &[serde_json::Value]) -> PedTasks {
+fn ped_tasks(state: &NativeState, args: &[serde_json::Value]) -> PedTasks {
     entity(state, args)
         .and_then(|e| e.sync.ped_tasks)
         .unwrap_or_default()
@@ -420,7 +420,7 @@ fn ped_tasks(state: &OpState, args: &[serde_json::Value]) -> PedTasks {
 /// The idle task marker for whatever build this ped reported under. Read off
 /// its own tree rather than assumed, so a ped from a differently-gated build
 /// still reports a consistent marker.
-fn idle_task_type(state: &OpState, args: &[serde_json::Value]) -> u16 {
+fn idle_task_type(state: &NativeState, args: &[serde_json::Value]) -> u16 {
     ped_tasks(state, args).task_types[0]
 }
 
@@ -428,7 +428,7 @@ fn idle_task_type(state: &OpState, args: &[serde_json::Value]) -> u16 {
 ///
 /// `0` when nothing damaged the ped, when the source is no longer a live
 /// entity, or — for the death form — when the ped is not dead.
-fn damage_source(state: &OpState, args: &[serde_json::Value], require_dead: bool) -> u32 {
+fn damage_source(state: &NativeState, args: &[serde_json::Value], require_dead: bool) -> u32 {
     let Some(summary) = entity(state, args) else {
         return 0;
     };
@@ -452,7 +452,7 @@ fn damage_source(state: &OpState, args: &[serde_json::Value], require_dead: bool
 ///
 /// The engine hashes the resource name (truncated to 63 characters) with
 /// joaat, so the reverse lookup is a scan over what is loaded.
-fn resource_named_by_hash(state: &OpState, hash: u32) -> Option<String> {
+fn resource_named_by_hash(state: &NativeState, hash: u32) -> Option<String> {
     const MAX_HASHED_NAME: usize = 63;
     state
         .borrow::<SharedResources>()

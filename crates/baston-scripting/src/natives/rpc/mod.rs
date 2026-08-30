@@ -38,9 +38,9 @@ mod table;
 use std::time::Instant;
 
 use dashmap::DashMap;
-use deno_core::OpState;
+use super::NativeState;
 
-use super::natives_server::json_arg_netid;
+use super::server::json_arg_netid;
 use super::{RuntimeContext, SharedEntityWorld, SharedNet, SharedObservability};
 
 /// Which argument decides where a context native is dispatched.
@@ -130,7 +130,7 @@ pub(super) fn lookup(name: &str) -> Option<&'static RpcNative> {
 /// Returns `true` when the native belongs to the RPC surface — that is, when
 /// the caller must *not* fall through to its own handling — regardless of
 /// whether a target could be resolved. Returns `false` for anything else.
-pub(super) fn try_dispatch(state: &OpState, name: &str, args: &[serde_json::Value]) -> bool {
+pub(super) fn try_dispatch(state: &NativeState, name: &str, args: &[serde_json::Value]) -> bool {
     let Some(native) = lookup(name) else {
         return false;
     };
@@ -143,7 +143,7 @@ pub(super) fn try_dispatch(state: &OpState, name: &str, args: &[serde_json::Valu
 /// Resolve the target client and queue the call. `Err` carries the reason the
 /// call was dropped, which is always a fact worth counting, never a panic.
 fn dispatch(
-    state: &OpState,
+    state: &NativeState,
     native: &RpcNative,
     args: &[serde_json::Value],
 ) -> Result<(), SkipReason> {
@@ -162,7 +162,7 @@ fn dispatch(
     // grow one dead entry per fire-and-forget dispatch.
     let (id, _rx) = net.pending_natives.register();
     let queued =
-        super::natives_client::queue_native_call(&net, target, id, native.hash, args.to_vec());
+        super::client::queue_native_call(&net, target, id, native.hash, args.to_vec());
     net.pending_natives.cancel(id);
 
     observability.record_native_roundtrip(
@@ -194,7 +194,7 @@ fn dispatch(
 
 /// The client that must execute the native, per the spec's context rules.
 ///
-/// Takes the world view rather than the whole `OpState` so the routing rules
+/// Takes the world view rather than the whole `NativeState` so the routing rules
 /// — the part that decides which player receives someone else's mutation —
 /// can be tested directly.
 fn resolve_target(

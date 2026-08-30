@@ -8,164 +8,108 @@
 //! `globalThis.__baston.dispatch(...)` via `execute_script`, which keeps us
 //! independent from `v8::Global<v8::Function>` juggling.
 //!
-//! Module layout: the heavyweight `Citizen.invokeNative` op groups live in
-//! [`natives_server`] (server-side natives + synthetic entity store) and
-//! [`natives_client`] (server → client native dispatch); [`rpc_natives`] holds
-//! the CFX context-routing table that decides which client a "server" native is
-//! really executed on. Everything else — shared context types and the smaller
-//! op groups — lives here.
+//! Module layout: the heavyweight `Citizen.invokeNative` groups, the CFX
+//! context-routing table, and the console buffer live in `crate::natives`.
+//! Everything else — the smaller op groups — lives here.
+//!
+//! The natives themselves live in [`crate::natives`] and know nothing about
+//! V8: this module is the V8 half of the bridge, converting between JS values
+//! and the JSON the neutral natives speak (ADR-002, Tier 2). The ops below are
+//! deliberately thin — logic that grows here is logic Lua will not get.
 
-mod natives_client;
-mod natives_server;
-mod natives_world;
-mod rpc_natives;
 
-use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::Instant;
 
-use dashmap::DashMap;
 use deno_core::{op2, OpState};
 
-use crate::deferrals::DeferralRegistry;
-use crate::observability::Observability;
-use crate::{RoutingControl, StateBagStore};
+use crate::natives::console;
+use crate::natives::{client, server};
 
-use natives_client::op_invoke_native_on_client;
-use natives_server::{op_cfx_server_native, op_cfx_shared_native};
+// The context and service types moved to `crate::native_state` when the
+// natives stopped depending on V8. Re-exported so this module — and the
+// crate's public surface — keep their existing paths.
+pub use crate::native_state::{
+    RuntimeContext, SharedConvars, SharedDeferrals,
+    SharedHttpHandlers, SharedNet, SharedObservability, SharedPlayers, SharedResources, SharedStateBags, SharedVoice, VoiceControl,
+};
 
-/// Per-runtime context stored in the isolate's `OpState`.
-pub struct RuntimeContext {
-    pub resource_name: String,
-    /// Millisecond epoch for `GetGameTimer()` — the script host start instant.
-    pub host_started_at: Instant,
-    /// Events queued by `TriggerEvent` during JS execution; drained by the
-    /// host after each dispatch and re-broadcast to every runtime.
-    pub queued_events: VecDeque<(String, String)>,
-    /// Event names with at least one registered handler (bookkeeping).
-    pub handled_events: HashSet<String>,
-    /// Export names registered by this resource (bookkeeping).
-    pub exports: HashSet<String>,
-    /// Server commands registered by this resource via `RegisterCommand`.
-    pub commands: HashMap<String, bool>,
-    /// Whether this resource registered a `RegisterZoneTransferState` callback.
-    pub has_zone_transfer_state: bool,
-    /// JSON collected by `op_report_zone_transfer_state` during the last
-    /// `collectZoneTransferState` dispatch (jalon D4 handoff).
-    pub collected_transfer_state: Option<String>,
-    /// Handler exceptions caught by bootstrap.js during the current dispatch.
-    pub handler_errors: u64,
-}
-
-/// Shared deferral registry handle stored in `OpState` (one per process,
-/// cloned into every runtime).
-pub struct SharedDeferrals(pub Arc<DeferralRegistry>);
-
-/// Shared player directory handle stored in `OpState` (owned by the gateway,
-/// read by player natives).
-pub struct SharedPlayers(pub Arc<baston_protocol::PlayerDirectory>);
-
-/// Net bridge handle stored in `OpState` (client events + native dispatch).
-pub struct SharedNet(pub crate::net_bridge::NetBridge);
-
-/// Shared runtime observability collector stored in `OpState`.
-pub struct SharedObservability(pub Arc<Observability>);
-
-/// Shared console variables (`GetConvar*` / `SetConvar*`).
-pub struct SharedConvars(pub Arc<DashMap<String, String>>);
-
-/// Shared resource snapshot (`GetResourceState`, `LoadResourceFile`, ...).
-pub struct SharedResources(pub crate::resource_registry::ResourceRegistry);
-
-/// Shared state-bag store (one per script host).
-#[derive(Clone)]
-pub struct SharedStateBags(pub StateBagStore);
-
-/// Shared routing-bucket control surface.
-#[derive(Clone)]
-pub struct SharedRouting(pub Arc<dyn RoutingControl>);
-
-/// Shared read-only mirror of the authoritative networked world, backing the
-/// entity natives. Empty until a game state publishes into it, in which case
-/// entity natives report "no such entity" rather than fabricating an answer.
-#[derive(Clone)]
-pub struct SharedEntityWorld(pub Arc<crate::EntityWorldView>);
-
-/// Write side of the world: entity creation and deletion from scripts.
-#[derive(Clone)]
-pub struct SharedWorldControl(pub Arc<dyn crate::WorldControl>);
-
-/// Persistent per-resource key/value store (`*ResourceKvp*` natives).
-#[derive(Clone)]
-pub struct SharedKvp(pub Arc<crate::KvpStore>);
-
-/// Outbound HTTP bridge (`PerformHttpRequest`).
+/// The engine-neutral [`NativeState`](crate::native_state::NativeState) for
+/// this isolate, parked in `OpState`.
 ///
-/// `None` means no worker is wired, in which case the natives refuse instead
-/// of handing back a token nobody will ever resolve.
-#[derive(Clone)]
-pub struct SharedHttp(pub Option<crate::HttpBridge>);
+/// One indirection rather than storing each service twice: `OpState` holds the
+/// V8-side plumbing, this holds everything the natives read.
+pub struct Natives(pub crate::native_state::NativeState);
 
-/// Resource lifecycle control (`StartResource`, `StopResource`).
-#[derive(Clone)]
-pub struct SharedResourceControl(pub Arc<dyn crate::ResourceControl>);
+// --- 0. native dispatch (thin wrappers over `crate::natives`) ---
 
-/// Inbound HTTP handler registry (`SetHttpHandler`). Shared with the gateway,
-/// which owns the route that feeds it.
-#[derive(Clone)]
-pub struct SharedHttpHandlers(pub Arc<crate::HttpHandlerRegistry>);
-
-/// Server-side voice control surface backing the `MUMBLE_*` natives. The
-/// gateway implements this on the baston-voice handle so baston-scripting
-/// stays decoupled from the voice crate. `None` = voice disabled: the natives
-/// keep returning neutral defaults (stub behaviour).
-pub trait VoiceControl: Send + Sync {
-    fn create_channel(&self, id: u32);
-    fn channel_exists(&self, id: u32) -> bool;
-    fn set_player_muted(&self, netid: u32, muted: bool);
-    fn is_player_muted(&self, netid: u32) -> bool;
-    fn set_proximity_override(&self, netid: u32, position: Option<[f32; 3]>);
-    fn proximity_override(&self, netid: u32) -> [f32; 3];
+#[op2]
+#[string]
+fn op_cfx_shared_native(
+    state: &mut OpState,
+    #[string] name: String,
+    #[string] args_json: String,
+) -> String {
+    server::cfx_shared_native(&mut state.borrow_mut::<Natives>().0, name, args_json)
 }
 
-/// Shared voice handle (`MUMBLE_*` natives).
-#[derive(Clone)]
-pub struct SharedVoice(pub Option<Arc<dyn VoiceControl>>);
+#[op2]
+#[string]
+fn op_cfx_server_native(
+    state: &mut OpState,
+    #[string] name: String,
+    #[string] result_kind: String,
+    #[string] args_json: String,
+) -> String {
+    server::cfx_server_native(
+        &mut state.borrow_mut::<Natives>().0,
+        name,
+        result_kind,
+        args_json,
+    )
+}
+
+/// Dispatch a GTA native to `source`'s client via the BASTON shim and await
+/// the result. Returns a JSON string; errors are `{"__error": "..."}` so the
+/// polyfill can throw without deno_core error plumbing.
+#[op2]
+#[string]
+async fn op_invoke_native_on_client(
+    state: std::rc::Rc<std::cell::RefCell<OpState>>,
+    source: u32,
+    #[string] hash_hex: String,
+    #[string] args_json: String,
+    expects_return: bool,
+) -> String {
+    // Cloned out before the await: the neutral dispatcher must not hold a
+    // borrow of the isolate's state across a client round trip.
+    let (net, observability, resource) = {
+        let op_state = state.borrow();
+        let natives = &op_state.borrow::<Natives>().0;
+        (
+            natives.borrow::<SharedNet>().0.clone(),
+            Arc::clone(&natives.borrow::<SharedObservability>().0),
+            natives.borrow::<RuntimeContext>().resource_name.clone(),
+        )
+    };
+    client::invoke_native_on_client(
+        net,
+        observability,
+        resource,
+        source,
+        hash_hex,
+        args_json,
+        expects_return,
+    )
+    .await
+}
 
 // --- 1. console ---
 
-/// Lines retained for `GetConsoleBuffer`. Bounded: the buffer is a debugging
-/// convenience, and a chatty resource must not turn it into a memory leak.
-const CONSOLE_BUFFER_LINES: usize = 512;
-
-/// Recent console output, oldest first.
-///
-/// Process-wide because the console is: `GetConsoleBuffer` is documented to
-/// return what the server printed, not what the calling resource printed.
-fn console_buffer() -> &'static std::sync::Mutex<std::collections::VecDeque<String>> {
-    static BUFFER: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<String>>> =
-        std::sync::OnceLock::new();
-    BUFFER.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
-}
-
-/// The retained console output as one blob, which is what the native returns.
-pub(super) fn console_buffer_text() -> String {
-    let buffer = console_buffer().lock().unwrap_or_else(|e| e.into_inner());
-    buffer.iter().cloned().collect::<Vec<_>>().join("\n")
-}
-
 #[op2(fast)]
 fn op_console_log(state: &mut OpState, #[string] msg: String) {
-    let resource = &state.borrow::<RuntimeContext>().resource_name;
-    tracing::info!(target: "script", resource, "{msg}");
-    {
-        let mut buffer = console_buffer().lock().unwrap_or_else(|e| e.into_inner());
-        if buffer.len() == CONSOLE_BUFFER_LINES {
-            buffer.pop_front();
-        }
-        buffer.push_back(format!("[{resource}] {msg}"));
-    }
-    println!("{msg}");
+    let natives = &state.borrow::<Natives>().0;
+    let resource = natives.borrow::<RuntimeContext>().resource_name.clone();
+    console::log(&resource, &msg);
 }
 
 deno_core::extension!(baston_console, ops = [op_console_log]);
@@ -174,14 +118,14 @@ deno_core::extension!(baston_console, ops = [op_console_log]);
 
 #[op2(fast)]
 fn op_add_event_handler(state: &mut OpState, #[string] event: String, _cb_id: u32) {
-    let ctx = state.borrow_mut::<RuntimeContext>();
+    let ctx = state.borrow_mut::<Natives>().0.borrow_mut::<RuntimeContext>();
     tracing::debug!(target: "events", resource = %ctx.resource_name, %event, "handler registered");
     ctx.handled_events.insert(event);
 }
 
 #[op2(fast)]
 fn op_register_command(state: &mut OpState, #[string] name: String, restricted: bool, _cb_id: u32) {
-    let ctx = state.borrow_mut::<RuntimeContext>();
+    let ctx = state.borrow_mut::<Natives>().0.borrow_mut::<RuntimeContext>();
     tracing::debug!(
         target: "commands",
         resource = %ctx.resource_name,
@@ -194,7 +138,7 @@ fn op_register_command(state: &mut OpState, #[string] name: String, restricted: 
 
 #[op2(fast)]
 fn op_trigger_event(state: &mut OpState, #[string] event: String, #[string] args_json: String) {
-    state
+    state.borrow_mut::<Natives>().0
         .borrow_mut::<RuntimeContext>()
         .queued_events
         .push_back((event, args_json));
@@ -209,7 +153,7 @@ fn op_trigger_client_event(
     source: u32,
     #[string] args_json: String,
 ) {
-    let net = &state.borrow::<SharedNet>().0;
+    let net = &state.borrow::<Natives>().0.borrow::<SharedNet>().0;
     if net
         .tx
         .try_send(crate::net_bridge::NetOutbound::ClientEvent {
@@ -225,7 +169,7 @@ fn op_trigger_client_event(
 
 #[op2(fast)]
 fn op_report_handler_error(state: &mut OpState) {
-    state.borrow_mut::<RuntimeContext>().handler_errors += 1;
+    state.borrow_mut::<Natives>().0.borrow_mut::<RuntimeContext>().handler_errors += 1;
 }
 
 #[op2(fast)]
@@ -235,8 +179,8 @@ fn op_add_state_bag_change_handler(
     #[string] bag_filter: String,
     callback_id: u32,
 ) -> u32 {
-    let resource = state.borrow::<RuntimeContext>().resource_name.clone();
-    state.borrow::<SharedStateBags>().0.add_handler(
+    let resource = state.borrow::<Natives>().0.borrow::<RuntimeContext>().resource_name.clone();
+    state.borrow::<Natives>().0.borrow::<SharedStateBags>().0.add_handler(
         resource,
         Some(key_filter),
         Some(bag_filter),
@@ -246,8 +190,8 @@ fn op_add_state_bag_change_handler(
 
 #[op2(fast)]
 fn op_remove_state_bag_change_handler(state: &mut OpState, cookie: u32) -> bool {
-    let resource = state.borrow::<RuntimeContext>().resource_name.clone();
-    state
+    let resource = state.borrow::<Natives>().0.borrow::<RuntimeContext>().resource_name.clone();
+    state.borrow::<Natives>().0
         .borrow::<SharedStateBags>()
         .0
         .remove_handler(&resource, cookie)
@@ -257,9 +201,9 @@ fn op_remove_state_bag_change_handler(state: &mut OpState, cookie: u32) -> bool 
 #[string]
 fn op_poll_state_bag_changes(state: &mut OpState) -> String {
     const MAX_DELIVERIES_PER_POLL: usize = 4096;
-    let resource = state.borrow::<RuntimeContext>().resource_name.clone();
+    let resource = state.borrow::<Natives>().0.borrow::<RuntimeContext>().resource_name.clone();
     serde_json::to_string(
-        &state
+        &state.borrow::<Natives>().0
             .borrow::<SharedStateBags>()
             .0
             .drain_deliveries(&resource, MAX_DELIVERIES_PER_POLL),
@@ -286,14 +230,14 @@ deno_core::extension!(
 
 #[op2(fast)]
 fn op_add_export(state: &mut OpState, #[string] name: String, _fn_id: u32) {
-    let ctx = state.borrow_mut::<RuntimeContext>();
+    let ctx = state.borrow_mut::<Natives>().0.borrow_mut::<RuntimeContext>();
     tracing::debug!(target: "exports", resource = %ctx.resource_name, %name, "export registered");
     ctx.exports.insert(name);
 }
 
 #[op2(fast)]
 fn op_get_export(state: &mut OpState, #[string] resource: String, #[string] name: String) -> u32 {
-    let caller = &state.borrow::<RuntimeContext>().resource_name;
+    let caller = &state.borrow::<Natives>().0.borrow::<RuntimeContext>().resource_name;
     tracing::warn!(
         target: "exports",
         %caller, %resource, %name,
@@ -308,14 +252,14 @@ deno_core::extension!(baston_exports, ops = [op_add_export, op_get_export]);
 
 #[op2(fast)]
 fn op_get_game_timer(state: &mut OpState) -> u32 {
-    let ctx = state.borrow::<RuntimeContext>();
+    let ctx = state.borrow::<Natives>().0.borrow::<RuntimeContext>();
     ctx.host_started_at.elapsed().as_millis() as u32
 }
 
 #[op2]
 #[string]
 fn op_get_current_resource_name(state: &mut OpState) -> String {
-    state.borrow::<RuntimeContext>().resource_name.clone()
+    state.borrow::<Natives>().0.borrow::<RuntimeContext>().resource_name.clone()
 }
 
 deno_core::extension!(
@@ -348,7 +292,7 @@ fn op_get_convar(
     #[string] name: String,
     #[string] default_value: String,
 ) -> String {
-    state
+    state.borrow::<Natives>().0
         .borrow::<SharedConvars>()
         .0
         .get(&name)
@@ -358,7 +302,7 @@ fn op_get_convar(
 
 #[op2(fast)]
 fn op_get_convar_int(state: &mut OpState, #[string] name: String, default_value: i32) -> i32 {
-    state
+    state.borrow::<Natives>().0
         .borrow::<SharedConvars>()
         .0
         .get(&name)
@@ -368,7 +312,7 @@ fn op_get_convar_int(state: &mut OpState, #[string] name: String, default_value:
 
 #[op2(fast)]
 fn op_get_convar_float(state: &mut OpState, #[string] name: String, default_value: f64) -> f64 {
-    state
+    state.borrow::<Natives>().0
         .borrow::<SharedConvars>()
         .0
         .get(&name)
@@ -378,7 +322,7 @@ fn op_get_convar_float(state: &mut OpState, #[string] name: String, default_valu
 
 #[op2(fast)]
 fn op_get_convar_bool(state: &mut OpState, #[string] name: String, default_value: bool) -> bool {
-    state
+    state.borrow::<Natives>().0
         .borrow::<SharedConvars>()
         .0
         .get(&name)
@@ -393,30 +337,30 @@ fn op_get_convar_bool(state: &mut OpState, #[string] name: String, default_value
 
 #[op2(fast)]
 fn op_set_convar(state: &mut OpState, #[string] name: String, #[string] value: String) {
-    state.borrow::<SharedConvars>().0.insert(name, value);
+    state.borrow::<Natives>().0.borrow::<SharedConvars>().0.insert(name, value);
 }
 
 #[op2(fast)]
 fn op_get_num_resources(state: &mut OpState) -> u32 {
-    state.borrow::<SharedResources>().0.count() as u32
+    state.borrow::<Natives>().0.borrow::<SharedResources>().0.count() as u32
 }
 
 #[op2]
 #[string]
 fn op_get_resource_by_find_index(state: &mut OpState, index: u32) -> String {
-    state.borrow::<SharedResources>().0.name_at(index as usize)
+    state.borrow::<Natives>().0.borrow::<SharedResources>().0.name_at(index as usize)
 }
 
 #[op2]
 #[string]
 fn op_get_resource_state(state: &mut OpState, #[string] name: String) -> String {
-    state.borrow::<SharedResources>().0.state(&name).to_owned()
+    state.borrow::<Natives>().0.borrow::<SharedResources>().0.state(&name).to_owned()
 }
 
 #[op2]
 #[string]
 fn op_get_resource_path(state: &mut OpState, #[string] name: String) -> String {
-    state.borrow::<SharedResources>().0.path(&name)
+    state.borrow::<Natives>().0.borrow::<SharedResources>().0.path(&name)
 }
 
 #[op2(fast)]
@@ -425,7 +369,7 @@ fn op_get_num_resource_metadata(
     #[string] resource: String,
     #[string] key: String,
 ) -> u32 {
-    state
+    state.borrow::<Natives>().0
         .borrow::<SharedResources>()
         .0
         .metadata_count(&resource, &key)
@@ -439,7 +383,7 @@ fn op_get_resource_metadata(
     #[string] key: String,
     index: u32,
 ) -> String {
-    state
+    state.borrow::<Natives>().0
         .borrow::<SharedResources>()
         .0
         .metadata_value(&resource, &key, index as usize)
@@ -452,7 +396,7 @@ fn op_load_resource_file(
     #[string] resource: String,
     #[string] file_name: String,
 ) -> String {
-    state
+    state.borrow::<Natives>().0
         .borrow::<SharedResources>()
         .0
         .load_file(&resource, &file_name)
@@ -467,7 +411,7 @@ fn op_save_resource_file(
     #[string] data: String,
     data_len: i32,
 ) -> bool {
-    state
+    state.borrow::<Natives>().0
         .borrow::<SharedResources>()
         .0
         .save_file(&resource, &file_name, &data, data_len)
@@ -477,19 +421,19 @@ fn op_save_resource_file(
 
 #[op2(fast)]
 fn op_get_num_player_indices(state: &mut OpState) -> u32 {
-    state.borrow::<SharedPlayers>().0.count() as u32
+    state.borrow::<Natives>().0.borrow::<SharedPlayers>().0.count() as u32
 }
 
 #[op2(fast)]
 fn op_get_player_from_index(state: &mut OpState, index: u32) -> u32 {
-    let sources = state.borrow::<SharedPlayers>().0.sources();
+    let sources = state.borrow::<Natives>().0.borrow::<SharedPlayers>().0.sources();
     sources.get(index as usize).copied().unwrap_or(0)
 }
 
 #[op2]
 #[string]
 fn op_get_player_name(state: &mut OpState, source: u32) -> String {
-    state
+    state.borrow::<Natives>().0
         .borrow::<SharedPlayers>()
         .0
         .get(source)
@@ -499,18 +443,18 @@ fn op_get_player_name(state: &mut OpState, source: u32) -> String {
 
 #[op2(fast)]
 fn op_does_player_exist(state: &mut OpState, source: u32) -> bool {
-    state.borrow::<SharedPlayers>().0.exists(source)
+    state.borrow::<Natives>().0.borrow::<SharedPlayers>().0.exists(source)
 }
 
 #[op2(fast)]
 fn op_get_num_player_identifiers(state: &mut OpState, source: u32) -> u32 {
-    state.borrow::<SharedPlayers>().0.identifier_count(source) as u32
+    state.borrow::<Natives>().0.borrow::<SharedPlayers>().0.identifier_count(source) as u32
 }
 
 #[op2]
 #[string]
 fn op_get_player_identifier(state: &mut OpState, source: u32, index: u32) -> String {
-    state
+    state.borrow::<Natives>().0
         .borrow::<SharedPlayers>()
         .0
         .identifier_at(source, index as usize)
@@ -520,7 +464,7 @@ fn op_get_player_identifier(state: &mut OpState, source: u32, index: u32) -> Str
 #[op2]
 #[string]
 fn op_get_player_endpoint(state: &mut OpState, source: u32) -> String {
-    state
+    state.borrow::<Natives>().0
         .borrow::<SharedPlayers>()
         .0
         .endpoint(source)
@@ -530,7 +474,7 @@ fn op_get_player_endpoint(state: &mut OpState, source: u32) -> String {
 #[op2]
 #[string]
 fn op_get_player_guid(state: &mut OpState, source: u32) -> String {
-    state
+    state.borrow::<Natives>().0
         .borrow::<SharedPlayers>()
         .0
         .guid(source)
@@ -562,7 +506,7 @@ fn op_get_player_identifier_by_type(
     source: u32,
     #[string] id_type: String,
 ) -> String {
-    state
+    state.borrow::<Natives>().0
         .borrow::<SharedPlayers>()
         .0
         .identifier_by_type(source, &id_type)
@@ -591,12 +535,12 @@ deno_core::extension!(
 
 #[op2(fast)]
 fn op_deferral_defer(state: &mut OpState, source: u32) {
-    state.borrow::<SharedDeferrals>().0.defer(source);
+    state.borrow::<Natives>().0.borrow::<SharedDeferrals>().0.defer(source);
 }
 
 #[op2(fast)]
 fn op_deferral_update(state: &mut OpState, source: u32, #[string] message: String) {
-    state.borrow::<SharedDeferrals>().0.update(source, message);
+    state.borrow::<Natives>().0.borrow::<SharedDeferrals>().0.update(source, message);
 }
 
 #[op2(fast)]
@@ -606,12 +550,12 @@ fn op_deferral_done(state: &mut OpState, source: u32, #[string] reason: String) 
     } else {
         Some(reason)
     };
-    state.borrow::<SharedDeferrals>().0.done(source, reason);
+    state.borrow::<Natives>().0.borrow::<SharedDeferrals>().0.done(source, reason);
 }
 
 #[op2(fast)]
 fn op_deferral_present_card(state: &mut OpState, source: u32, #[string] card_json: String) {
-    state
+    state.borrow::<Natives>().0
         .borrow::<SharedDeferrals>()
         .0
         .present_card(source, card_json);
@@ -619,7 +563,7 @@ fn op_deferral_present_card(state: &mut OpState, source: u32, #[string] card_jso
 
 #[op2(fast)]
 fn op_set_kick_reason(state: &mut OpState, source: u32, #[string] reason: String) {
-    state
+    state.borrow::<Natives>().0
         .borrow::<SharedDeferrals>()
         .0
         .set_kick_reason(source, reason);
@@ -630,7 +574,7 @@ fn op_set_kick_reason(state: &mut OpState, source: u32, #[string] reason: String
 /// `RegisterZoneTransferState(cb)` — bookkeeping; the callback stays JS-side.
 #[op2(fast)]
 fn op_register_zone_transfer_state(state: &mut OpState) {
-    let ctx = state.borrow_mut::<RuntimeContext>();
+    let ctx = state.borrow_mut::<Natives>().0.borrow_mut::<RuntimeContext>();
     tracing::debug!(target: "mesh", resource = %ctx.resource_name, "zone transfer state registered");
     ctx.has_zone_transfer_state = true;
 }
@@ -639,7 +583,7 @@ fn op_register_zone_transfer_state(state: &mut OpState) {
 /// JSON object back to Rust.
 #[op2(fast)]
 fn op_report_zone_transfer_state(state: &mut OpState, #[string] json: String) {
-    state
+    state.borrow_mut::<Natives>().0
         .borrow_mut::<RuntimeContext>()
         .collected_transfer_state = Some(json);
 }
@@ -659,8 +603,8 @@ deno_core::extension!(
 /// others instead of dispatching an event nobody handles.
 #[op2(fast)]
 fn op_set_http_handler(state: &mut OpState) {
-    let resource = state.borrow::<RuntimeContext>().resource_name.clone();
-    state.borrow::<SharedHttpHandlers>().0.register(&resource);
+    let resource = state.borrow::<Natives>().0.borrow::<RuntimeContext>().resource_name.clone();
+    state.borrow::<Natives>().0.borrow::<SharedHttpHandlers>().0.register(&resource);
     tracing::debug!(target: "http", %resource, "resource registered an HTTP handler");
 }
 
@@ -701,7 +645,7 @@ fn op_http_response(
         .unwrap_or_default();
 
     let status = u16::try_from(status).unwrap_or(500);
-    let delivered = state.borrow::<SharedHttpHandlers>().0.complete(
+    let delivered = state.borrow::<Natives>().0.borrow::<SharedHttpHandlers>().0.complete(
         id,
         crate::ScriptHttpResponse {
             status,
@@ -713,7 +657,7 @@ fn op_http_response(
         // Either a double send() or an answer past the gateway's deadline.
         // Both are silent in FXServer; say it once here rather than leaving it
         // undiagnosable.
-        let resource = &state.borrow::<RuntimeContext>().resource_name;
+        let resource = &state.borrow::<Natives>().0.borrow::<RuntimeContext>().resource_name;
         tracing::debug!(
             target: "http",
             resource,

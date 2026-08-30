@@ -7,10 +7,10 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use dashmap::DashMap;
-use deno_core::{op2, OpState};
 
+use super::{world, rpc, NativeState};
 use super::{
-    console_buffer_text, natives_world, rpc_natives, RuntimeContext, SharedConvars,
+    console_buffer_text, RuntimeContext, SharedConvars,
     SharedEntityWorld, SharedHttp, SharedKvp, SharedPlayers, SharedResourceControl, SharedRouting,
     SharedStateBags, SharedVoice, SharedWorldControl, VoiceControl,
 };
@@ -70,12 +70,11 @@ pub(super) fn json_arg_bool(args: &[serde_json::Value], index: usize) -> bool {
     }
 }
 
-#[op2]
-#[string]
-pub(super) fn op_cfx_shared_native(
-    state: &mut OpState,
-    #[string] name: String,
-    #[string] args_json: String,
+/// The shared CFX natives (KVP, state bags, convars, resources).
+pub(crate) fn cfx_shared_native(
+    state: &mut NativeState,
+    name: String,
+    args_json: String,
 ) -> String {
     let args = json_args(&args_json);
     let resource = state.borrow::<RuntimeContext>().resource_name.clone();
@@ -242,13 +241,12 @@ pub(super) fn op_cfx_shared_native(
     value.to_string()
 }
 
-#[op2]
-#[string]
-pub(super) fn op_cfx_server_native(
-    state: &mut OpState,
-    #[string] name: String,
-    #[string] result_kind: String,
-    #[string] args_json: String,
+/// The server-only natives: synthetic entities, players, voice, world.
+pub(crate) fn cfx_server_native(
+    state: &mut NativeState,
+    name: String,
+    result_kind: String,
+    args_json: String,
 ) -> String {
     let args = json_args(&args_json);
     let entities = synthetic_entities();
@@ -438,7 +436,7 @@ pub(super) fn op_cfx_server_native(
                     json_arg_f64(&args, 3),
                 ]),
             );
-            rpc_natives::try_dispatch(state, &name, &args);
+            rpc::try_dispatch(state, &name, &args);
             serde_json::Value::Null
         }
         "SET_ENTITY_HEADING" => {
@@ -447,7 +445,7 @@ pub(super) fn op_cfx_server_native(
                 "heading",
                 serde_json::json!(json_arg_f64(&args, 1)),
             );
-            rpc_natives::try_dispatch(state, &name, &args);
+            rpc::try_dispatch(state, &name, &args);
             serde_json::Value::Null
         }
         "SET_ENTITY_HEALTH" => {
@@ -740,7 +738,7 @@ pub(super) fn op_cfx_server_native(
             // Readers backed by the decoded sync tree — the vehicle and ped
             // state family. Tried first: they answer from the server's own
             // reading of the world, so they must not be routed to a client.
-            if let Some(value) = natives_world::try_dispatch(state, &name, &args) {
+            if let Some(value) = world::try_dispatch(state, &name, &args) {
                 value
             }
             // Much of the "server" native surface is really a client mutation
@@ -748,7 +746,7 @@ pub(super) fn op_cfx_server_native(
             // before declaring the native unimplemented: a native in the CFX
             // context table *is* implemented, it just executes elsewhere. Every
             // one of them returns void, hence the null.
-            else if rpc_natives::try_dispatch(state, &name, &args) {
+            else if rpc::try_dispatch(state, &name, &args) {
                 serde_json::Value::Null
             } else {
                 let resource = state.borrow::<RuntimeContext>().resource_name.clone();
@@ -766,7 +764,7 @@ pub(super) fn op_cfx_server_native(
 /// object was malformed, or the queue is saturated. Each case is logged, so a
 /// callback that never fires has a cause in the log rather than being a
 /// mystery.
-fn perform_http_request(state: &OpState, resource: &str, raw: &str) -> u32 {
+fn perform_http_request(state: &NativeState, resource: &str, raw: &str) -> u32 {
     let Some(bridge) = state.borrow::<SharedHttp>().0.clone() else {
         unimplemented_native("PERFORM_HTTP_REQUEST_INTERNAL", "int", resource);
         return 0;
@@ -796,7 +794,7 @@ fn latin1_bytes(text: &str) -> Vec<u8> {
 }
 
 /// Queue an already-encoded client event on the net bridge.
-fn send_raw_client_event(state: &OpState, source: u32, event: String, payload: Vec<u8>) {
+fn send_raw_client_event(state: &NativeState, source: u32, event: String, payload: Vec<u8>) {
     let net = &state.borrow::<super::SharedNet>().0;
     if net
         .tx
@@ -816,21 +814,21 @@ fn send_raw_client_event(state: &OpState, source: u32, event: String, payload: V
     }
 }
 
-fn shared_resource_control(state: &OpState) -> Arc<dyn crate::ResourceControl> {
+fn shared_resource_control(state: &NativeState) -> Arc<dyn crate::ResourceControl> {
     Arc::clone(&state.borrow::<SharedResourceControl>().0)
 }
 
 /// Write a console variable from a native. Same store `GetConvar` reads and
 /// `/info.json` publishes, so a script setting one is immediately visible
 /// everywhere the engine would make it visible.
-fn set_convar(state: &OpState, name: &str, value: String) {
+fn set_convar(state: &NativeState, name: &str, value: String) {
     state
         .borrow::<SharedConvars>()
         .0
         .insert(name.to_owned(), value);
 }
 
-fn shared_world(state: &OpState) -> Arc<crate::EntityWorldView> {
+fn shared_world(state: &NativeState) -> Arc<crate::EntityWorldView> {
     Arc::clone(&state.borrow::<SharedEntityWorld>().0)
 }
 
@@ -841,7 +839,7 @@ fn shared_world(state: &OpState) -> Arc<crate::EntityWorldView> {
 /// from `CreateVehicle` immediately — while the entity itself is authored by
 /// the game state on its next tick.
 fn spawn_networked(
-    state: &OpState,
+    state: &NativeState,
     entity_type: ScriptEntityType,
     model: u32,
     position: [f32; 3],
@@ -867,7 +865,7 @@ fn spawn_networked(
 /// network id. Without one, the entity stays a server-local record so scripts
 /// that only read back what they created keep working.
 fn create_entity_handle(
-    state: &OpState,
+    state: &NativeState,
     entity_type: ScriptEntityType,
     model: u32,
     position: [f32; 3],
@@ -892,7 +890,7 @@ fn json_arg_position(args: &[serde_json::Value], first: usize) -> [f32; 3] {
 /// simulate, the synthetic store holds handles a server script created that no
 /// client owns yet. A script asking for "all vehicles" means both.
 fn all_entities(
-    state: &OpState,
+    state: &NativeState,
     networked: ScriptEntityType,
     synthetic: &str,
 ) -> serde_json::Value {
@@ -932,13 +930,13 @@ fn entity_update(id: u32, field: &str, value: serde_json::Value) {
 }
 
 /// The voice handle installed by the host, if any (voice enabled).
-fn shared_voice(state: &OpState) -> Option<Arc<dyn VoiceControl>> {
+fn shared_voice(state: &NativeState) -> Option<Arc<dyn VoiceControl>> {
     state
         .try_borrow::<SharedVoice>()
         .and_then(|v| v.0.as_ref().map(Arc::clone))
 }
 
-fn shared_routing(state: &OpState) -> Arc<dyn RoutingControl> {
+fn shared_routing(state: &NativeState) -> Arc<dyn RoutingControl> {
     Arc::clone(&state.borrow::<SharedRouting>().0)
 }
 
