@@ -18,6 +18,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use baston_config::ApiPermission;
+use baston_modules::{ModuleId, ModuleSet};
 use baston_scripting::{
     HandlerPerfStats, Observability, ProfilerRecordOptions, ResMonSnapshot, ResourcePerfStats,
 };
@@ -45,10 +46,17 @@ pub struct ApiState {
     pub server_name: String,
     pub max_players: u32,
     pub started_at: Instant,
+    /// Modules running in this process. Read by `/api/v1/status` and by the
+    /// router, which registers a module's routes only where it is enabled.
+    pub modules: ModuleSet,
 }
 
 pub fn api_router(state: ApiState) -> Router {
-    Router::new()
+    // The profiler is a module (ADR-002), gated at its registration site: with
+    // it off the routes do not exist, rather than existing and refusing. A 404
+    // is the honest answer — the capability is not running.
+    let profiler = state.modules.is_enabled(ModuleId::Profiler);
+    let mut router = Router::new()
         .route("/api/v1/status", get(status))
         .route("/api/v1/players", get(list_players))
         .route("/api/v1/zones", get(list_zones))
@@ -56,12 +64,16 @@ pub fn api_router(state: ApiState) -> Router {
         .route("/api/v1/resources", get(list_resources))
         .route("/api/v1/resmon", get(resmon))
         .route("/api/v1/resmon/resources/{name}", get(resmon_resource))
-        .route("/api/v1/resmon/events", get(resmon_events))
-        .route("/api/v1/profiler/record", post(profiler_record))
-        .route("/api/v1/profiler/stop", post(profiler_stop))
-        .route("/api/v1/profiler/status", get(profiler_status))
-        .route("/api/v1/profiler/latest", get(profiler_latest))
-        .route("/api/v1/profiler/latest/trace", get(profiler_latest_trace))
+        .route("/api/v1/resmon/events", get(resmon_events));
+    if profiler {
+        router = router
+            .route("/api/v1/profiler/record", post(profiler_record))
+            .route("/api/v1/profiler/stop", post(profiler_stop))
+            .route("/api/v1/profiler/status", get(profiler_status))
+            .route("/api/v1/profiler/latest", get(profiler_latest))
+            .route("/api/v1/profiler/latest/trace", get(profiler_latest_trace));
+    }
+    router
         .route("/api/v1/commands/execute", post(execute_command))
         .route("/api/v1/players/{source}/kick", post(kick_player))
         .route("/api/v1/resources/{name}/{action}", post(control_resource))
@@ -159,6 +171,8 @@ async fn status(State(state): State<ApiState>, headers: HeaderMap) -> Response {
         "players": state.players.count(),
         "max_players": state.max_players,
         "zones": zones,
+        "bundle": baston_modules::Bundle::current().label(),
+        "modules": state.modules.slugs(),
     }))
     .into_response()
 }
@@ -597,6 +611,22 @@ async fn execute_command(
 
     match command_name {
         "resmon" => execute_resmon_command(&state, &key, &target, &parts[1..]).await,
+        // The console path reaches the profiler without going through its
+        // routes, so it needs the same gate — otherwise disabling the module
+        // would only close the front door.
+        "profiler" if !state.modules.is_enabled(ModuleId::Profiler) => {
+            state
+                .audit
+                .record(&key, "command.execute", &target, "module-disabled");
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": "the profiler module is disabled",
+                    "hint": "add \"profiler\" to [modules] enable in baston.toml",
+                })),
+            )
+                .into_response()
+        }
         "profiler" => execute_profiler_command(&state, &key, &target, &parts[1..]),
         other => {
             let args = parts[1..].iter().map(|part| (*part).to_owned()).collect();

@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub mod modules;
+pub use baston_modules::{Bundle, ModuleId, ModuleSet};
+pub use modules::{LegacyToggles, ModulesConfig};
+
 /// Errors produced while loading or parsing the configuration.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -113,6 +117,31 @@ pub enum ConfigError {
          → point it at a real FXServer.exe, or use mode = \"gate\" (no sidecar)"
     )]
     LicenseFxserverNotFound(String),
+    #[error(
+        "module \"{module}\" is configured in two places that disagree\n  \
+         → {legacy_site} says {legacy_value}, but [modules] {list} says the opposite\n  \
+         → keep one of the two; {legacy_site} is the older spelling and still works"
+    )]
+    ModuleConflict {
+        module: &'static str,
+        legacy_site: &'static str,
+        legacy_value: bool,
+        list: &'static str,
+    },
+    #[error(
+        "module \"{module}\" is not compiled into this build\n  \
+         → it ships in bundle {bundle}\n  \
+         → run `baston-gateway --modules` to see what this binary contains"
+    )]
+    ModuleNotCompiledIn {
+        module: &'static str,
+        bundle: &'static str,
+    },
+    #[error(
+        "invalid module override {var}={value}\n  \
+         → expected one of: true/false, 1/0, yes/no, on/off"
+    )]
+    ModuleEnvOverride { var: String, value: String },
 }
 
 /// `[tls]` section — HTTPS for packfile downloads (required by FiveM canary 31725+).
@@ -154,7 +183,19 @@ pub struct BastonConfig {
     pub api: ApiConfig,
     #[serde(default)]
     pub voice: VoiceConfig,
+    #[serde(default)]
+    pub modules: ModulesConfig,
     pub tls: Option<TlsConfig>,
+    /// Modules resolved from `[modules]`, the legacy section flags and the
+    /// environment. Populated by [`BastonConfig::load`]; a config built straight
+    /// from `toml::from_str` in a test carries an empty set until
+    /// [`BastonConfig::resolve_modules`] runs.
+    #[serde(skip)]
+    pub enabled_modules: ModuleSet,
+    /// `(section, module)` pairs whose module is off, so the boot path can warn
+    /// that those settings are inert instead of leaving the operator guessing.
+    #[serde(skip)]
+    pub inert_sections: Vec<(&'static str, &'static str)>,
 }
 
 /// `[voice]` section — the embedded Mumble-compatible voice server.
@@ -1256,8 +1297,42 @@ impl BastonConfig {
             source,
         })?;
         config.apply_env_overrides()?;
+        config.resolve_modules(&raw)?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Parse a configuration document, including module resolution.
+    ///
+    /// `load` reads a file; this is the same pipeline over an in-memory
+    /// document, so tests exercise module resolution instead of the empty set
+    /// a bare `toml::from_str` leaves behind.
+    pub fn parse(raw: &str) -> Result<Self, ConfigError> {
+        let mut config: Self = toml::from_str(raw).map_err(|source| ConfigError::Parse {
+            path: PathBuf::from("<memory>"),
+            source,
+        })?;
+        config.apply_env_overrides()?;
+        config.resolve_modules(raw)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Resolve `[modules]` against the legacy section flags and the
+    /// environment, then record which configured sections are inert.
+    ///
+    /// Runs before [`Self::validate`] so section validators can assume the
+    /// module set is known — a section belonging to a disabled module is not
+    /// held to the invariants that only matter when it runs.
+    pub fn resolve_modules(&mut self, raw: &str) -> Result<(), ConfigError> {
+        self.enabled_modules = self.modules.resolve(LegacyToggles::from_toml(raw))?;
+        self.inert_sections = modules::inert_sections(self.enabled_modules, raw);
+        Ok(())
+    }
+
+    /// Whether a module runs in this process.
+    pub fn module_enabled(&self, module: ModuleId) -> bool {
+        self.enabled_modules.is_enabled(module)
     }
 
     /// Validate cross-section invariants after env overrides. Kept in `load`

@@ -1,0 +1,20 @@
+[package]
+name = "baston-modules"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The module registry (ADR-002). A leaf crate on purpose: every other crate may
+# depend on it, so it must never grow a dependency of its own beyond serde.
+# It describes capabilities; it never implements them.
+[dependencies]
+serde = { workspace = true }
+
+[features]
+default = []
+# Tier 2 capabilities. These mirror the features on the crates that actually
+# implement them; the binary that compiles a capability in must also forward
+# its flag here, or `--modules` will under-report what the build contains.
+scripting-js = []
+scripting-lua = []
+escrow = []

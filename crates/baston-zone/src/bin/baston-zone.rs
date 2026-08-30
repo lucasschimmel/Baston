@@ -129,7 +129,17 @@ async fn main() -> anyhow::Result<()> {
         "baston-zone starting — bounds=({},{},{},{}) gateway={}",
         bounds.x_min, bounds.y_min, bounds.x_max, bounds.y_max, config.meshing.gateway_grpc);
 
-    if config.metrics.enabled {
+    // A zone runs the same module set as the gateway it federates with; only
+    // the modules a zone process actually owns are consulted here.
+    let modules = config.enabled_modules;
+    tracing::info!(target: "zone", bundle = %baston_modules::Bundle::current(),
+        modules = ?modules.slugs(), "resolved modules");
+    for (section, module) in &config.inert_sections {
+        tracing::warn!(target: "modules",
+            "[{section}] is configured but module \"{module}\" is disabled — those settings are inert");
+    }
+
+    if modules.is_enabled(baston_modules::ModuleId::Metrics) {
         let addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.metrics.port));
         if let Err(e) = metrics_exporter_prometheus::PrometheusBuilder::new()
             .with_http_listener(addr)

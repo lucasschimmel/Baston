@@ -4,8 +4,17 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# Tier 2 (ADR-002): the scripting VMs are the one capability heavy enough that
+# compile-time exclusion is warranted — V8 dominates the dependency graph and
+# the build, and a Lua-only server should not pay for it.
+[features]
+default = ["js"]
+js = ["dep:deno_core"]
+lua = ["dep:mlua"]
+
 [dependencies]
-deno_core = { workspace = true }
+deno_core = { workspace = true, optional = true }
+mlua = { workspace = true, optional = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

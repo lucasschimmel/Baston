@@ -34,6 +34,7 @@ axum-server = { workspace = true }
 rustls = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
+baston-modules = { workspace = true }
 baston-config = { workspace = true }
 baston-core = { workspace = true }
 baston-cfx-platform = { workspace = true }
@@ -41,6 +42,15 @@ baston-protocol = { workspace = true }
 baston-scripting = { workspace = true }
 baston-zone = { workspace = true }
 baston-voice = { workspace = true }
+
+# Tier 2 capabilities (ADR-002). Each forwards to the crate that implements it
+# *and* to baston-modules, which is what `--modules` reports: a build that
+# forgets the second half would under-report what it contains.
+[features]
+default = ["scripting-js"]
+scripting-js = ["baston-modules/scripting-js", "baston-scripting/js"]
+scripting-lua = ["baston-modules/scripting-lua", "baston-scripting/lua"]
+escrow = ["baston-modules/escrow", "baston-zone/escrow"]
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use baston_config::BastonConfig;
 use baston_gateway::voice::GatewayVoice;
+use baston_modules::{Bundle, ModuleId, ModuleSet};
 use baston_gateway::{router, AppState, AuthService, PlayerRegistry};
 use baston_scripting::{DeferralRegistry, ScriptHost};
 use baston_zone::resource_loader::{spawn_hot_reload, ResourceManager};
@@ -23,6 +24,38 @@ fn raise_timer_resolution() {
     if result != 0 {
         tracing::warn!(target: "baston", result, "timeBeginPeriod(1) failed — expect timer jitter");
     }
+}
+
+/// One line naming the bundle and the resolved module set.
+///
+/// Printed on every boot because it is what a support channel needs first: an
+/// operator pastes it and the reader knows which binary is running and what it
+/// has switched on, without a round trip. Modules that are compiled in but off
+/// are listed too — "absent" and "off" are different problems with different
+/// fixes, and collapsing them is how support threads go in circles.
+fn print_module_line(set: ModuleSet) {
+    const RESET: &str = "\x1b[0m";
+    const D: &str = "\x1b[38;5;245m";
+    let on = set.slugs();
+    let off: Vec<&str> = set.disabled().map(ModuleId::slug).collect();
+    let on = if on.is_empty() {
+        "none".to_owned()
+    } else {
+        on.join(", ")
+    };
+    println!("{D}   bundle      {RESET}{}", Bundle::current());
+    println!("{D}   modules on  {RESET}{on}");
+    if !off.is_empty() {
+        println!("{D}   modules off {RESET}{}", off.join(", "));
+    }
+    let absent: Vec<&str> = set.absent().map(ModuleId::slug).collect();
+    if !absent.is_empty() {
+        println!(
+            "{D}   absent      {RESET}{} (needs another bundle){D} — see --modules{RESET}",
+            absent.join(", ")
+        );
+    }
+    println!();
 }
 
 /// Startup banner. BASTON is a from-scratch FiveM server core in Rust — not a
@@ -53,6 +86,22 @@ fn print_banner() {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // `--modules` answers "what is in this binary and what is switched on"
+    // without booting the server, so it stays usable on a host whose config is
+    // broken — which is exactly when the question gets asked.
+    if std::env::args().any(|arg| arg == "--modules") {
+        let config_path = std::env::var("BASTON_CONFIG").unwrap_or_else(|_| "baston.toml".into());
+        let set = match BastonConfig::load(Path::new(&config_path)) {
+            Ok(config) => config.enabled_modules,
+            Err(e) => {
+                eprintln!("note: {config_path} did not load ({e});\n      showing build defaults instead.\n");
+                ModuleSet::defaults()
+            }
+        };
+        print!("{}", baston_modules::report(set));
+        return Ok(());
+    }
+
     // Both ring (reqwest) and aws-lc-rs (axum-server) are compiled in.
     // Install aws-lc-rs explicitly so rustls doesn't panic at first TLS use.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -71,14 +120,25 @@ async fn main() -> anyhow::Result<()> {
 
     let config_path = std::env::var("BASTON_CONFIG").unwrap_or_else(|_| "baston.toml".into());
     let mut config = BastonConfig::load(Path::new(&config_path))?;
+    let modules = config.enabled_modules;
+    print_module_line(modules);
+    // Settings whose module is off do nothing. Saying so at boot is the whole
+    // point of the module system's error surface: the alternative is an
+    // operator editing [voice] for an hour while nothing changes.
+    for (section, module) in &config.inert_sections {
+        tracing::warn!(target: "modules",
+            "[{section}] is configured but module \"{module}\" is disabled — those settings are inert");
+    }
     // Authenticate and apply the licensed slot cap before opening metrics,
     // voice, game, admin, or HTTP listeners.
     let mut cfx_runtime = baston_gateway::cfx::bootstrap(&mut config).await?;
     tracing::info!(name = %config.server.name, port = config.server.port,
         "BASTON online — speaking the FiveM protocol, zero FXServer C++");
 
-    // Prometheus /metrics endpoint (jalon C6).
-    if config.metrics.enabled {
+    // Prometheus /metrics endpoint (jalon C6). The `metrics` instrumentation
+    // stays unconditional in core code — the facade is a near-no-op without a
+    // recorder — so only the exporter is gated (ADR-002).
+    if modules.is_enabled(ModuleId::Metrics) {
         let addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.metrics.port));
         match metrics_exporter_prometheus::PrometheusBuilder::new()
             .with_http_listener(addr)
@@ -99,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
     // the script host so the MUMBLE_* natives are live from the first
     // resource load. Sessions are created when a client's Mumble side
     // authenticates; the UDP task tears them down on game disconnect.
-    let voice = if config.voice.enabled {
+    let voice = if modules.is_enabled(ModuleId::Voice) {
         Some(
             baston_voice::server::spawn(baston_voice::server::VoiceServerConfig {
                 bind: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
@@ -192,7 +252,7 @@ async fn main() -> anyhow::Result<()> {
     resource_manager.start_all().await?;
 
     // Keep the watcher alive for the process lifetime.
-    let _watcher = if config.dev.hot_reload {
+    let _watcher = if modules.is_enabled(ModuleId::HotReload) {
         Some(spawn_hot_reload(Arc::clone(&resource_manager))?)
     } else {
         None
@@ -420,7 +480,13 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| baston_protocol::rage::sync_parse::GameBuild::default().0),
         ),
         baston_gateway::debug_info::DebugFeedSetup {
-            config: config.debug.clone(),
+            // Gated here rather than inside the feed: with the module off the
+            // UDP task must not even learn the overlay's access list.
+            config: if modules.is_enabled(ModuleId::DebugOverlay) {
+                config.debug.clone()
+            } else {
+                baston_config::DebugConfig::default()
+            },
             server_name: config.server.name.clone(),
             // The overlay's mesh section only exists where a federation does.
             mesh: mesh.as_ref().map(|mesh| baston_gateway::MeshView {
@@ -452,7 +518,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Admin + monitoring/control API on the admin port. Legacy /admin/*
     // routes need the mesh; /api/v1/* works in single-process mode too.
-    {
+    // Off by default (ADR-002): it can kick players and stop resources, so it
+    // opens only where an operator asked for it.
+    if modules.is_enabled(ModuleId::AdminApi) {
         let keyring = Arc::new(baston_gateway::api::KeyRing::from_config(
             &config.api,
             &config.meshing.admin_token,
@@ -479,6 +547,7 @@ async fn main() -> anyhow::Result<()> {
                 server_name: config.server.name.clone(),
                 max_players: config.server.max_players,
                 started_at: std::time::Instant::now(),
+                modules,
             },
             legacy,
             config.meshing.admin_port,

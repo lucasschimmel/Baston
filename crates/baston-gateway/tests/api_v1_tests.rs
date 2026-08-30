@@ -17,6 +17,14 @@ use baston_zone::resource_loader::ResourceManager;
 use http_body_util::BodyExt;
 use tower::util::ServiceExt;
 
+/// Every Tier 1 module the API cares about, on.
+fn all_modules_on() -> baston_modules::ModuleSet {
+    let mut set = baston_modules::ModuleSet::defaults();
+    set.enable(baston_modules::ModuleId::AdminApi);
+    set.enable(baston_modules::ModuleId::Profiler);
+    set
+}
+
 const MONITOR_TOKEN: &str = "monitor-token-0123456789abcdef0123";
 const CONTROL_TOKEN: &str = "control-token-0123456789abcdef0123";
 const LEGACY_TOKEN: &str = "legacy-admin-token";
@@ -119,6 +127,10 @@ async fn fixture(audit: AuditLog, with_mesh: bool) -> Fixture {
             server_name: "BASTON Test".into(),
             max_players: 32,
             started_at: Instant::now(),
+            // The fixture exercises the full route table, so it runs with the
+            // optional modules on. `profiler_routes_absent_when_module_off`
+            // covers the other side.
+            modules: all_modules_on(),
         },
         udp_rx,
         _dir: dir,
@@ -521,4 +533,91 @@ async fn zones_empty_without_mesh_and_drain_404s() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn profiler_routes_are_absent_when_the_module_is_off() {
+    // ADR-002: a disabled module's routes do not exist. A 404 says the
+    // capability is not running; a 403 would wrongly suggest it is there and
+    // the caller merely lacks a permission.
+    let mut fx = fixture(AuditLog::disabled(), false).await;
+    fx.state.modules.disable(baston_modules::ModuleId::Profiler);
+    let app = api_router(fx.state);
+
+    for (path, method) in [
+        ("/api/v1/profiler/status", "GET"),
+        ("/api/v1/profiler/latest", "GET"),
+        ("/api/v1/profiler/record", "POST"),
+        ("/api/v1/profiler/stop", "POST"),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(req(path, method, Some(CONTROL_TOKEN)))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "{path} must not be routed with the profiler module off"
+        );
+    }
+
+    // Monitoring routes outside the module keep working.
+    let resp = app
+        .oneshot(req("/api/v1/resmon", "GET", Some(MONITOR_TOKEN)))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn console_profiler_command_refuses_when_the_module_is_off() {
+    // The console path reaches the profiler without its routes, so it carries
+    // its own gate — otherwise disabling the module only closes the front door.
+    let mut fx = fixture(AuditLog::disabled(), false).await;
+    fx.state.modules.disable(baston_modules::ModuleId::Profiler);
+    let app = api_router(fx.state);
+
+    let request = Request::builder()
+        .uri("/api/v1/commands/execute")
+        .method("POST")
+        .header("Authorization", format!("Bearer {CONTROL_TOKEN}"))
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"command":"profiler record 4"}"#))
+        .unwrap();
+    let resp = app.oneshot(request).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = body_json(resp).await;
+    assert!(
+        body["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("[modules]"),
+        "the refusal must point at the fix: {body}"
+    );
+}
+
+#[tokio::test]
+async fn status_reports_the_bundle_and_module_set() {
+    // An operator reading /status must be able to tell which binary answered.
+    let fx = fixture(AuditLog::disabled(), false).await;
+    let app = api_router(fx.state);
+    let body = body_json(
+        app.oneshot(req("/api/v1/status", "GET", Some(MONITOR_TOKEN)))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        body["bundle"].as_str(),
+        Some(baston_modules::Bundle::current().label())
+    );
+    let modules: Vec<&str> = body["modules"]
+        .as_array()
+        .expect("modules array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(modules.contains(&"profiler"), "{modules:?}");
+    assert!(modules.contains(&"admin-api"), "{modules:?}");
 }
