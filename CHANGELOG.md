@@ -9,6 +9,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Added the four-tier module system (ADR-002): capabilities are now classified
+  as core, runtime-toggled modules, build-time capabilities, or out-of-process
+  addons, and the tier decides the mechanism.
+- Added the `[modules]` configuration section, `BASTON_MODULE_*` environment
+  overrides, and `baston-gateway --modules`, which reports the bundle and
+  distinguishes modules that are *off* from capabilities that are *absent*.
+- Added a Lua scripting runtime (mlua / Lua 5.4) as a Tier 2 capability. Lua
+  resources run against the same native implementations as JavaScript ones; a
+  resource selects its engine through its server-script extensions.
+- Added four CI-tested bundles — `lite`, `js`, `lua`, `full` — so a capability
+  behind a Cargo feature cannot rot without the build noticing.
+
 - Added verified CFX server identity through an operator-supplied, unmodified
   FXServer broker.
 - Added policy-derived slot ceilings for the official 48, 64, 128, and 2048
@@ -28,6 +40,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- The CFX natives no longer depend on deno_core, so one implementation serves
+  both scripting engines. `extensions/` is now only the V8 half of the bridge.
+- A resource with no server scripts no longer spawns a runtime; client-only and
+  streaming-only resources used to cost an empty V8 isolate each.
 - Moved global CFX identity ownership from zone processes to the public gateway.
 - Restricted zone-local FXServer sidecars to the deferred Asset Escrow path.
 - Bound the HTTP and ENet game transports to `server.bind_address` so the
@@ -35,6 +51,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Security
 
+- The monitoring/control API, the `displayinfo` overlay and the script profiler
+  are now off by default. Each widens what a caller can do to a running server,
+  so they open where an operator asks rather than by default. Enable them with
+  `[modules] enable = ["admin-api", "debug-overlay", "profiler"]`.
 - Authentication now fails closed before public listeners open and the gateway
   shuts down if its authenticated broker exits.
 - Licence keys and identity tokens use redacted debug output, bounded IPC, and

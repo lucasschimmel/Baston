@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use baston_config::BastonConfig;
 use baston_gateway::voice::GatewayVoice;
-use baston_modules::{Bundle, ModuleId, ModuleSet};
 use baston_gateway::{router, AppState, AuthService, PlayerRegistry};
+use baston_modules::{Bundle, ModuleId, ModuleSet};
 use baston_scripting::{DeferralRegistry, ScriptHost};
 use baston_zone::resource_loader::{spawn_hot_reload, ResourceManager};
 
@@ -76,12 +76,30 @@ fn print_banner() {
            \n\
            {D}   transport   {RESET}ENet 1.3 + FiveM message layer (protocol reverse-engineered)\n\
            {D}   auth        {RESET}real CFX ticket verification (offline RSA)\n\
-           {D}   scripting   {RESET}deno_core / V8 — runs FiveM JS resources unmodified\n\
+           {D}   scripting   {RESET}{scripting}\n\
            {D}   state sync  {RESET}NATS JetStream · dirty-flag deltas · AoI culling\n\
            {D}   benchmarked {RESET}100 players @ p50 39ms / p99 69ms · 0.6 Mbps · 0 desyncs\n\
            {D}   version     {RESET}baston {ver} · tokio · axum · rustls\n",
         ver = env!("CARGO_PKG_VERSION"),
+        scripting = scripting_line(),
     );
+}
+
+/// What this bundle can actually run, for the banner.
+///
+/// Derived from the compiled capabilities rather than hardcoded: a `lua`
+/// binary announcing V8 would be the banner's first lie, and the banner is
+/// what operators quote back to us.
+fn scripting_line() -> &'static str {
+    match (
+        ModuleId::ScriptingJs.is_compiled_in(),
+        ModuleId::ScriptingLua.is_compiled_in(),
+    ) {
+        (true, true) => "deno_core / V8 + mlua — runs FiveM JS and Lua resources unmodified",
+        (true, false) => "deno_core / V8 — runs FiveM JS resources unmodified",
+        (false, true) => "mlua / Lua 5.4 — runs FiveM Lua resources unmodified",
+        (false, false) => "none — this bundle runs no resources",
+    }
 }
 
 #[tokio::main]

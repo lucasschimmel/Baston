@@ -61,9 +61,8 @@ impl LegacyToggles {
             // must not race it to a worse error message.
             return Self::default();
         };
-        let flag = |section: &str, key: &str| -> Option<bool> {
-            doc.get(section)?.get(key)?.as_bool()
-        };
+        let flag =
+            |section: &str, key: &str| -> Option<bool> { doc.get(section)?.get(key)?.as_bool() };
         Self {
             voice: flag("voice", "enabled"),
             metrics: flag("metrics", "enabled"),
@@ -122,7 +121,7 @@ impl ModulesConfig {
         let enable = self.parse_slugs(&self.enable, "enable")?;
         let disable = self.parse_slugs(&self.disable, "disable")?;
 
-        for module in enable.iter().copied() {
+        for &module in &enable {
             if disable.contains(&module) {
                 return Err(ConfigError::Invalid {
                     section: "modules",
@@ -157,11 +156,10 @@ impl ModulesConfig {
         for &module in baston_modules::ALL {
             let var = module.env_var();
             if let Ok(value) = std::env::var(&var) {
-                let enabled =
-                    parse_bool(&value).ok_or_else(|| ConfigError::ModuleEnvOverride {
-                        var: var.clone(),
-                        value: value.clone(),
-                    })?;
+                let enabled = parse_bool(&value).ok_or_else(|| ConfigError::ModuleEnvOverride {
+                    var: var.clone(),
+                    value: value.clone(),
+                })?;
                 set.set(module, enabled);
             }
         }
@@ -180,7 +178,11 @@ impl ModulesConfig {
         Ok(set)
     }
 
-    fn parse_slugs(&self, slugs: &[String], list: &'static str) -> Result<Vec<ModuleId>, ConfigError> {
+    fn parse_slugs(
+        &self,
+        slugs: &[String],
+        list: &'static str,
+    ) -> Result<Vec<ModuleId>, ConfigError> {
         slugs
             .iter()
             .map(|slug| {
@@ -308,7 +310,10 @@ mod tests {
     #[test]
     fn inert_sections_flag_configured_but_disabled_modules() {
         let set = resolve("[modules]\ndisable = [\"metrics\"]\n").unwrap();
-        let inert = inert_sections(set, "[metrics]\nport = 9090\n[modules]\ndisable = [\"metrics\"]\n");
+        let inert = inert_sections(
+            set,
+            "[metrics]\nport = 9090\n[modules]\ndisable = [\"metrics\"]\n",
+        );
         assert!(inert.iter().any(|(section, _)| *section == "metrics"));
     }
 

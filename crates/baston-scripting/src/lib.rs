@@ -35,12 +35,11 @@ mod runtime;
 mod state_bag;
 
 pub use deferrals::{DeferralOutcome, DeferralRegistry};
+pub use engine::Engine;
 pub use entity_world::{
     EntitySummary, EntityWorldView, NoWorldControl, ScriptEntityType, WorldCommand, WorldControl,
 };
-pub use engine::Engine;
 pub use error::ScriptError;
-pub use native_state::{NativeState, RuntimeContext, SharedVoice, VoiceControl};
 pub use host::{ScriptHost, ScriptSource};
 pub use http_bridge::{
     parse_request as parse_http_request, HttpBridge, HttpReply, HttpRequest, HttpRequestSpec,
@@ -48,6 +47,8 @@ pub use http_bridge::{
 };
 pub use http_handler::{HttpHandlerRegistry, ScriptHttpResponse, HTTP_REQUEST_EVENT};
 pub use kvp::KvpStore;
+pub use native_state::SharedGameState;
+pub use native_state::{NativeState, RuntimeContext, SharedVoice, VoiceControl};
 pub use net_bridge::{NetBridge, NetOutbound};
 pub use observability::{
     DispatchKind, HandlerPerfStats, Observability, ProfilerRecordOptions, ProfilerStatus,
@@ -59,7 +60,6 @@ pub use resource_control::{
 pub use resource_registry::{ResourceRegistry, ScriptResourceState};
 #[cfg(feature = "js")]
 pub use runtime::ScriptRuntime;
-pub use native_state::SharedGameState;
 pub use state_bag::{
     entity_from_state_bag_name, entity_state_bag_name, player_from_state_bag_name,
     player_state_bag_name, InMemoryRoutingControl, RoutingControl, RoutingLockdownMode,

@@ -1,6 +1,6 @@
 //! `LuaRuntime` — one Lua state per resource (ADR-002, Tier 2).
 //!
-//! The counterpart of [`crate::runtime::ScriptRuntime`], and deliberately much
+//! The counterpart of `ScriptRuntime`, and deliberately much
 //! smaller: Lua has no event loop of its own, so a dispatch is a synchronous
 //! call and concurrency is cooperative coroutines driven by `tick`. Everything
 //! a native does is shared with the V8 path through
@@ -106,7 +106,9 @@ impl LuaRuntime {
                 Ok(json.to_string())
             })
             .map_err(|e| self.init_error(&e))?;
-        table.set("json_encode", encode).map_err(|e| self.init_error(&e))?;
+        table
+            .set("json_encode", encode)
+            .map_err(|e| self.init_error(&e))?;
 
         let decode = lua
             .create_function(|lua, text: String| {
@@ -115,7 +117,9 @@ impl LuaRuntime {
                 lua.to_value(&json)
             })
             .map_err(|e| self.init_error(&e))?;
-        table.set("json_decode", decode).map_err(|e| self.init_error(&e))?;
+        table
+            .set("json_decode", decode)
+            .map_err(|e| self.init_error(&e))?;
 
         // --- the natives, shared verbatim with the V8 path ---
         //
@@ -125,10 +129,17 @@ impl LuaRuntime {
         let state = Rc::clone(&self.state);
         let native = lua
             .create_function(move |_, (name, kind, args): (String, String, String)| {
-                Ok(server::cfx_native(&mut state.borrow_mut(), name, kind, args))
+                Ok(server::cfx_native(
+                    &mut state.borrow_mut(),
+                    name,
+                    kind,
+                    args,
+                ))
             })
             .map_err(|e| self.init_error(&e))?;
-        table.set("native", native).map_err(|e| self.init_error(&e))?;
+        table
+            .set("native", native)
+            .map_err(|e| self.init_error(&e))?;
 
         // --- console ---
         let resource = self.resource_name.clone();
@@ -229,7 +240,10 @@ impl LuaRuntime {
         let report_error = lua
             .create_function(move |_, message: String| {
                 tracing::error!(target: "script", resource = %resource, "{message}");
-                state.borrow_mut().borrow_mut::<RuntimeContext>().handler_errors += 1;
+                state
+                    .borrow_mut()
+                    .borrow_mut::<RuntimeContext>()
+                    .handler_errors += 1;
                 Ok(())
             })
             .map_err(|e| self.init_error(&e))?;
@@ -329,10 +343,7 @@ impl LuaRuntime {
             return Ok(());
         }
         let started = Instant::now();
-        let dispatch: mlua::Table = match self.dispatch_table() {
-            Ok(table) => table,
-            Err(e) => return Err(e),
-        };
+        let dispatch: mlua::Table = self.dispatch_table()?;
         let errors: u32 = dispatch
             .get::<mlua::Function>("event")
             .and_then(|f| f.call((event, args_json, source)))
@@ -463,7 +474,12 @@ mod tests {
     #[test]
     fn prelude_loads_and_exposes_the_cfx_surface() {
         let rt = runtime("test");
-        for global in ["Citizen", "AddEventHandler", "RegisterNetEvent", "TriggerEvent"] {
+        for global in [
+            "Citizen",
+            "AddEventHandler",
+            "RegisterNetEvent",
+            "TriggerEvent",
+        ] {
             let value: Value = rt.lua.globals().get(global).unwrap();
             assert!(!matches!(value, Value::Nil), "{global} is missing");
         }
@@ -557,8 +573,13 @@ mod tests {
             "#,
         )
         .unwrap();
-        rt.dispatch_event("boom", "[]", None, crate::observability::DispatchKind::Event)
-            .unwrap();
+        rt.dispatch_event(
+            "boom",
+            "[]",
+            None,
+            crate::observability::DispatchKind::Event,
+        )
+        .unwrap();
         assert_eq!(
             rt.lua.globals().get::<i64>("ran").unwrap(),
             1,

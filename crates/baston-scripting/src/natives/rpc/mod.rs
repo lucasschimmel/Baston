@@ -37,8 +37,8 @@ mod table;
 
 use std::time::Instant;
 
-use dashmap::DashMap;
 use super::NativeState;
+use dashmap::DashMap;
 
 use super::server::json_arg_netid;
 use super::{RuntimeContext, SharedEntityWorld, SharedNet, SharedObservability};
@@ -161,8 +161,7 @@ fn dispatch(
     // still allocated — then immediately released so the waiter map does not
     // grow one dead entry per fire-and-forget dispatch.
     let (id, _rx) = net.pending_natives.register();
-    let queued =
-        super::client::queue_native_call(&net, target, id, native.hash, args.to_vec());
+    let queued = super::client::queue_native_call(&net, target, id, native.hash, args.to_vec());
     net.pending_natives.cancel(id);
 
     observability.record_native_roundtrip(

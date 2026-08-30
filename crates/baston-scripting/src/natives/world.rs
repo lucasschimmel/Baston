@@ -2,7 +2,7 @@
 //!
 //! These all follow the same shape — look the entity up in the world mirror,
 //! read one node's worth of state, map it to what the native returns — so they
-//! live together rather than swelling [`super::natives_server`].
+//! live together rather than swelling [`super::server`].
 //!
 //! ## Why they used to be missing
 //!

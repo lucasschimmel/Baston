@@ -547,6 +547,7 @@ cargo fmt --check ; cargo clippy --workspace -- -D warnings ; cargo test --works
 
 ## Références internes
 
+- `docs/modules.md` — modules activables, bundles (js / lua / lite / full), addons
 - `docs/operations.md` — topologie, zones, monitoring, alerting détaillé
 - `docs/api.md` — API `/api/v1` complète (routes, permissions, audit)
 - `docs/streaming.md` — assets `stream/`

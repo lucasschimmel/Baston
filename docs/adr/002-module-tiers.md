@@ -96,8 +96,12 @@ Selected at build time via Cargo features, because enabling them changes the
 dependency graph. Shipped to operators as prebuilt **bundles**, so that
 selecting a capability never requires the operator to own a Rust toolchain.
 
-Current members: `scripting-js` (deno_core/V8), `scripting-lua` (mlua/LuaJIT),
+Current members: `scripting-js` (deno_core/V8), `scripting-lua` (mlua/Lua 5.4),
 `escrow` (Windows + operator-supplied FXServer).
+
+Lua 5.4 rather than LuaJIT because `luajit-src` bootstraps through `minilua`,
+which does not build on every target BASTON ships; CFX supports both (`lua54`),
+and the interpreter is swappable behind the same feature later.
 
 **Test:** enabling it pulls a dependency tree that an operator who does not want
 the capability should not have to compile, download, or be exposed to.
@@ -189,9 +193,13 @@ work and continue to be authoritative for their own module, so existing
 `baston.toml` files keep their meaning. Where both are present and disagree, the
 load fails with an error naming both sites rather than silently picking one.
 
-Configuring a section whose module is disabled is an error, not a no-op. The
-single most likely operator failure mode is editing `[voice]` and observing
-nothing happen; the loader must say so.
+The single most likely operator failure mode is editing a section and observing
+nothing happen, so silence is never an acceptable outcome. Two cases, two
+answers: two configuration sites that *contradict* each other fail the load,
+because one of them is a bug; a section that is merely inert because its module
+is off produces a warning naming both, because leaving a `[voice]` block in a
+file with voice switched off is normal and refusing to boot over it would be
+hostile.
 
 ### Gate placement
 

@@ -8,12 +8,12 @@ use std::sync::OnceLock;
 
 use dashmap::DashMap;
 
-use super::{world, rpc, NativeState};
 use super::{
-    console_buffer_text, RuntimeContext, SharedConvars,
-    SharedEntityWorld, SharedHttp, SharedKvp, SharedPlayers, SharedResourceControl, SharedRouting,
-    SharedStateBags, SharedVoice, SharedWorldControl, VoiceControl,
+    console_buffer_text, RuntimeContext, SharedConvars, SharedEntityWorld, SharedHttp, SharedKvp,
+    SharedPlayers, SharedResourceControl, SharedRouting, SharedStateBags, SharedVoice,
+    SharedWorldControl, VoiceControl,
 };
+use super::{rpc, world, NativeState};
 use crate::ScriptEntityType;
 use crate::{
     entity_from_state_bag_name, entity_state_bag_name, player_from_state_bag_name, RoutingControl,
@@ -52,7 +52,7 @@ pub(super) fn json_arg_i64(args: &[serde_json::Value], index: usize) -> i64 {
 /// Player/net-id argument: natives pass server ids as numbers or numeric
 /// strings (`source` is stringly-typed in much of the FiveM ecosystem).
 ///
-/// Shared with [`super::rpc_natives`], which reads the same kind of argument to
+/// Shared with [`super::rpc`], which reads the same kind of argument to
 /// resolve a context native's target.
 pub(super) fn json_arg_netid(args: &[serde_json::Value], index: usize) -> u32 {
     match args.get(index) {
@@ -780,7 +780,7 @@ pub(crate) fn cfx_server_native(
                 value
             }
             // Much of the "server" native surface is really a client mutation
-            // the server routes to one client (see [`rpc_natives`]). Try that
+            // the server routes to one client (see [`rpc`]). Try that
             // before declaring the native unimplemented: a native in the CFX
             // context table *is* implemented, it just executes elsewhere. Every
             // one of them returns void, hence the null.

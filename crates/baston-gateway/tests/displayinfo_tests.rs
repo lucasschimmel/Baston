@@ -1,6 +1,10 @@
 //! The `displayinfo` overlay reaches the client the same way any resource
 //! does — advertised by `getConfiguration`, downloaded as an RPF — while never
 //! existing on disk.
+// Driven by JavaScript resources (deferral handlers, exports, dist/ layouts),
+// so they run in the bundles that contain V8. The Lua runtime has its own
+// tests in baston-scripting; see docs/modules.md for what it covers.
+#![cfg(feature = "scripting-js")]
 
 use std::path::Path;
 use std::sync::Arc;

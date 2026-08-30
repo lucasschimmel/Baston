@@ -24,7 +24,7 @@ pub(crate) use console::console_buffer_text;
 // The natives were written against a service locator and keep borrowing from
 // one; re-exported here so their `use super::{...}` imports still resolve.
 pub(crate) use crate::native_state::{
-    NativeState, RuntimeContext, SharedConvars, SharedEntityWorld, SharedHttp, SharedKvp, SharedNet, SharedObservability, SharedPlayers,
-    SharedResourceControl, SharedResources, SharedRouting, SharedStateBags, SharedVoice,
-    SharedWorldControl, VoiceControl,
+    NativeState, RuntimeContext, SharedConvars, SharedEntityWorld, SharedHttp, SharedKvp,
+    SharedNet, SharedObservability, SharedPlayers, SharedResourceControl, SharedResources,
+    SharedRouting, SharedStateBags, SharedVoice, SharedWorldControl, VoiceControl,
 };

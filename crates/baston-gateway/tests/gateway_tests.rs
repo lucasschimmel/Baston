@@ -1,5 +1,9 @@
 //! Milestones A4 + A5 exit-criterion tests, run against the real router with
 //! a real script host and a temp resources directory.
+// Driven by JavaScript resources (deferral handlers, exports, dist/ layouts),
+// so they run in the bundles that contain V8. The Lua runtime has its own
+// tests in baston-scripting; see docs/modules.md for what it covers.
+#![cfg(feature = "scripting-js")]
 
 use std::path::Path;
 use std::sync::Arc;

@@ -4,7 +4,6 @@
 // contains the JS runtime. The Lua path has its own tests in src/lua.rs.
 #![cfg(feature = "js")]
 
-
 use std::sync::Arc;
 use std::time::Duration;
 

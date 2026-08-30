@@ -1,5 +1,9 @@
 //! `/api/v1` — per-key permissions, monitoring routes, control routes,
 //! audit log, legacy admin-token back-compat.
+// These start a real resource, so they need a scripting engine. The `lite`
+// bundle has none; the js and lua bundles each run them in their own
+// language, which is what keeps the API proven engine-agnostic.
+#![cfg(any(feature = "scripting-js", feature = "scripting-lua"))]
 
 use std::path::Path;
 use std::sync::Arc;
@@ -58,19 +62,30 @@ fn keyring() -> Arc<KeyRing> {
     ))
 }
 
+/// A trivial resource in whichever language this bundle can run.
+///
+/// The API is engine-agnostic and these tests prove it: they exercise the same
+/// routes against a JS resource in the `js` bundle and a Lua one in the `lua`
+/// bundle. Hardcoding `.js` would have made them a JS-bundle test that happens
+/// to live in the gateway.
 fn write_resource(dir: &Path) {
+    let (script, body) = if cfg!(feature = "scripting-js") {
+        ("dist/server/index.js", "console.log('up')")
+    } else {
+        ("dist/server/index.lua", "print('up')")
+    };
     let root = dir.join("axiom-core");
     std::fs::create_dir_all(root.join("dist/server")).unwrap();
     std::fs::write(
         root.join("manifest.json"),
         serde_json::json!({
             "name": "axiom-core",
-            "server_scripts": ["dist/server/index.js"],
+            "server_scripts": [script],
         })
         .to_string(),
     )
     .unwrap();
-    std::fs::write(root.join("dist/server/index.js"), "console.log('up')").unwrap();
+    std::fs::write(root.join(script), body).unwrap();
 }
 
 struct Fixture {

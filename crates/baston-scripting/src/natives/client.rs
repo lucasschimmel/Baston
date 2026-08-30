@@ -1,16 +1,14 @@
-//! Server → client native dispatch (`op_invoke_native_on_client`).
+//! Server → client native dispatch (`invoke_native_on_client`).
 
 #[cfg(feature = "js")]
 use std::time::Instant;
-
-
 
 /// How long a server → client native call may wait for its result.
 ///
 /// This is also the upper bound on how long one such call can stall the
 /// resource's runtime: the host command loop runs one dispatch to completion at
 /// a time, so while a handler awaits a native result no other event for that
-/// resource is serviced (see `op_invoke_native_on_client`). Keep it low enough
+/// resource is serviced (see `invoke_native_on_client`). Keep it low enough
 /// to bound a slow/hostile client's impact, but above realistic client RTT so
 /// legitimate results aren't dropped. Removing the stall entirely needs the
 /// host loop to drive dispatches concurrently on the shared isolate (tracked
@@ -22,8 +20,8 @@ const NATIVE_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_milli
 
 /// Queue one native call on the net bridge, addressed to `source`'s client.
 ///
-/// Shared by the awaited path ([`op_invoke_native_on_client`]) and by the
-/// fire-and-forget context dispatcher ([`super::rpc_natives`]) so both put the
+/// Shared by the awaited path ([`invoke_native_on_client`]) and by the
+/// fire-and-forget context dispatcher ([`super::rpc`]) so both put the
 /// exact same `__baston:invokeNative` payload on the wire. Returns `false` when
 /// the bridge is full or closed — backpressure, not a fatal error.
 pub(super) fn queue_native_call(

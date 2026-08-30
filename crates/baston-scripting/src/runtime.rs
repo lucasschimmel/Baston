@@ -656,7 +656,10 @@ impl ScriptRuntime {
         let handler_errors = {
             let op_state = self.js.op_state();
             let mut op_state = op_state.borrow_mut();
-            let ctx = op_state.borrow_mut::<Natives>().0.borrow_mut::<RuntimeContext>();
+            let ctx = op_state
+                .borrow_mut::<Natives>()
+                .0
+                .borrow_mut::<RuntimeContext>();
             let errors = ctx.handler_errors;
             ctx.handler_errors = 0;
             errors
@@ -689,14 +692,18 @@ impl ScriptRuntime {
             let op_state = self.js.op_state();
             let has = op_state
                 .borrow()
-                .borrow::<Natives>().0.borrow::<RuntimeContext>()
+                .borrow::<Natives>()
+                .0
+                .borrow::<RuntimeContext>()
                 .has_zone_transfer_state;
             if !has {
                 return Ok(None);
             }
             op_state
                 .borrow_mut()
-                .borrow_mut::<Natives>().0.borrow_mut::<RuntimeContext>()
+                .borrow_mut::<Natives>()
+                .0
+                .borrow_mut::<RuntimeContext>()
                 .collected_transfer_state = None;
         }
         let code = format!("globalThis.__baston.collectZoneTransferState({source});");
@@ -715,7 +722,9 @@ impl ScriptRuntime {
         let op_state = self.js.op_state();
         let mut op_state = op_state.borrow_mut();
         Ok(op_state
-            .borrow_mut::<Natives>().0.borrow_mut::<RuntimeContext>()
+            .borrow_mut::<Natives>()
+            .0
+            .borrow_mut::<RuntimeContext>()
             .collected_transfer_state
             .take())
     }
@@ -785,7 +794,10 @@ impl ScriptRuntime {
         let handler_errors = {
             let op_state = self.js.op_state();
             let mut op_state = op_state.borrow_mut();
-            let ctx = op_state.borrow_mut::<Natives>().0.borrow_mut::<RuntimeContext>();
+            let ctx = op_state
+                .borrow_mut::<Natives>()
+                .0
+                .borrow_mut::<RuntimeContext>();
             let errors = ctx.handler_errors;
             ctx.handler_errors = 0;
             errors
@@ -839,14 +851,18 @@ impl ScriptRuntime {
             let op_state = self.js.op_state();
             let has = op_state
                 .borrow()
-                .borrow::<Natives>().0.borrow::<RuntimeContext>()
+                .borrow::<Natives>()
+                .0
+                .borrow::<RuntimeContext>()
                 .has_zone_transfer_state;
             if !has {
                 return Ok(None);
             }
             op_state
                 .borrow_mut()
-                .borrow_mut::<Natives>().0.borrow_mut::<RuntimeContext>()
+                .borrow_mut::<Natives>()
+                .0
+                .borrow_mut::<RuntimeContext>()
                 .collected_transfer_state = None;
         }
         let code = format!("globalThis.__baston.collectZoneTransferState({source});");
@@ -860,7 +876,9 @@ impl ScriptRuntime {
         let op_state = self.js.op_state();
         let mut op_state = op_state.borrow_mut();
         Ok(op_state
-            .borrow_mut::<Natives>().0.borrow_mut::<RuntimeContext>()
+            .borrow_mut::<Natives>()
+            .0
+            .borrow_mut::<RuntimeContext>()
             .collected_transfer_state
             .take())
     }
@@ -869,7 +887,10 @@ impl ScriptRuntime {
     pub fn drain_queued_events(&mut self) -> Vec<(String, String)> {
         let op_state = self.js.op_state();
         let mut op_state = op_state.borrow_mut();
-        let ctx = op_state.borrow_mut::<Natives>().0.borrow_mut::<RuntimeContext>();
+        let ctx = op_state
+            .borrow_mut::<Natives>()
+            .0
+            .borrow_mut::<RuntimeContext>();
         ctx.queued_events.drain(..).collect()
     }
 
@@ -878,7 +899,9 @@ impl ScriptRuntime {
         let op_state = self.js.op_state();
         let op_state = op_state.borrow();
         op_state
-            .borrow::<Natives>().0.borrow::<RuntimeContext>()
+            .borrow::<Natives>()
+            .0
+            .borrow::<RuntimeContext>()
             .handled_events
             .contains(event)
     }
@@ -887,7 +910,9 @@ impl ScriptRuntime {
         let op_state = self.js.op_state();
         let op_state = op_state.borrow();
         op_state
-            .borrow::<Natives>().0.borrow::<RuntimeContext>()
+            .borrow::<Natives>()
+            .0
+            .borrow::<RuntimeContext>()
             .commands
             .contains_key(command)
     }

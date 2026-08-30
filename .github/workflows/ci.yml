@@ -24,3 +24,38 @@ jobs:
         run: cargo clippy --workspace -- -D warnings
       - name: rustfmt
         run: cargo fmt --all -- --check
+
+  # The four supported bundles (ADR-002). A Tier 2 capability behind a Cargo
+  # feature can rot without the default build noticing, so every bundle is
+  # built and tested here — that is the whole reason the bundle list is short.
+  bundles:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - bundle: lite
+            features: "--no-default-features"
+          - bundle: js
+            features: ""
+          - bundle: lua
+            features: "--no-default-features --features scripting-lua"
+          # `escrow` is Windows-only at runtime but compiles everywhere; this
+          # job proves the feature combination, not the runtime path.
+          - bundle: full
+            features: "--features scripting-lua,escrow"
+    name: bundle (${{ matrix.bundle }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bundle-${{ matrix.bundle }}
+      - name: cargo test
+        run: cargo test -p baston-gateway -p baston-scripting ${{ matrix.features }}
+      - name: cargo clippy
+        run: cargo clippy -p baston-gateway --all-targets ${{ matrix.features }} -- -D warnings
+      - name: report what the binary contains
+        run: cargo run -p baston-gateway ${{ matrix.features }} --bin baston-gateway -- --modules

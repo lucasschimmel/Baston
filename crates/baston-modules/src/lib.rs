@@ -76,7 +76,7 @@ pub enum ModuleId {
     // --- Tier 2 ---
     /// JavaScript scripting runtime (`deno_core` / V8).
     ScriptingJs = 6,
-    /// Lua scripting runtime (`mlua` / LuaJIT).
+    /// Lua scripting runtime (`mlua` / Lua 5.4).
     ScriptingLua = 7,
     /// CFX Asset Escrow support (Windows, operator-supplied FXServer).
     Escrow = 8,
@@ -134,7 +134,7 @@ impl ModuleId {
             Self::Profiler => "script profiler capture and its API routes",
             Self::HotReload => "restart resources when their scripts change on disk",
             Self::ScriptingJs => "JavaScript resources (deno_core / V8)",
-            Self::ScriptingLua => "Lua resources (mlua / LuaJIT)",
+            Self::ScriptingLua => "Lua resources (mlua / Lua 5.4)",
             Self::Escrow => "CFX Asset Escrow decryption (Windows)",
         }
     }
@@ -181,11 +181,16 @@ impl ModuleId {
     ///
     /// Always true for Tier 1. For Tier 2 it reflects the Cargo feature, which
     /// the compiling binary must forward to this crate.
+    // The arms are `cfg!` values, so in a bundle where every capability is
+    // absent they all fold to `false` and clippy sees a `matches!`. Rewriting
+    // it that way would only be correct for that one bundle.
+    #[allow(clippy::match_like_matches_macro)]
     pub const fn is_compiled_in(self) -> bool {
         match self {
             Self::ScriptingJs => cfg!(feature = "scripting-js"),
             Self::ScriptingLua => cfg!(feature = "scripting-lua"),
             Self::Escrow => cfg!(feature = "escrow"),
+            // Tier 1 is compiled in unconditionally (ADR-002).
             _ => true,
         }
     }
@@ -208,7 +213,10 @@ impl ModuleId {
     /// The environment variable that overrides this module, e.g.
     /// `BASTON_MODULE_ADMIN_API`.
     pub fn env_var(self) -> String {
-        format!("BASTON_MODULE_{}", self.slug().replace('-', "_").to_uppercase())
+        format!(
+            "BASTON_MODULE_{}",
+            self.slug().replace('-', "_").to_uppercase()
+        )
     }
 
     const fn bit(self) -> u32 {
@@ -362,7 +370,11 @@ pub fn report(set: ModuleSet) -> String {
 
     let bundle = Bundle::current();
     let mut out = String::new();
-    let _ = writeln!(out, "BASTON {} · bundle: {bundle}", env!("CARGO_PKG_VERSION"));
+    let _ = writeln!(
+        out,
+        "BASTON {} · bundle: {bundle}",
+        env!("CARGO_PKG_VERSION")
+    );
     if !bundle.is_supported() {
         let _ = writeln!(
             out,

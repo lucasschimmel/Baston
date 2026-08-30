@@ -49,11 +49,18 @@ impl NativeState {
         self.entries.insert(TypeId::of::<T>(), Box::new(value));
     }
 
+    /// Borrow an installed service.
+    //
+    // Named after `OpState`'s method rather than something clippy prefers:
+    // matching it is what let the V8 natives migrate by signature alone.
+    // The turbofish makes every call site unambiguous.
+    #[allow(clippy::should_implement_trait)]
     pub fn borrow<T: 'static>(&self) -> &T {
-        self.try_borrow()
-            .unwrap_or_else(|| missing::<T>())
+        self.try_borrow().unwrap_or_else(|| missing::<T>())
     }
 
+    /// Mutably borrow an installed service.
+    #[allow(clippy::should_implement_trait)]
     pub fn borrow_mut<T: 'static>(&mut self) -> &mut T {
         if !self.entries.contains_key(&TypeId::of::<T>()) {
             missing::<T>();

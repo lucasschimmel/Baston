@@ -1,6 +1,10 @@
 //! Jalon D5 — cross-zone script events: locally-triggered events are
 //! published via the host hook; remote events are dispatched locally without
 //! re-publication (loop prevention), and handler reactions ARE published.
+// Driven by JavaScript resources (deferral handlers, exports, dist/ layouts),
+// so they run in the bundles that contain V8. The Lua runtime has its own
+// tests in baston-scripting; see docs/modules.md for what it covers.
+#![cfg(feature = "scripting-js")]
 
 use std::sync::Arc;
 
