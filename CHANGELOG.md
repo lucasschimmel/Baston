@@ -48,6 +48,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- The repository is now a monorepo with one directory per kind of thing:
+  `crates/` (the server), `docs/` (Markdown), `apps/` (the documentation
+  website), `config/`, `deploy/`, `examples/`, `tools/`. Nothing that belongs
+  inside one of them sits at the root any more.
+- `baston-cfx-shim` moved into `baston-cfx-platform`, the crate that compiles
+  it. It used to sit in a shared `resources/` directory alongside a dev sample
+  and a test fixture, which read as three things of the same kind and was not.
+- Configuration is discovered rather than assumed: `BASTON_CONFIG`, else
+  `baston.toml`, else `config/baston.toml`. A deployed server and a checkout
+  each keep their natural layout.
+- Documentation is grouped by what the reader is doing — guides, reference,
+  operations, internals, decisions — and rendered as a website by `apps/docs`,
+  which reads `docs/` directly instead of holding a second copy.
 - The CFX natives no longer depend on deno_core, so one implementation serves
   both scripting engines. `extensions/` is now only the V8 half of the bridge.
 - A resource with no server scripts no longer spawns a runtime; client-only and
