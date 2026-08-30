@@ -76,6 +76,39 @@ pub(crate) fn cfx_shared_native(
     name: String,
     args_json: String,
 ) -> String {
+    let resource = state.borrow::<RuntimeContext>().resource_name.clone();
+    match shared_native_value(state, &name, &args_json) {
+        Some(value) => value.to_string(),
+        None => unimplemented_native(&name, "void", &resource).to_string(),
+    }
+}
+
+/// Route a native to whichever dispatcher owns it.
+///
+/// A caller that does not already know whether a name is shared or
+/// server-only — the Lua global resolver, for one — asks here. The shared set
+/// is tried first because it is the one whose names are exact.
+pub(crate) fn cfx_native(
+    state: &mut NativeState,
+    name: String,
+    result_kind: String,
+    args_json: String,
+) -> String {
+    match shared_native_value(state, &name, &args_json) {
+        Some(value) => value.to_string(),
+        None => cfx_server_native(state, name, result_kind, args_json),
+    }
+}
+
+/// `None` means "not one of the shared natives", so the caller can fall
+/// through instead of receiving a fabricated neutral value.
+fn shared_native_value(
+    state: &mut NativeState,
+    name: &str,
+    args_json: &str,
+) -> Option<serde_json::Value> {
+    let name = name.to_owned();
+    let args_json = args_json.to_owned();
     let args = json_args(&args_json);
     let resource = state.borrow::<RuntimeContext>().resource_name.clone();
     let kvp = Arc::clone(&state.borrow::<SharedKvp>().0);
@@ -235,10 +268,10 @@ pub(crate) fn cfx_shared_native(
         // state-bag bridge. Return neutral values instead of throwing so
         // resources can feature-detect safely — but report the gap, because a
         // silent `null` is indistinguishable from a genuine empty answer.
-        _ => unimplemented_native(&name, "void", &resource),
+        _ => return None,
     };
 
-    value.to_string()
+    Some(value)
 }
 
 /// The server-only natives: synthetic entities, players, voice, world.

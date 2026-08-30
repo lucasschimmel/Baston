@@ -21,9 +21,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 thiserror = "2"
 deno_core = "0.406"
-# LuaJIT via mlua. `vendored` builds the interpreter from source so an operator
+# Lua 5.4 via mlua. `vendored` builds the interpreter from source so an operator
 # never has to install a Lua toolchain to run the `lua` bundle.
-mlua = { version = "0.10", features = ["luajit", "vendored", "send", "serialize"] }
+#
+# 5.4 rather than LuaJIT: luajit-src bootstraps through `minilua`, which does
+# not build on Windows here, and the `lua` bundle has to build on every target
+# BASTON ships. CFX supports both (`lua54` in fxmanifest), and the interpreter
+# is swappable behind this one feature later — the runtime code does not care.
+# Not `send`: like a V8 isolate, a Lua state lives on its own thread and is
+# never shared, so requiring Send from everything it touches buys nothing.
+mlua = { version = "0.10", features = ["lua54", "vendored", "serialize"] }
 dashmap = "6"
 notify = "8"
 tower-http = { version = "0.7", features = ["trace", "cors", "timeout"] }

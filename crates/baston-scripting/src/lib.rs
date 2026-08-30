@@ -14,6 +14,8 @@ mod host;
 mod http_bridge;
 mod http_handler;
 mod kvp;
+#[cfg(feature = "lua")]
+pub mod lua;
 mod native_state;
 mod natives;
 pub mod net_bridge;
