@@ -14,6 +14,14 @@ pub mod udp;
 /// gRPC types + client/server stubs generated from `proto/baston.proto`
 /// by `tonic-build` (never hand-written).
 pub mod mesh {
+    // tonic returns every RPC as `Result<Response<T>, tonic::Status>`, and
+    // `Status` is 176 bytes — which `result_large_err` flags from Rust 1.98 on.
+    // The shape belongs to tonic, not to us, and the file is regenerated on
+    // every build, so the only alternatives are boxing tonic's own error type
+    // or pinning the toolchain. Scoped to this module so the lint stays live
+    // for code we actually write.
+    #![allow(clippy::result_large_err)]
+
     tonic::include_proto!("baston");
 }
 
