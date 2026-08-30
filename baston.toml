@@ -1,5 +1,24 @@
 # BASTON runtime configuration (Phase B)
 
+# Which capabilities this process runs. See docs/modules.md and
+# docs/adr/002-module-tiers.md.
+#
+# Modules are additive deltas over the documented defaults, so a module shipping
+# in a later version does not require rewriting this file. Run
+# `baston-gateway --modules` to see what this binary contains and what is on.
+#
+# Defaults: voice, metrics, hot-reload and the compiled scripting runtime are
+# on; admin-api, debug-overlay and profiler are off (they widen the control
+# surface, so they open only where you ask).
+#
+# The older per-section flags ([voice] enabled, [metrics] enabled,
+# [debug] display_info, [escrow] enabled, [dev] hot_reload) still work and stay
+# authoritative for their own module. If a flag and this section disagree, the
+# server refuses to boot rather than silently picking one.
+[modules]
+enable = []
+disable = []
+
 [server]
 name = "BASTON Dev"
 port = 30120
