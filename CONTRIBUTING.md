@@ -19,6 +19,17 @@ something:
 Two independent toolchains: Cargo builds the server, bun builds the website.
 Neither needs the other.
 
+**You need `protoc` on your PATH.** `baston-protocol` generates the mesh gRPC
+types from `proto/baston.proto` at build time, and `prost-build` shells out to
+protoc to parse it. Without it the very first build fails on a build-script
+error that does not name the crate you are working on.
+
+```sh
+sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
+brew install protobuf                       # macOS
+winget install protobuf                     # Windows
+```
+
 ```sh
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
@@ -29,8 +40,8 @@ bun run docs:build          # also fails on any broken documentation link
 ```
 
 An asset a crate compiles into itself belongs to that crate — see
-`crates/baston-cfx-platform/assets/`. Nothing that ships inside a binary should
-sit in a shared top-level directory.
+`crates/baston-scripting/assets/`. Nothing that ships inside a binary should sit
+in a shared top-level directory.
 
 ## Branching workflow
 

@@ -27,6 +27,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # baston-protocol's build script generates the mesh gRPC types from
+      # proto/baston.proto, and prost-build shells out to protoc to parse it.
+      # The runner image does not ship one, so every Rust job needs this.
+      - name: install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -60,6 +65,9 @@ jobs:
     name: bundle (${{ matrix.bundle }})
     steps:
       - uses: actions/checkout@v4
+      # See the `check` job: prost-build needs protoc to read baston.proto.
+      - name: install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy

@@ -83,6 +83,10 @@ The crate map is in [Crates](crates.md).
 Two independent toolchains. Cargo builds the server; bun builds the docs site.
 Neither needs the other.
 
+You need **`protoc`** on your PATH — `baston-protocol` generates the mesh gRPC
+types from `proto/baston.proto` at build time. `apt-get install
+protobuf-compiler`, `brew install protobuf`, or `winget install protobuf`.
+
 ```bash
 cargo build --release -p baston-gateway     # the js bundle (default)
 cargo run -p baston-gateway --bin baston-gateway -- --modules
