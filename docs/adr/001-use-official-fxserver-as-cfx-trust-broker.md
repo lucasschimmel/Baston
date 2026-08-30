@@ -4,7 +4,12 @@ description: "Why BASTON delegates CFX identity to an unmodified official FXServ
 ---
 
 Date: 2026-07-26  
-Status: accepted
+Status: **superseded** by [ADR-003](003-remove-the-fxserver-sidecar.md) on 2026-08-30
+
+> The sidecar this ADR describes has been removed. It is kept as the record of
+> why the approach was taken and what it was meant to deliver; nothing in it
+> describes BASTON as it is built today. See
+> [ADR-003](003-remove-the-fxserver-sidecar.md).
 
 ## Context
 
@@ -95,4 +100,4 @@ runtime. The selected design delegates only platform identity and listing.
 
 - [CFX `ServerLicensingComponent`](https://github.com/citizenfx/fivem/blob/master/code/components/citizen-server-impl/include/ServerLicensingComponent.h)
 - [CFX `NetLibrary.cpp` policy consumption](https://github.com/citizenfx/fivem/blob/master/code/components/net/src/NetLibrary.cpp)
-- [Baston CFX identity and listing runbook](../operations/licensing.md)
+- [ADR-003 — Remove the FXServer sidecar](003-remove-the-fxserver-sidecar.md)

@@ -7,6 +7,12 @@ Guide de bout en bout : builder BASTON, lancer un serveur (mono-process ou mesh
 multi-zones), déclarer tes resources/scripts/assets, brancher ta base de données,
 puis tester ResMon, le profiler, Prometheus et Grafana.
 
+> ⚠️ **Document d'origine, daté.** Il décrit encore le sidecar FXServer
+> (`[escrow]`, `mode = "verified"`, `public_listing`), supprimé depuis —
+> voir [ADR-003](../adr/003-remove-the-fxserver-sidecar.md). Pour la
+> configuration actuelle, lire
+> [`reference/configuration.md`](../reference/configuration.md).
+
 > **BASTON n'est pas FXServer.** C'est une réécriture Rust *from scratch* du
 > serveur FiveM (le client GTA V/FiveM ne voit pas la différence). Conséquence
 > pratique : **pas de `server.cfg`, pas de `resources.cfg`, pas de `ensure`,

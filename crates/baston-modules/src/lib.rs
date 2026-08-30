@@ -78,10 +78,8 @@ pub enum ModuleId {
     ScriptingJs = 6,
     /// Lua scripting runtime (`mlua` / Lua 5.4).
     ScriptingLua = 7,
-    /// CFX Asset Escrow support (Windows, operator-supplied FXServer).
-    Escrow = 8,
     /// Pooled database access for scripts (SQLite, PostgreSQL, MySQL).
-    Db = 9,
+    Db = 8,
 }
 
 /// Every module, in declaration order. Reports iterate this so their output
@@ -95,7 +93,6 @@ pub const ALL: &[ModuleId] = &[
     ModuleId::HotReload,
     ModuleId::ScriptingJs,
     ModuleId::ScriptingLua,
-    ModuleId::Escrow,
     ModuleId::Db,
 ];
 
@@ -111,7 +108,6 @@ impl ModuleId {
             Self::HotReload => "hot-reload",
             Self::ScriptingJs => "scripting-js",
             Self::ScriptingLua => "scripting-lua",
-            Self::Escrow => "escrow",
             Self::Db => "db",
         }
     }
@@ -124,7 +120,7 @@ impl ModuleId {
             | Self::DebugOverlay
             | Self::Profiler
             | Self::HotReload => Tier::Module,
-            Self::ScriptingJs | Self::ScriptingLua | Self::Escrow | Self::Db => Tier::Capability,
+            Self::ScriptingJs | Self::ScriptingLua | Self::Db => Tier::Capability,
         }
     }
 
@@ -139,7 +135,6 @@ impl ModuleId {
             Self::HotReload => "restart resources when their scripts change on disk",
             Self::ScriptingJs => "JavaScript resources (deno_core / V8)",
             Self::ScriptingLua => "Lua resources (mlua / Lua 5.4)",
-            Self::Escrow => "CFX Asset Escrow decryption (Windows)",
             Self::Db => "pooled SQL access for scripts (sqlite / postgres / mysql)",
         }
     }
@@ -154,7 +149,6 @@ impl ModuleId {
             Self::Metrics => Some("metrics"),
             Self::AdminApi => Some("api"),
             Self::DebugOverlay => Some("debug"),
-            Self::Escrow => Some("escrow"),
             Self::Db => Some("db"),
             // Configured through `[dev]`, which also carries core settings, so
             // the section cannot be attributed to the module alone.
@@ -181,7 +175,7 @@ impl ModuleId {
             Self::ScriptingJs | Self::ScriptingLua => true,
             // `db` is compiled in but stays off until an operator points it
             // at a database: a pool with no URL is not a useful default.
-            Self::AdminApi | Self::DebugOverlay | Self::Profiler | Self::Escrow | Self::Db => false,
+            Self::AdminApi | Self::DebugOverlay | Self::Profiler | Self::Db => false,
         }
     }
 
@@ -197,7 +191,6 @@ impl ModuleId {
         match self {
             Self::ScriptingJs => cfg!(feature = "scripting-js"),
             Self::ScriptingLua => cfg!(feature = "scripting-lua"),
-            Self::Escrow => cfg!(feature = "escrow"),
             Self::Db => cfg!(feature = "db"),
             // Tier 1 is compiled in unconditionally (ADR-002).
             _ => true,
@@ -210,7 +203,6 @@ impl ModuleId {
         match self {
             Self::ScriptingJs => Some("js (or full)"),
             Self::ScriptingLua => Some("lua (or full)"),
-            Self::Escrow => Some("full, on Windows"),
             Self::Db => Some("full (or any bundle built with --features db)"),
             _ => None,
         }
@@ -326,7 +318,7 @@ pub enum Bundle {
     Js,
     /// Lua only.
     Lua,
-    /// Everything, including escrow.
+    /// Every Tier 2 capability: both scripting runtimes and the database pool.
     Full,
     /// A supported combination was not what this binary was built with.
     Custom,
@@ -338,8 +330,8 @@ impl Bundle {
     pub const fn current() -> Self {
         let js = ModuleId::ScriptingJs.is_compiled_in();
         let lua = ModuleId::ScriptingLua.is_compiled_in();
-        let escrow = ModuleId::Escrow.is_compiled_in();
-        match (js, lua, escrow) {
+        let db = ModuleId::Db.is_compiled_in();
+        match (js, lua, db) {
             (false, false, false) => Self::Lite,
             (true, false, false) => Self::Js,
             (false, true, false) => Self::Lua,

@@ -149,11 +149,11 @@ Checklist:
 - with two clients, peds and vehicles replicate
 - no critical `unhandled game message` logs
 
-## 6. Keymaster licence test
+## 6. Licence gate
 
-Shape-only gate:
-
-Edit `config/baston.mono.local.toml` or a zone config:
+`gate` is the only check BASTON performs, and it checks the key's *shape*, not
+its validity — nothing here contacts CFX. Edit
+`config/baston.mono.local.toml` or a zone config:
 
 ```toml
 [license]
@@ -161,30 +161,12 @@ mode = "gate"
 sv_license_key = "cfxk_FILL_ME"
 ```
 
-Verified mode belongs to the gateway, not to individual zones. Configure the
-gateway's local, untracked TOML with:
+Expected: the server refuses to boot on an empty, whitespace-carrying, short
+or `REPLACE_ME` key, naming the fix; a well-formed key boots with a warning
+that no licence is enforced.
 
-```toml
-[server]
-bind_address = "0.0.0.0"
-
-[license]
-mode = "verified"
-sv_license_key = "cfxk_FILL_ME"
-fxserver_path = "C:/FXServer/FXServer.exe"
-sidecar_port = 30130
-public_listing = false
-```
-
-Then build and run the gateway:
-
-```powershell
-cargo run --release -p baston-gateway
-```
-
-Expected: the gateway refuses to open its game listeners if the official
-FXServer broker cannot validate the licence. Zone processes do not create
-additional licence identities. See `docs/operations/licensing.md` for public-list mode.
+There is no `verified` mode any more — a config carrying one fails to parse.
+See [`docs/operations/licensing.md`](../licensing.md).
 
 ## 7. displayinfo overlay
 

@@ -177,7 +177,6 @@ So you know where *not* to spend effort:
   routing buckets
 - Vehicle and ped state getters — a large, faithfully-ported set
 - `MUMBLE_*` voice natives
-- Escrowed resources, on Windows
 
 ## What you gain
 

@@ -32,11 +32,10 @@ BASTON 0.1.0-alpha · bundle: js
   on      hot-reload     tier 1  restart resources when their scripts change on disk
   on      scripting-js   tier 2  JavaScript resources (deno_core / V8)
   absent  scripting-lua  tier 2  Lua resources (mlua / Lua 5.4)
-  absent  escrow         tier 2  CFX Asset Escrow decryption (Windows)
+  off     db             tier 2  pooled SQL access for scripts (sqlite / postgres / mysql)
 
   absent capabilities need a different bundle:
     scripting-lua  → bundle lua (or full)
-    escrow         → bundle full, on Windows
 ```
 
 Three states, and the difference matters:
@@ -93,9 +92,9 @@ Accepted: `true/false`, `1/0`, `yes/no`, `on/off`.
 
 ### The older per-section flags still work
 
-`[voice] enabled`, `[metrics] enabled`, `[debug] display_info`,
-`[escrow] enabled` and `[dev] hot_reload` remain authoritative for their own
-module. Existing configuration files keep their exact meaning.
+`[voice] enabled`, `[metrics] enabled`, `[debug] display_info` and
+`[dev] hot_reload` remain authoritative for their own module. Existing
+configuration files keep their exact meaning.
 
 If a flag and `[modules]` disagree, BASTON refuses to boot and names both
 sites, rather than silently picking one:
@@ -123,7 +122,7 @@ build time. You get them as prebuilt bundles — you never need a Rust toolchain
 | `lite` | no scripting runtime | zone worker, relay, benchmarking |
 | `js` | JavaScript (V8) | **the default** |
 | `lua` | Lua 5.4 | Lua-only servers |
-| `full` | JavaScript + Lua + escrow + every db driver | migrations and mixed estates |
+| `full` | JavaScript + Lua + every db driver | migrations and mixed estates |
 
 Building from source:
 
@@ -131,7 +130,7 @@ Building from source:
 cargo build --release -p baston-gateway                                              # js
 cargo build --release -p baston-gateway --no-default-features                        # lite
 cargo build --release -p baston-gateway --no-default-features --features scripting-lua  # lua
-cargo build --release -p baston-gateway --features scripting-lua,escrow,db-postgres,db-mysql  # full
+cargo build --release -p baston-gateway --features scripting-lua,db-postgres,db-mysql  # full
 ```
 
 Database drivers are additive on top of any bundle: `--features db` adds SQLite,

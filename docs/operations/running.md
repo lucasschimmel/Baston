@@ -101,7 +101,7 @@ Prometheus scrapes gateway + zones every 5s (`monitoring/prometheus.yml`).
   NATS publish latency/throughput. Use it to **diagnose meshing**.
 - **BASTON — Server Overview** (`baston-overview`) — whole-server health at a
   glance. Players online, aggregated world-state entities, resource scripts
-  loaded/errors, escrow decrypt duration p95/p99, admin-API audit (rate + totals
+  loaded/errors, admin-API audit (rate + totals
   by action/outcome), UDP dropped commands, snapshot bandwidth, script dispatch
   p95/p99 by resource, dispatch rate, watchdog terminations, native roundtrip
   p95/p99, native timeouts and profiler active state. Use it as the first-glance

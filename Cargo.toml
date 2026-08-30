@@ -74,8 +74,6 @@ baston-protocol = { path = "crates/baston-protocol" }
 baston-scripting = { path = "crates/baston-scripting", default-features = false }
 baston-zone = { path = "crates/baston-zone", default-features = false }
 baston-gateway = { path = "crates/baston-gateway" }
-baston-cfx-platform = { path = "crates/baston-cfx-platform" }
-baston-escrow-plugin = { path = "crates/baston-escrow-plugin" }
 baston-voice = { path = "crates/baston-voice" }
 
 [profile.dev]

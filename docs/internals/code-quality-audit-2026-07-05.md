@@ -3,6 +3,13 @@ title: "Code quality audit, July 2026"
 description: "A point-in-time review of the codebase and what came out of it."
 ---
 
+> ⚠️ **Snapshot daté, non maintenu.** Ce rapport décrit l'arbre au 2026-07-05.
+> Il mentionne `baston-cfx-platform` et `baston-escrow-plugin`, deux crates
+> supprimées depuis avec le sidecar FXServer
+> ([ADR-003](../adr/003-remove-the-fxserver-sidecar.md)) — les constats qui les
+> concernent n'ont plus de cible. Conservé comme trace de l'audit, pas comme
+> description du code actuel.
+>
 > Date : 2026-07-05 · Périmètre : workspace Rust `baston/` (8 crates, ~17 500 lignes de source, ~20 100 avec tests)
 > Méthode : outillage objectif (clippy, fmt, greps d'anti-patterns) + revue qualitative approfondie crate par crate.
 > Ce rapport photographie l'état à HEAD `3948d82` (working tree modifié au moment de l'audit).

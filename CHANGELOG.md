@@ -29,16 +29,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   runaway script, `playerConnecting` deferrals, `exports`, state-bag change
   handlers, zone transfer state, and server → client native dispatch.
 
-- Added verified CFX server identity through an operator-supplied, unmodified
-  FXServer broker.
-- Added policy-derived slot ceilings for the official 48, 64, 128, and 2048
-  player tiers, with a conservative 48-slot fallback.
-- Added standard `sv_licenseKeyToken` publication, enabling the FiveM client to
-  resolve its granted streaming and clothing policies normally.
-- Added opt-in public CFX server-list registration with validated interface,
-  port, and public-address configuration.
-- Added a real-FXServer authentication smoke test driven by uncommitted
-  environment secrets.
 - Added the `displayinfo` debug overlay: a server-assembled in-game readout of
   the zone mesh, OneSync state, and per-player link statistics, gated by
   `[debug] display_info` and reachable with `/displayinfo`.
@@ -52,9 +42,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `crates/` (the server), `docs/` (Markdown), `apps/` (the documentation
   website), `config/`, `deploy/`, `examples/`, `tools/`. Nothing that belongs
   inside one of them sits at the root any more.
-- `baston-cfx-shim` moved into `baston-cfx-platform`, the crate that compiles
-  it. It used to sit in a shared `resources/` directory alongside a dev sample
-  and a test fixture, which read as three things of the same kind and was not.
 - Configuration is discovered rather than assumed: `BASTON_CONFIG`, else
   `baston.toml`, else `config/baston.toml`. A deployed server and a checkout
   each keep their natural layout.
@@ -65,10 +52,26 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   both scripting engines. `extensions/` is now only the V8 half of the bridge.
 - A resource with no server scripts no longer spawns a runtime; client-only and
   streaming-only resources used to cost an empty V8 isolate each.
-- Moved global CFX identity ownership from zone processes to the public gateway.
-- Restricted zone-local FXServer sidecars to the deferred Asset Escrow path.
-- Bound the HTTP and ENet game transports to `server.bind_address` so the
-  official broker can use loopback on the same game port.
+
+### Removed
+
+- Removed the FXServer sidecar and everything that existed only to serve it:
+  the `baston-cfx-platform` and `baston-escrow-plugin` crates, the `escrow`
+  Cargo feature and module, `baston-core::license`, `[license] mode =
+  "verified"` with `fxserver_path` / `sidecar_port` / `public_listing` /
+  `listing_ip_override`, and the `[escrow]` section. See
+  [ADR-003](docs/adr/003-remove-the-fxserver-sidecar.md).
+
+  BASTON no longer appears in the public CFX server list, enforces no licence
+  entitlement, and cannot run escrowed (`.fxap`) resources. The sidecar was
+  Windows-only, was never validated against a real CFX key, and put a process
+  BASTON does not control on the boot path.
+
+  `[license]` keeps `mode = "off" | "gate"` and `sv_license_key`; `gate` checks
+  the key's shape and nothing else. A config carrying `mode = "verified"` is
+  **rejected at parse time** rather than silently downgraded, so a server does
+  not boot unauthenticated while its operator believes CFX validated the key. A
+  stale `[escrow]` section is ignored.
 
 ### Security
 
@@ -76,14 +79,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   are now off by default. Each widens what a caller can do to a running server,
   so they open where an operator asks rather than by default. Enable them with
   `[modules] enable = ["admin-api", "debug-overlay", "profiler"]`.
-- Authentication now fails closed before public listeners open and the gateway
-  shuts down if its authenticated broker exits.
-- Licence keys and identity tokens use redacted debug output, bounded IPC, and
-  randomized lifetime-scoped temporary files.
-- Policy requests reject redirects, cap response size, and never grant paid
-  capabilities on failure.
-- Colocated sidecars use isolated shim resources, IPC directories, and
-  cancellation-aware startup to prevent cross-process response confusion or
-  orphaned public heartbeats.
+- `/info.json` no longer carries `sv_licenseKeyToken`. BASTON obtains no CFX
+  token, and publishing an empty or invented one would tell a connecting client
+  the server is licensed when it is not.
 
 [Unreleased]: https://github.com/lucasschimmel/Baston/compare/develop...HEAD

@@ -27,7 +27,7 @@ a scoped key, deploys on its own cadence, and cannot take the server down.
 | --- | --- | --- |
 | Mechanism | compiled in, runtime toggle | Cargo feature, shipped as a bundle |
 | Use when | inert when off, no new dependency | it changes the dependency graph |
-| Examples | `voice`, `metrics`, `admin-api`, `profiler` | `scripting-lua`, `escrow`, `db` |
+| Examples | `voice`, `metrics`, `admin-api`, `profiler` | `scripting-js`, `scripting-lua`, `db` |
 
 The test for Tier 2: **would an operator who does not want this have to compile,
 download, or be exposed to a dependency tree because of it?** V8 and sqlx
@@ -45,9 +45,8 @@ a bitmask, so order is stable), and add it to `ALL`:
 ```rust
 pub enum ModuleId {
     // …
-    Escrow = 8,
-    Db = 9,
-    MyThing = 10,        // append
+    Db = 8,
+    MyThing = 9,         // append
 }
 ```
 

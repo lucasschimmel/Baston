@@ -105,7 +105,6 @@ export default defineConfig({
           items: [
             { label: "Running BASTON", link: "/operations/running/" },
             { label: "CFX licensing", link: "/operations/licensing/" },
-            { label: "Asset escrow", link: "/operations/escrow/" },
             {
               label: "Runbooks",
               items: [

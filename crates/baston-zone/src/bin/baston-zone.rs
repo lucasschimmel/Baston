@@ -13,83 +13,6 @@ use baston_scripting::{DeferralRegistry, ScriptHost};
 use baston_zone::mesh::{ZoneMesh, ZoneMeshHooks};
 use baston_zone::resource_loader::{spawn_hot_reload, ResourceManager};
 
-/// Wire the optional escrow bridge. Global CFX identity belongs exclusively to
-/// the public gateway, so zone processes never authenticate, register, or
-/// heartbeat independently.
-#[cfg(all(feature = "escrow", windows))]
-fn wire_cfx_sidecar(
-    manager: &Arc<ResourceManager>,
-    config: &BastonConfig,
-) -> anyhow::Result<Option<baston_escrow_plugin::SidecarHandle>> {
-    if !config.escrow.enabled {
-        return Ok(None);
-    }
-    if config.escrow.backend == baston_config::EscrowBackend::Direct {
-        anyhow::bail!(
-            "[escrow] backend = \"direct\" is unsupported (svadhesive exposes no FFI \
-             decrypt symbol); use backend = \"sidecar\""
-        );
-    }
-
-    let fxserver_path = config
-        .escrow
-        .fxserver_path
-        .clone()
-        .or_else(|| config.license.fxserver_path.clone())
-        .ok_or_else(|| anyhow::anyhow!("escrow needs an fxserver_path"))?;
-
-    let license_key = {
-        let key = config.license.sv_license_key.trim();
-        if key.is_empty() {
-            None
-        } else {
-            Some(key.to_owned())
-        }
-    };
-    if license_key.is_none() {
-        tracing::warn!(target: "zone",
-            "escrow is enabled but [license] sv_license_key is empty — svadhesive needs the \
-             CFX server key to derive escrow decryption keys, so decryption will fail. Set \
-             [license] sv_license_key to your key from https://portal.cfx.re");
-    }
-
-    let params = baston_escrow_plugin::SidecarParams {
-        fxserver_path,
-        resources_dir: config.resources.path.clone(),
-        license_key,
-        // Zone-local escrow brokers allocate distinct private endpoints and
-        // never compete with the gateway's authenticated identity broker.
-        port: 0,
-        public_listing: None,
-    };
-    let handle = baston_escrow_plugin::SidecarHandle::start(&params)
-        .map_err(|e| anyhow::anyhow!("failed to start the FXServer sidecar: {e}"))?;
-
-    manager.set_script_decryptor(handle.decryptor());
-    tracing::info!(target: "zone", "escrow plugin active (zone-local CFX sidecar)");
-
-    Ok(Some(handle))
-}
-
-#[cfg(not(all(feature = "escrow", windows)))]
-fn wire_cfx_sidecar(
-    manager: &Arc<ResourceManager>,
-    config: &BastonConfig,
-) -> anyhow::Result<Option<()>> {
-    let _ = manager;
-    if config.escrow.enabled {
-        #[cfg(not(feature = "escrow"))]
-        tracing::warn!(target: "zone",
-            "escrow.enabled = true but this binary was built without the `escrow` feature \
-             — rebuild with `--features escrow`; continuing with plain resources");
-        #[cfg(all(feature = "escrow", not(windows)))]
-        tracing::warn!(target: "zone",
-            "escrow.enabled = true but this is not a Windows build — svadhesive.dll is \
-             Windows-only; continuing with plain resources");
-    }
-    Ok(None)
-}
-
 #[cfg(windows)]
 fn raise_timer_resolution() {
     #[link(name = "winmm")]
@@ -177,9 +100,6 @@ async fn main() -> anyhow::Result<()> {
     let script_host =
         ScriptHost::spawn_with_net(Arc::clone(&deferrals), Arc::clone(&players), net_bridge)?;
     let resource_manager = ResourceManager::new(script_host.clone(), config.resources.path.clone());
-    // Optional zone-local escrow bridge. Gateway owns global CFX identity.
-    // Keep the handle alive for resource decryptions.
-    let _cfx_sidecar = wire_cfx_sidecar(&resource_manager, &config)?;
     resource_manager.discover().await?;
     resource_manager.start_all().await?;
     let _watcher = if config.dev.hot_reload {

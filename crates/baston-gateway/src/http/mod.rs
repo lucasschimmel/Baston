@@ -21,7 +21,6 @@ use axum::http::Method;
 use axum::routing::{any, get, post};
 use axum::Router;
 use baston_config::BastonConfig;
-use baston_core::license::LicenseKeyToken;
 use baston_scripting::ScriptHost;
 use baston_zone::resource_loader::ResourceManager;
 use tower_http::cors::{Any, CorsLayer};
@@ -55,8 +54,6 @@ impl DownloadPolicy {
 /// Shared state for all HTTP handlers.
 pub struct AppState {
     pub config: BastonConfig,
-    /// Authenticated CFX token published only through the client protocol.
-    pub license_token: std::sync::RwLock<Option<LicenseKeyToken>>,
     pub resource_manager: Arc<ResourceManager>,
     /// Shared with the script host so player natives see real data.
     pub players: Arc<PlayerRegistry>,

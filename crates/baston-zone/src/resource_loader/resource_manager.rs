@@ -34,8 +34,8 @@ pub struct ResourceManager {
     script_host: ScriptHost,
     resources: Mutex<HashMap<String, ResourceEntry>>,
     resources_dir: PathBuf,
-    /// Script decryptor. `PlainDecryptor` by default; the escrow plugin
-    /// replaces it via [`ResourceManager::set_script_decryptor`]. Behind a
+    /// Script decryptor. `PlainDecryptor` in every shipped build; a host can
+    /// replace it via [`ResourceManager::set_script_decryptor`]. Behind a
     /// `RwLock` so the plugin can install itself after construction on the
     /// shared `Arc<Self>`; the guard is always dropped before any `.await`.
     decryptor: RwLock<Arc<dyn ScriptDecryptor>>,
@@ -59,7 +59,12 @@ impl ResourceManager {
         self.script_host.observability()
     }
 
-    /// Install an external script decryptor (called by `baston-escrow-plugin`).
+    /// Install an external script decryptor.
+    ///
+    /// No shipped build calls this — CFX Asset Escrow support went with the
+    /// FXServer sidecar (ADR-003). It is the seam that support would return
+    /// through, and the loader tests drive it to prove an installed decryptor
+    /// actually reaches the loading path.
     /// Takes `&self` so it works through the shared `Arc<ResourceManager>`.
     pub fn set_script_decryptor(&self, decryptor: Arc<dyn ScriptDecryptor>) {
         let supports_encrypted = decryptor.supports_encrypted();
@@ -70,10 +75,7 @@ impl ResourceManager {
             .decryptor
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = decryptor;
-        tracing::info!(
-            supports_encrypted,
-            "script decryptor replaced (escrow plugin active)"
-        );
+        tracing::info!(supports_encrypted, "script decryptor replaced");
     }
 
     /// Snapshot the current decryptor (cheap `Arc` clone), releasing the lock

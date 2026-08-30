@@ -55,10 +55,8 @@ jobs:
             features: ""
           - bundle: lua
             features: "--no-default-features --features scripting-lua"
-          # `escrow` is Windows-only at runtime but compiles everywhere; this
-          # job proves the feature combination, not the runtime path.
           - bundle: full
-            features: "--features scripting-lua,escrow,db-postgres,db-mysql"
+            features: "--features scripting-lua,db-postgres,db-mysql"
     name: bundle (${{ matrix.bundle }})
     steps:
       - uses: actions/checkout@v4

@@ -3,9 +3,11 @@
 //! The zone's resource loader reads the raw bytes of every server script and
 //! passes them through a [`ScriptDecryptor`] before compiling them. Plain
 //! (unencrypted) resources take the [`PlainDecryptor`] fast path unchanged.
-//! CFX Asset Escrow resources require the optional `baston-escrow-plugin`,
-//! which installs an implementation delegating to `svadhesive.dll` (indirectly,
-//! via an FXServer sidecar — see the plugin crate).
+//!
+//! CFX Asset Escrow resources are **not supported**. The FXServer sidecar that
+//! used to decrypt them was removed (ADR-003); this trait is the seam where
+//! support would return, and until then an encrypted file is refused here with
+//! an error the operator can act on.
 
 use thiserror::Error;
 
@@ -29,7 +31,8 @@ pub trait ScriptDecryptor: Send + Sync + 'static {
     ) -> Result<Vec<u8>, DecryptError>;
 
     /// Whether this decryptor can handle CFX-encrypted files. `false` for
-    /// [`PlainDecryptor`]; the loader uses it only for diagnostics.
+    /// [`PlainDecryptor`], which is the only implementation today; the loader
+    /// uses it only for diagnostics.
     fn supports_encrypted(&self) -> bool {
         false
     }
@@ -51,7 +54,10 @@ pub struct EntitlementContext {
 /// Errors surfaced by a [`ScriptDecryptor`].
 #[derive(Debug, Error)]
 pub enum DecryptError {
-    #[error("file is encrypted but no decryptor is available (install baston-escrow-plugin)")]
+    #[error(
+        "file is CFX-encrypted (escrow) and BASTON cannot decrypt it — escrow is not \
+         supported; use an unescrowed build of the resource"
+    )]
     NoDecryptorAvailable,
     #[error("decryption failed for {resource}/{file}: {reason}")]
     DecryptionFailed {
@@ -76,10 +82,9 @@ pub fn is_cfx_encrypted(bytes: &[u8]) -> bool {
     bytes.len() > CFX_MAGIC.len() && bytes.starts_with(CFX_MAGIC)
 }
 
-/// Default no-op decryptor: passes plaintext through, refuses encrypted files.
+/// The only decryptor: passes plaintext through, refuses encrypted files.
 ///
-/// This is the nominal path for AXIOM (plain resources) and never panics or
-/// blocks.
+/// This is the nominal path for plain resources and never panics or blocks.
 pub struct PlainDecryptor;
 
 impl ScriptDecryptor for PlainDecryptor {
@@ -94,8 +99,9 @@ impl ScriptDecryptor for PlainDecryptor {
             tracing::warn!(
                 resource = resource_name,
                 file = file_path,
-                "file appears CFX-encrypted but no escrow plugin is active — \
-                 set [escrow] enabled = true in baston.toml or use plain resources"
+                "file appears CFX-encrypted (CFX Asset Escrow) — BASTON has no escrow \
+                 support, so this resource cannot run; ask its author for an \
+                 unescrowed build or use a plain resource"
             );
             return Err(DecryptError::NoDecryptorAvailable);
         }

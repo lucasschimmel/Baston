@@ -1,6 +1,6 @@
 ---
 title: "Going public"
-description: "The CFX licence, the server list, and the security checklist before anyone outside your friends can reach the server."
+description: "The security checklist before anyone outside your friends can reach the server — and what your CFX key does not buy you."
 ---
 
 Everything here is unnecessary for a server you and your friends reach over a
@@ -81,100 +81,43 @@ are off by default; leave them off unless you need them.
 
 ---
 
-## The CFX licence
+## The CFX licence, the server list, and escrow
 
-A public FiveM server needs a CFX server key, from
-[portal.cfx.re](https://portal.cfx.re). BASTON never validates it itself and
-never talks to CFX — a genuine, unmodified FXServer you supply does that. See
-[ADR-001](../adr/001-use-official-fxserver-as-cfx-trust-broker.md).
+Read this part before you plan anything around it.
 
-### Three modes
+**BASTON does not appear in the FiveM server list.** Nothing in it registers
+with CFX or sends a heartbeat. Players reach your server by direct connect —
+`connect your.host:30120`, or an `fivem://connect/` link you hand out yourself.
 
-| Mode | What it does | For |
-| --- | --- | --- |
-| `off` | No check. Warns every boot. | LAN and development |
-| `gate` | Checks the key's **shape only** — never contacts CFX | A quick sanity check |
-| `verified` | Runs the official FXServer broker, validates against CFX, enforces the verdict | **Public servers** |
+**Your CFX key buys you nothing here.** BASTON never contacts CFX, so it never
+learns what your key grants and enforces no entitlement from it. `max_players`
+is exactly what you configured, whatever tier you pay for.
 
-`gate` is not authentication. It checks the string is non-empty, at least 20
-characters, has no whitespace and is not a placeholder. That is all.
+**Escrowed (`.fxap`) resources do not run.** A resource whose scripts are CFX
+Asset Escrow-encrypted is refused at load with an explicit error. There is no
+flag for it; ask the author for an unescrowed build.
+
+An earlier version of BASTON hosted an official FXServer alongside itself to
+do all three. It was Windows-only, never validated end to end, and it put a
+process BASTON does not control on the boot path — it was removed. The full
+reasoning is in [ADR-003](../adr/003-remove-the-fxserver-sidecar.md).
+
+### What `[license]` still does
 
 ```toml
 [license]
-mode = "verified"
+mode = "gate"                       # "off" | "gate"
 sv_license_key = "cfxk_…"
-fxserver_path = "Artifacts/windows/31623/FXServer.exe"
-sidecar_port = 30130
 ```
 
-`verified` needs an FXServer you downloaded from CFX. **BASTON never ships it.**
-It is Windows-only in practice.
+`gate` checks the key's **shape** — non-empty, no whitespace, at least 20
+characters, not a placeholder — and refuses to boot if it fails. That is a
+typo check, not authentication: a revoked key passes it. Both modes warn at
+every boot that no licence is enforced.
 
-If the broker exits while the server is running, BASTON **shuts down**. An
-unauthenticated server does not keep serving.
-
-### Slot caps
-
-Your licence's entitlements can **lower** `server.max_players`, never raise it:
-
-| Policy | Slots |
-| --- | --- |
-| `onesync_big` | 2048 |
-| `onesync_plus`, `onesync_medium` | 128 |
-| `onesync` | 64 |
-| none, or the policy fetch failed | **48** |
-
-A failed policy fetch is not an error — it falls back to 48 conservatively. A
-cap being applied is logged as a warning. Set `max_players` to what you actually
-want and let the licence lower it if it must.
-
-A free key returns empty grants: listing visibility, no OneSync entitlement.
-
----
-
-## The server list
-
-Opt in explicitly:
-
-```toml
-[license]
-mode = "verified"          # required
-public_listing = true
-listing_ip_override = "203.0.113.10"
-```
-
-`listing_ip_override` is **required** — a concrete, non-loopback, unicast
-address. `bind_address` must also select one concrete interface, and
-`udp.port` must equal `server.port`.
-
-The genuine FXServer component does the registration and the heartbeats; BASTON
-never contacts the CFX list itself.
-
-The ordering is deliberate and worth knowing: BASTON authenticates privately
-first, resolves entitlements, applies the slot cap, brings up its listeners, and
-**only then** activates public listing. The first heartbeat the world sees
-cannot overstate your capacity.
-
----
-
-## Escrowed assets
-
-If you run resources from the CFX Keymaster, you need the `escrow` capability, a
-Windows build, and an FXServer:
-
-```toml
-[modules]
-enable = ["escrow"]
-
-[escrow]
-enabled = true
-backend = "sidecar"
-server_license = "license:…"
-fxserver_path = "Artifacts/windows/31623/FXServer.exe"
-```
-
-Escrow covers **scripts only** — encrypted `stream/` assets are out of scope.
-See [Asset escrow](../operations/escrow.md).
+`mode = "verified"` no longer exists and is **rejected at parse time** rather
+than quietly downgraded, so a config carrying it stops instead of booting
+unauthenticated. See [CFX licensing](../operations/licensing.md).
 
 ---
 
@@ -202,5 +145,5 @@ auth_bypass = false
 ## Next
 
 - [Monitoring](monitoring.md)
-- [CFX licensing](../operations/licensing.md) — the full detail
+- [CFX licensing](../operations/licensing.md) — what the key does and does not do
 - [Troubleshooting](troubleshooting.md)

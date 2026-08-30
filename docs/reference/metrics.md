@@ -51,7 +51,6 @@ If you watch nothing else, watch these.
 | `script_native_rpc_dispatch_total` | counter | `native` | Context natives routed to a client for execution. |
 | `script_native_rpc_no_owner_total` | counter | `native` | No client owned the target entity. Broken out separately because it is *expected* on a healthy non-OneSync server. |
 | `script_native_rpc_skipped_total` | counter | `native`, `reason` | Routed native dropped — bad arity, no target, bridge full. |
-| `baston_decrypt_duration_seconds` | histogram | — | Escrow decryption time per file. |
 
 `script_native_unimplemented_total` is the most useful metric in this table when
 porting a server: it turns "something doesn't work" into a list of native names.

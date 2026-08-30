@@ -93,7 +93,6 @@ What was decided, and what it cost.
 
 - [Running BASTON](operations/running.md) — topology and alerting detail
 - [CFX licensing](operations/licensing.md)
-- [Asset escrow](operations/escrow.md)
 - Runbooks: [local live test](operations/runbooks/local-live-test.md) ·
   [Phase C](operations/runbooks/phase-c.md) ·
   [Phase C testing](operations/runbooks/phase-c-testing.md)

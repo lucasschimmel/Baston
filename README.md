@@ -41,9 +41,7 @@ belongs inside one of them.
 | `baston-config` | `baston.toml` and its validation |
 | `baston-db` | pooled SQL for scripts (SQLite / PostgreSQL / MySQL) |
 | `baston-voice` | Mumble-compatible voice server |
-| `baston-cfx-platform` | CFX identity, licensing, the sidecar broker |
-| `baston-escrow-plugin` | CFX Asset Escrow decryption |
-| `baston-core` | shared primitives |
+| `baston-core` | the script-decryptor seam |
 | `baston-loadtest` | the benchmark client |
 
 ## Building
@@ -55,7 +53,7 @@ capabilities. See [docs/guides/modules.md](docs/guides/modules.md).
 cargo build --release -p baston-gateway                                   # js (default)
 cargo build --release -p baston-gateway --no-default-features             # lite
 cargo build --release -p baston-gateway --no-default-features --features scripting-lua
-cargo build --release -p baston-gateway --features scripting-lua,escrow,db-postgres,db-mysql
+cargo build --release -p baston-gateway --features scripting-lua,db-postgres,db-mysql
 ```
 
 What a binary actually contains:

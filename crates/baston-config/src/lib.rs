@@ -36,34 +36,6 @@ pub enum ConfigError {
         reason: String,
     },
     #[error(
-        "[escrow] enabled = true but server_license is empty\n  \
-         → set [escrow] server_license = \"license:...\" in baston.toml\n  \
-         → to disable escrow support: set [escrow] enabled = false"
-    )]
-    EscrowMissingLicense,
-    #[error(
-        "[escrow] backend = \"direct\" but dll_path is not set\n  \
-         → set [escrow] dll_path = \"C:/FXServer/svadhesive.dll\" in baston.toml"
-    )]
-    EscrowMissingDllPath,
-    #[error(
-        "[escrow] dll_path \"{0}\" not found\n  \
-         → install FXServer and point dll_path at its svadhesive.dll\n  \
-         → to disable escrow support: set [escrow] enabled = false"
-    )]
-    EscrowDllNotFound(String),
-    #[error(
-        "[escrow] backend = \"sidecar\" but fxserver_path is not set\n  \
-         → set [escrow] fxserver_path = \"C:/FXServer/FXServer.exe\" in baston.toml"
-    )]
-    EscrowMissingFxserverPath,
-    #[error(
-        "[escrow] fxserver_path \"{0}\" not found\n  \
-         → install FXServer and point fxserver_path at its FXServer.exe\n  \
-         → to disable escrow support: set [escrow] enabled = false"
-    )]
-    EscrowFxserverNotFound(String),
-    #[error(
         "[license] mode = \"{0}\" requires a licence key\n  \
          → set [license] sv_license_key = \"cfxk_...\" (create one at https://portal.cfx.re)\n  \
          → for local dev/LAN only: set [license] mode = \"off\""
@@ -73,8 +45,8 @@ pub enum ConfigError {
         "[license] sv_license_key does not look like a real CFX key (it is empty, a \
          placeholder, or malformed)\n  \
          → paste your real key from https://portal.cfx.re\n  \
-         → note: \"gate\" only checks the key's shape, not its validity — use \"verified\" \
-         to have the official CFX component validate it"
+         → note: \"gate\" only checks the key's shape — BASTON does not validate it \
+         against CFX"
     )]
     LicenseMalformedKey,
     #[error(
@@ -106,17 +78,6 @@ pub enum ConfigError {
          \"console.execute\""
     )]
     ApiKeyNoPermissions(String),
-    #[error(
-        "[license] mode = \"verified\" but fxserver_path is not set\n  \
-         → set [license] fxserver_path = \"C:/FXServer/FXServer.exe\" (an official FXServer \
-         you downloaded from CFX; BASTON never ships it)"
-    )]
-    LicenseMissingFxserverPath,
-    #[error(
-        "[license] fxserver_path \"{0}\" not found\n  \
-         → point it at a real FXServer.exe, or use mode = \"gate\" (no sidecar)"
-    )]
-    LicenseFxserverNotFound(String),
     #[error(
         "module \"{module}\" is configured in two places that disagree\n  \
          → {legacy_site} says {legacy_value}, but [modules] {list} says the opposite\n  \
@@ -181,8 +142,6 @@ pub struct BastonConfig {
     pub debug: DebugConfig,
     #[serde(default)]
     pub meshing: MeshingConfig,
-    #[serde(default)]
-    pub escrow: EscrowConfig,
     #[serde(default)]
     pub license: LicenseConfig,
     #[serde(default)]
@@ -336,41 +295,25 @@ impl ApiConfig {
     }
 }
 
-/// `[license]` section — CFX server-licence integration.
+/// `[license]` section — the operator's CFX server-licence key.
 ///
-/// BASTON never validates a licence itself and never talks to CFX. Modes:
+/// BASTON does not validate a licence and does not talk to any CFX service.
+/// It holds the operator's key so a future authenticated integration has one
+/// place to read it from, and refuses to boot without one when asked to. Modes:
 /// - `"off"`: no check (dev/LAN only). Emits a visible warning each boot.
-/// - `"gate"`: require a well-formed `sv_license_key` in config (shape only, no
-///   validation, no sidecar). Cross-platform.
-/// - `"verified"`: run the genuine, unmodified FXServer sidecar which validates
-///   the key against CFX and lets BASTON enforce the verdict + entitlements
-///   locally. Windows + `escrow` feature only.
+/// - `"gate"`: require a well-formed `sv_license_key` in config — shape only,
+///   no validation. Catches the empty or placeholder key before you go live.
+///
+/// There is deliberately no mode that claims the key is *verified*. BASTON has
+/// no authenticated path to CFX today; see `docs/adr/003-remove-the-fxserver-sidecar.md`.
 #[derive(Clone, Deserialize)]
 pub struct LicenseConfig {
-    /// `off` | `gate` | `verified`.
+    /// `off` | `gate`.
     #[serde(default)]
     pub mode: LicenseMode,
     /// CFX server licence key, created at <https://portal.cfx.re>.
     #[serde(default)]
     pub sv_license_key: String,
-    /// Path to an official `FXServer.exe` provided by the operator
-    /// (mode = `"verified"`). BASTON never ships this binary.
-    #[serde(default)]
-    pub fxserver_path: Option<PathBuf>,
-    /// Private, localhost-only TCP port for the FXServer sidecar's endpoint
-    /// (mode = `"verified"`, or escrow). Nothing connects to it — BASTON talks to
-    /// the sidecar over a local file-drop channel — it only keeps the sidecar's
-    /// listener off BASTON's public port. Give each sidecar on a host a distinct
-    /// port if you run several.
-    #[serde(default = "default_sidecar_port")]
-    pub sidecar_port: u16,
-    /// Let the official FXServer broker register and heartbeat this Baston
-    /// endpoint in the public CFX server list.
-    #[serde(default)]
-    pub public_listing: bool,
-    /// Public address advertised by the official broker.
-    #[serde(default)]
-    pub listing_ip_override: Option<IpAddr>,
 }
 
 impl fmt::Debug for LicenseConfig {
@@ -378,10 +321,6 @@ impl fmt::Debug for LicenseConfig {
         f.debug_struct("LicenseConfig")
             .field("mode", &self.mode)
             .field("sv_license_key", &"[REDACTED]")
-            .field("fxserver_path", &self.fxserver_path)
-            .field("sidecar_port", &self.sidecar_port)
-            .field("public_listing", &self.public_listing)
-            .field("listing_ip_override", &self.listing_ip_override)
             .finish()
     }
 }
@@ -391,20 +330,12 @@ impl Default for LicenseConfig {
         Self {
             mode: LicenseMode::Off,
             sv_license_key: String::new(),
-            fxserver_path: None,
-            sidecar_port: default_sidecar_port(),
-            public_listing: false,
-            listing_ip_override: None,
         }
     }
 }
 
-fn default_sidecar_port() -> u16 {
-    30130
-}
-
 /// Licence enforcement mode (`[license] mode`). Missing → `Off` so existing
-/// dev/LAN configs keep booting; operators opt into `gate`/`verified` (see
+/// dev/LAN configs keep booting; operators opt into `gate` (see
 /// `docs/operations/licensing.md`). Unknown values are rejected by serde at parse time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -412,16 +343,14 @@ pub enum LicenseMode {
     /// No check (dev/LAN only). Emits a visible warning each boot.
     #[default]
     Off,
-    /// Require a well-formed `sv_license_key` (shape only, no sidecar).
+    /// Require a well-formed `sv_license_key`. Shape only — never validity.
     Gate,
-    /// Run the genuine FXServer sidecar to validate the key against CFX.
-    Verified,
 }
 
 impl LicenseConfig {
     /// A key is well-formed when it is non-empty, whitespace-free, long enough,
     /// and not a placeholder. This is a *shape* check only — it never proves the
-    /// key is valid (only the CFX component can, in `"verified"` mode).
+    /// key is valid; BASTON has no authenticated path to CFX.
     pub fn is_well_formed_key(&self) -> bool {
         let key = self.sv_license_key.trim();
         !key.is_empty()
@@ -430,9 +359,8 @@ impl LicenseConfig {
             && !key.to_ascii_uppercase().contains("REPLACE_ME")
     }
 
-    /// Validate the licence section. Fatal, actionable errors on misconfiguration;
-    /// no-op for `"off"`. Platform/feature availability for `"verified"` is
-    /// handled at the composition root, not here.
+    /// Validate the licence section. Fatal, actionable errors on
+    /// misconfiguration; no-op for `"off"`.
     pub fn validate(&self) -> Result<(), ConfigError> {
         match self.mode {
             LicenseMode::Off => Ok(()),
@@ -445,111 +373,7 @@ impl LicenseConfig {
                 }
                 Ok(())
             }
-            LicenseMode::Verified => {
-                if self.sv_license_key.trim().is_empty() {
-                    return Err(ConfigError::LicenseMissingKey("verified".into()));
-                }
-                if !self.is_well_formed_key() {
-                    return Err(ConfigError::LicenseMalformedKey);
-                }
-                let path = self
-                    .fxserver_path
-                    .as_ref()
-                    .ok_or(ConfigError::LicenseMissingFxserverPath)?;
-                if !path.exists() {
-                    return Err(ConfigError::LicenseFxserverNotFound(
-                        path.display().to_string(),
-                    ));
-                }
-                Ok(())
-            }
         }
-    }
-}
-
-/// `[escrow]` section — CFX Asset Escrow support (Phase D-bis).
-///
-/// Off by default. When enabled, the composition-root binary (built with the
-/// `escrow` feature, on Windows) installs `baston-escrow-plugin`. The default
-/// backend is `sidecar`: preliminary research showed `svadhesive.dll` exposes
-/// no FFI-callable decrypt symbol, so the `direct` backend is unsupported.
-#[derive(Debug, Clone, Deserialize)]
-pub struct EscrowConfig {
-    /// Enable escrow support. Never activates without this being explicitly true.
-    #[serde(default)]
-    pub enabled: bool,
-    /// `sidecar` (supported) or `direct` (unsupported — see crate docs).
-    #[serde(default)]
-    pub backend: EscrowBackend,
-    /// CFX server licence (`"license:..."`). Required when `enabled`.
-    #[serde(default)]
-    pub server_license: String,
-    /// Path to `svadhesive.dll` (backend = `"direct"`).
-    #[serde(default)]
-    pub dll_path: Option<PathBuf>,
-    /// Path to `FXServer.exe` (backend = `"sidecar"`).
-    #[serde(default)]
-    pub fxserver_path: Option<PathBuf>,
-}
-
-impl Default for EscrowConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            backend: EscrowBackend::Sidecar,
-            server_license: String::new(),
-            dll_path: None,
-            fxserver_path: None,
-        }
-    }
-}
-
-/// Escrow decryption backend (`[escrow] backend`). Unknown values are rejected
-/// by serde at parse time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum EscrowBackend {
-    /// Supported: a minimal FXServer subprocess decrypts via svadhesive.
-    #[default]
-    Sidecar,
-    /// Unsupported: `svadhesive.dll` exposes no FFI-callable decrypt symbol.
-    Direct,
-}
-
-impl EscrowConfig {
-    /// Validate the escrow section. No-op when disabled; otherwise checks the
-    /// licence and the backend-specific binary path exist, with actionable
-    /// error messages for a fatal startup failure.
-    pub fn validate(&self) -> Result<(), ConfigError> {
-        if !self.enabled {
-            return Ok(());
-        }
-        if self.server_license.is_empty() {
-            return Err(ConfigError::EscrowMissingLicense);
-        }
-        match self.backend {
-            EscrowBackend::Sidecar => {
-                let path = self
-                    .fxserver_path
-                    .as_ref()
-                    .ok_or(ConfigError::EscrowMissingFxserverPath)?;
-                if !path.exists() {
-                    return Err(ConfigError::EscrowFxserverNotFound(
-                        path.display().to_string(),
-                    ));
-                }
-            }
-            EscrowBackend::Direct => {
-                let path = self
-                    .dll_path
-                    .as_ref()
-                    .ok_or(ConfigError::EscrowMissingDllPath)?;
-                if !path.exists() {
-                    return Err(ConfigError::EscrowDllNotFound(path.display().to_string()));
-                }
-            }
-        }
-        Ok(())
     }
 }
 
@@ -1442,7 +1266,6 @@ impl BastonConfig {
     /// the per-section validators themselves.
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.license.validate()?;
-        self.escrow.validate()?;
         self.api.validate()?;
         self.state_sync.validate()?;
         self.resources.validate()?;
@@ -1451,43 +1274,6 @@ impl BastonConfig {
         // left in a config with the module off is not a reason to refuse boot.
         if self.enabled_modules.is_enabled(ModuleId::Db) {
             self.db.validate()?;
-        }
-        if self.license.public_listing {
-            if self.license.mode != LicenseMode::Verified {
-                return Err(ConfigError::Invalid {
-                    section: "license",
-                    reason: "public_listing requires mode = \"verified\"".to_owned(),
-                });
-            }
-            let listing_ip =
-                self.license
-                    .listing_ip_override
-                    .ok_or_else(|| ConfigError::Invalid {
-                        section: "license",
-                        reason: "public_listing requires listing_ip_override".to_owned(),
-                    })?;
-            if listing_ip.is_unspecified() || listing_ip.is_loopback() || listing_ip.is_multicast()
-            {
-                return Err(ConfigError::Invalid {
-                    section: "license",
-                    reason: "listing_ip_override must be a concrete unicast address".to_owned(),
-                });
-            }
-            if self.server.bind_address.is_unspecified()
-                || self.server.bind_address.is_loopback()
-                || self.server.bind_address.is_multicast()
-            {
-                return Err(ConfigError::Invalid {
-                    section: "server",
-                    reason: "public listing requires bind_address to select a concrete non-loopback interface".to_owned(),
-                });
-            }
-            if self.udp.port.unwrap_or(self.server.port) != self.server.port {
-                return Err(ConfigError::Invalid {
-                    section: "udp",
-                    reason: "public listing requires udp.port to equal server.port".to_owned(),
-                });
-            }
         }
         if self.voice.enabled && self.voice.port == self.server.port {
             return Err(ConfigError::Invalid {

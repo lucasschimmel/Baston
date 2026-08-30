@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use baston_config::BastonConfig;
+use baston_config::{BastonConfig, LicenseMode};
 use baston_gateway::voice::GatewayVoice;
 use baston_gateway::{router, AppState, AuthService, PlayerRegistry};
 use baston_modules::{Bundle, ModuleId, ModuleSet};
@@ -139,7 +139,7 @@ async fn main() -> anyhow::Result<()> {
     raise_timer_resolution();
 
     let config_path = BastonConfig::discover();
-    let mut config = BastonConfig::load(&config_path)?;
+    let config = BastonConfig::load(&config_path)?;
     let modules = config.enabled_modules;
     print_module_line(modules);
     // Settings whose module is off do nothing. Saying so at boot is the whole
@@ -149,9 +149,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!(target: "modules",
             "[{section}] is configured but module \"{module}\" is disabled — those settings are inert");
     }
-    // Authenticate and apply the licensed slot cap before opening metrics,
-    // voice, game, admin, or HTTP listeners.
-    let mut cfx_runtime = baston_gateway::cfx::bootstrap(&mut config).await?;
+    warn_on_unenforced_licence(&config);
     tracing::info!(name = %config.server.name, port = config.server.port,
         "BASTON online — speaking the FiveM protocol, zero FXServer C++");
 
@@ -683,9 +681,6 @@ async fn main() -> anyhow::Result<()> {
 
     let auth = AuthService::new(&config.auth)?;
     let state = Arc::new(AppState {
-        license_token: std::sync::RwLock::new(
-            cfx_runtime.as_ref().map(|runtime| runtime.token().clone()),
-        ),
         downloads: baston_gateway::http::DownloadPolicy::new(&config.resources),
         builtins: baston_gateway::http::BuiltinResources::from_config(&config),
         config,
@@ -700,7 +695,7 @@ async fn main() -> anyhow::Result<()> {
 
     let http_state = Arc::clone(&state);
     let (http_ready_tx, http_ready_rx) = tokio::sync::oneshot::channel();
-    let mut http_server = tokio::spawn(async move {
+    let http_server = tokio::spawn(async move {
         if let Some(tls) = http_state.config.tls.clone() {
             let tls_config =
                 axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert_pem, &tls.key_pem)
@@ -735,36 +730,27 @@ async fn main() -> anyhow::Result<()> {
         .await
         .map_err(|_| anyhow::anyhow!("HTTP gateway stopped before its accept loop was ready"))?;
 
-    if let Some(runtime) = &mut cfx_runtime {
-        tokio::select! {
-            result = runtime.activate_public_listing(&state.config) => {
-                if let Err(error) = result {
-                    http_server.abort();
-                    let _ = http_server.await;
-                    return Err(error.into());
-                }
-            }
-            result = &mut http_server => {
-                result??;
-                anyhow::bail!("HTTP gateway stopped during public CFX activation");
-            }
-        }
-        *state
-            .license_token
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(runtime.token().clone());
-
-        tokio::select! {
-            result = &mut http_server => result??,
-            reason = runtime.wait_for_failure() => {
-                http_server.abort();
-                anyhow::bail!(
-                    "authenticated CFX broker stopped; shutting down the gateway: {reason}"
-                );
-            }
-        }
-    } else {
-        http_server.await??;
-    }
+    http_server.await??;
     Ok(())
+}
+
+/// Say out loud that no CFX licence is enforced.
+///
+/// `gate` has already checked the key's shape by the time we get here, and
+/// that is all BASTON can check: there is no authenticated path to CFX (see
+/// `docs/adr/003-remove-the-fxserver-sidecar.md`). An operator who reads
+/// "licence" in their config and assumes their entitlements are being applied
+/// has the wrong model of what this server does, so both modes say so.
+fn warn_on_unenforced_licence(config: &BastonConfig) {
+    match config.license.mode {
+        LicenseMode::Off => tracing::warn!(
+            target: "license",
+            "[license] mode = \"off\" — no CFX licence key is configured and none is checked"
+        ),
+        LicenseMode::Gate => tracing::warn!(
+            target: "license",
+            "[license] mode = \"gate\" — the key's shape is valid, but BASTON does not \
+             validate it against CFX and enforces no entitlement from it"
+        ),
+    }
 }

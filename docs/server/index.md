@@ -44,13 +44,15 @@ Honest answer, so you do not find out the hard way.
   obvious failure. Watch `script_native_unimplemented_total`
   ([metrics](../reference/metrics.md)) and read the
   [coverage list](../reference/natives-gap.md).
-- **Escrow assets.** Supported, but only on Windows, and only for scripts —
-  encrypted `stream/` assets are out of scope.
 - **Version.** This is `0.1.0-alpha`. There is no upgrade guarantee between
   versions yet.
 
 **It does not do**
 
+- **The public CFX server list.** BASTON never contacts CFX. Players join by
+  direct connect. See [going public](going-public.md).
+- **Escrowed (`.fxap`) resources.** A resource with CFX-encrypted scripts is
+  refused at load. See [ADR-003](../adr/003-remove-the-fxserver-sidecar.md).
 - HTTPS on the game port. See [the `[tls]` note](../reference/configuration.md#tls--deliberately-absent).
 - Cross-resource `exports` between resources.
 
@@ -67,7 +69,7 @@ Honest answer, so you do not find out the hard way.
 | [Using a database](../scripting/database.md) | SQLite, PostgreSQL or MySQL for your resources |
 | [Voice](voice.md) | the embedded Mumble server |
 | [Streaming assets](streaming.md) | vehicles, clothes, props, map pieces |
-| [Going public](going-public.md) | CFX licence, server list, and the security checklist |
+| [Going public](going-public.md) | the security checklist, and what your CFX key does not buy you |
 | [Multi-zone](multi-zone.md) | splitting the map across processes |
 | [Monitoring](monitoring.md) | Prometheus, Grafana, the admin API |
 | [Troubleshooting](troubleshooting.md) | when it does not work |

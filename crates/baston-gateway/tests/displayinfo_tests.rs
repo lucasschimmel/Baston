@@ -44,7 +44,6 @@ async fn app(dir: &Path, access: DisplayInfoAccess) -> axum::Router {
         downloads: DownloadPolicy::new(&config.resources),
         builtins: BuiltinResources::from_config(&config),
         config,
-        license_token: std::sync::RwLock::new(None),
         resource_manager,
         players,
         script_host,

@@ -29,7 +29,7 @@ CI builds and tests all four:
 cargo test -p baston-gateway -p baston-scripting --no-default-features
 cargo test -p baston-gateway -p baston-scripting
 cargo test -p baston-gateway -p baston-scripting --no-default-features --features scripting-lua
-cargo test -p baston-gateway -p baston-scripting --features scripting-lua,escrow,db-postgres,db-mysql
+cargo test -p baston-gateway -p baston-scripting --features scripting-lua,db-postgres,db-mysql
 cargo test -p baston-db --features sqlite,postgres,mysql
 ```
 

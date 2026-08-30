@@ -154,35 +154,25 @@ Permissions: `monitor.read`, `resource.control`, `player.kick`, `zone.drain`,
 The loader refuses weak, duplicated or placeholder tokens, and keys with no
 permissions or no name — an unusable key that boots is worse than a refusal.
 
-## `[license]` — CFX server identity
+## `[license]` — your CFX key
 
-See [CFX licensing](../operations/licensing.md) for what each mode really does.
+BASTON never contacts CFX and enforces no entitlement. See
+[CFX licensing](../operations/licensing.md).
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `mode` | `"off"` | `off` \| `gate` \| `verified`. |
+| `mode` | `"off"` | `off` \| `gate`. |
 | `sv_license_key` | `""` | Your key from [portal.cfx.re](https://portal.cfx.re). |
-| `fxserver_path` | *(unset)* | Path to an official `FXServer.exe`, required by `verified`. |
-| `sidecar_port` | `30130` | Private localhost port for the broker. Give each instance on a host its own. |
-| `public_listing` | `false` | Register in the public CFX server list. |
-| `listing_ip_override` | *(unset)* | Public IP advertised to CFX. Required when listing. |
 
-`off` warns every boot and is for LAN and development only. `gate` checks the
-key's *shape*, nothing more. `verified` runs the official FXServer component to
-validate against CFX and enforce the verdict.
+`off` warns every boot. `gate` checks the key's *shape* — non-empty, no
+whitespace, ≥ 20 characters, not a placeholder — and refuses to boot if it
+fails. Neither validates the key: a revoked key passes `gate`.
 
-## `[escrow]` — encrypted CFX assets
-
-Requires a Windows build with the `escrow` capability. See
-[Asset escrow](../operations/escrow.md).
-
-| Key | Default | What it does |
-| --- | --- | --- |
-| `enabled` | `false` | |
-| `backend` | `"sidecar"` | `sidecar` is supported. `direct` is not — svadhesive exposes no callable decrypt symbol. |
-| `server_license` | `""` | Your `license:…` key. Required when enabled. |
-| `fxserver_path` | *(unset)* | Path to `FXServer.exe` for the sidecar. |
-| `dll_path` | *(unset)* | Only for the unsupported `direct` backend. |
+`mode = "verified"`, `fxserver_path`, `sidecar_port`, `public_listing`,
+`listing_ip_override` and the whole `[escrow]` section were removed with the
+FXServer sidecar ([ADR-003](../adr/003-remove-the-fxserver-sidecar.md)). A
+config still carrying `"verified"` fails to parse rather than booting
+unauthenticated; a stale `[escrow]` block is ignored.
 
 ## `[state_sync]` — entity synchronisation
 
@@ -336,11 +326,11 @@ The common ones:
 
 | Message | Cause |
 | --- | --- |
-| `[license] mode = "…" requires a licence key` | `gate`/`verified` with an empty `sv_license_key`. |
-| `[escrow] enabled = true but server_license is empty` | escrow needs the CFX key to derive decryption keys. |
+| `[license] mode = "…" requires a licence key` | `gate` with an empty `sv_license_key`. |
+| `unknown variant \`verified\`` | `mode = "verified"` went with the FXServer sidecar. Use `"gate"` or `"off"`. |
 | `[[api.keys]] key "…" has a weak or placeholder token` | tokens must be ≥ 32 characters. Use `openssl rand -hex 32`. |
 | `voice.port (…) must differ from server.port` | the game transport owns the game port. |
 | `module "…" is configured in two places that disagree` | a legacy flag and `[modules]` contradict each other. |
 | `module "…" is not compiled into this build` | wrong bundle — run `--modules`. |
 | `[db] the db module is enabled but url is empty` | set `[db] url`, or drop `db` from `[modules] enable`. |
-| `public_listing requires mode = "verified"` | you cannot list a server whose identity is unverified. |
+

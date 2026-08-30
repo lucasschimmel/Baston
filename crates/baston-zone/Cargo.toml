@@ -28,7 +28,6 @@ prost = { workspace = true }
 anyhow = { workspace = true }
 tracing-subscriber = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
-baston-escrow-plugin = { workspace = true, optional = true }
 
 [features]
 default = ["scripting-js"]
@@ -37,10 +36,6 @@ default = ["scripting-js"]
 # never compiles V8 by accident through this edge.
 scripting-js = ["baston-scripting/js"]
 scripting-lua = ["baston-scripting/lua"]
-# Optional CFX Asset Escrow support. Off by default so the core never pulls the
-# plugin. Enable on a Windows build that needs to run escrowed resources:
-#   cargo build -p baston-zone --features escrow
-escrow = ["dep:baston-escrow-plugin"]
 
 [dev-dependencies]
 tempfile = "3"

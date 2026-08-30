@@ -5,7 +5,7 @@
 //!
 //! 1. the per-module defaults from `baston-modules`;
 //! 2. the legacy per-section flags (`[voice] enabled`, `[metrics] enabled`,
-//!    `[debug] display_info`, `[escrow] enabled`, `[dev] hot_reload`), which
+//!    `[debug] display_info`, `[dev] hot_reload`), which
 //!    stay authoritative so existing `baston.toml` files keep their meaning;
 //! 3. `[modules] enable` / `[modules] disable`, then `BASTON_MODULE_*`.
 //!
@@ -45,7 +45,6 @@ pub struct LegacyToggles {
     pub voice: Option<bool>,
     pub metrics: Option<bool>,
     pub debug_overlay: Option<bool>,
-    pub escrow: Option<bool>,
     pub hot_reload: Option<bool>,
 }
 
@@ -72,7 +71,6 @@ impl LegacyToggles {
                 .and_then(|d| d.get("display_info"))
                 .and_then(|v| v.as_str())
                 .map(|mode| !mode.eq_ignore_ascii_case("off")),
-            escrow: flag("escrow", "enabled"),
             hot_reload: flag("dev", "hot_reload"),
         }
     }
@@ -82,7 +80,6 @@ impl LegacyToggles {
             ModuleId::Voice => self.voice,
             ModuleId::Metrics => self.metrics,
             ModuleId::DebugOverlay => self.debug_overlay,
-            ModuleId::Escrow => self.escrow,
             ModuleId::HotReload => self.hot_reload,
             _ => None,
         }
@@ -94,7 +91,6 @@ impl LegacyToggles {
             ModuleId::Voice => "[voice] enabled",
             ModuleId::Metrics => "[metrics] enabled",
             ModuleId::DebugOverlay => "[debug] display_info",
-            ModuleId::Escrow => "[escrow] enabled",
             ModuleId::HotReload => "[dev] hot_reload",
             _ => "its section",
         }

@@ -38,6 +38,6 @@ resources/
 - `X.stream_raw` companions are supported: the RSC header is read from the
   companion, content and hash from `X`.
 - Files over 4 GiB are skipped with a warning (u32 size on the wire).
-- CFX escrow-encrypted **stream** assets (`.yft`/`.ydd`/`.ydr` via escrow) are
-  out of scope — escrow support covers scripts only (see
-  `escrow-support.md`).
+- CFX escrow-encrypted assets are not supported at all — not `stream/` files,
+  and not scripts either. A resource with encrypted server scripts is refused
+  at load; see [ADR-003](../adr/003-remove-the-fxserver-sidecar.md).

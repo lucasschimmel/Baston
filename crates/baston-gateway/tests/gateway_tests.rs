@@ -11,7 +11,6 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use baston_config::{BastonConfig, OneSyncMode};
-use baston_core::license::LicenseKeyToken;
 use baston_gateway::{router, AppState, PlayerRegistry};
 use baston_scripting::{DeferralRegistry, ScriptHost};
 use baston_zone::resource_loader::ResourceManager;
@@ -54,23 +53,10 @@ fn write_axiom_core(dir: &Path, script: &str) {
 }
 
 async fn app(dir: &Path, script: &str) -> axum::Router {
-    app_with_token(dir, script, None).await
+    app_with_mode(dir, script, OneSyncMode::Off).await
 }
 
-async fn app_with_token(
-    dir: &Path,
-    script: &str,
-    license_token: Option<LicenseKeyToken>,
-) -> axum::Router {
-    app_with_mode(dir, script, license_token, OneSyncMode::Off).await
-}
-
-async fn app_with_mode(
-    dir: &Path,
-    script: &str,
-    license_token: Option<LicenseKeyToken>,
-    onesync: OneSyncMode,
-) -> axum::Router {
+async fn app_with_mode(dir: &Path, script: &str, onesync: OneSyncMode) -> axum::Router {
     write_axiom_core(dir, script);
     // Tests run with dev.auth_bypass (no launcher ticket available in CI).
     let mut config: BastonConfig =
@@ -91,7 +77,6 @@ async fn app_with_mode(
         downloads: baston_gateway::http::DownloadPolicy::new(&config.resources),
         builtins: baston_gateway::http::BuiltinResources::from_config(&config),
         config,
-        license_token: std::sync::RwLock::new(license_token),
         resource_manager,
         players,
         script_host,
@@ -119,27 +104,12 @@ async fn info_json_returns_server_metadata() {
     let json = body_json(response).await;
     assert_eq!(json["name"], "BASTON Dev");
     assert_eq!(json["onesync"]["enabled"], false);
+    // BASTON has no authenticated CFX identity, so it must not publish a
+    // token it never obtained — a client reading one here would believe the
+    // server is licensed (ADR-003).
     assert!(json["vars"].get("sv_licenseKeyToken").is_none());
     assert_eq!(json["vars"]["sv_maxClients"], "32");
     assert_eq!(json["resources"][0], "axiom-core");
-}
-
-#[tokio::test]
-async fn info_json_publishes_authenticated_cfx_token() {
-    let dir = tempfile::tempdir().unwrap();
-    let token = LicenseKeyToken::new("authenticated-cfx-token").unwrap();
-    let app = app_with_token(dir.path(), AXIOM_CORE_JS, Some(token)).await;
-
-    let response = app
-        .oneshot(Request::get("/info.json").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-    let json = body_json(response).await;
-
-    assert_eq!(
-        json["vars"]["sv_licenseKeyToken"],
-        "authenticated-cfx-token"
-    );
 }
 
 #[tokio::test]
@@ -269,7 +239,7 @@ async fn init_connect_response_has_fxserver_fields() {
 #[tokio::test]
 async fn onesync_mode_is_consistent_in_info_and_init_connect() {
     let dir = tempfile::tempdir().unwrap();
-    let app = app_with_mode(dir.path(), AXIOM_CORE_JS, None, OneSyncMode::On).await;
+    let app = app_with_mode(dir.path(), AXIOM_CORE_JS, OneSyncMode::On).await;
 
     let info = app
         .clone()

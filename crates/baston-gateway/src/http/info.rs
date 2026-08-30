@@ -21,13 +21,6 @@ pub async fn info_json(State(state): State<Arc<AppState>>) -> Json<serde_json::V
             json!(state.config.server.enforce_game_build),
         );
     }
-    let license_token = state
-        .license_token
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(token) = license_token.as_ref() {
-        vars.insert("sv_licenseKeyToken".to_owned(), json!(token.as_str()));
-    }
     vars.insert(
         "sv_maxClients".to_owned(),
         json!(state.config.server.max_players.to_string()),

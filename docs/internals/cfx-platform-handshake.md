@@ -3,19 +3,27 @@ title: "CFX platform handshake"
 description: "What the client and the platform exchange before a player reaches the game."
 ---
 
-> ⚠️ **NON-retained approach (ToS risk / outside the legal boundary) — reference only.**
+> ⚠️ **Reference only — not implemented, and not a plan.**
 > This documents the *closed* CFX platform flow (licence validation → nucleus
-> register → server-list ingress) as captured by MITM. Reproducing it from a
-> non-FXServer binary means impersonating FXServer to CFX (spoofing) and is **not
-> implemented in BASTON**. The **retained** path is to run the genuine, unmodified
-> FXServer component as a sidecar — see [`operations/licensing.md`](../operations/licensing.md). Do not turn
-> this file into an implementation plan.
+> register → server-list ingress) as captured by MITM from a live FXServer.
+> Reproducing it from a non-FXServer binary means presenting BASTON to CFX as
+> FXServer, which is a compliance question before it is a technical one.
+>
+> **BASTON implements none of this.** It does not contact CFX at all: there is
+> no licence validation, no registration, no heartbeat, and no server-list
+> presence — see [`operations/licensing.md`](../operations/licensing.md).
+>
+> The sidecar approach that once stood in for it (hosting a genuine FXServer
+> and reading its verdict) was removed in
+> [ADR-003](../adr/003-remove-the-fxserver-sidecar.md). Nothing replaces it
+> today. This file is the record of what is known, kept so it does not have to
+> be rediscovered — deciding to act on it would need its own ADR.
 
 
 Reverse-engineered from a live FXServer 31623 boot (mitmproxy capture,
 2026-07-04), filling the gap the engine-source mirror leaves open. This is the
-sequence BASTON must reproduce to become a **registered** server (server list,
-and — with a paid key — OneSync slots / policy features).
+sequence a **registered** server goes through (server list, and — with a paid
+key — OneSync slots / policy features). BASTON goes through none of it.
 
 All calls use plain HTTPS, no client certs. FXServer sends
 `User-Agent: FXServer/1 (...)` for the license call and `CitizenFX/1` for
@@ -132,13 +140,18 @@ strings (`onesync`, `onesync_plus`, …). On a free key this is empty, so the
 client caps at 48 slots. Not captured here because no client connected during
 the run; re-run with `connect 127.0.0.1:30120` to grab it.
 
-## Implementation notes for BASTON
+## What this would cost, if it were ever decided
 
-1. At boot, if a `sv_licenseKey` is configured: GET ① → cache the four tokens.
-2. Serve `sv_licenseKeyToken` in `/info.json` `vars`.
-3. POST ② once → store the assigned `host`.
-4. POST ③ on a timer with the current player/info snapshot.
-5. Steps 2–4 are ~200 lines of reqwest. The blocker was ①'s exact shape —
-   now known.
-6. Product caveat: a free key yields listing only. Slots + clothing need a paid
-   subscription, and doing this on a non-FXServer binary is a CFX-ToS risk.
+Recorded as a scoping note, not a task list. The technical work is small; the
+reason it is not done is the first line of this file.
+
+- ① is the only step that was ever unknown, and it is the whole of the
+  difficulty. Steps ②–③ are ordinary HTTP against documented-shaped payloads.
+- `fallbackData.info` in ③ is essentially `/info.json`, which BASTON already
+  produces.
+- A free (Pebble) key yields listing visibility and nothing else: empty
+  `grants`, empty `policy`, so the client caps at 48 slots. Slots and clothing
+  pools need a paid tier.
+- Doing any of it means BASTON identifying itself to CFX the way FXServer does.
+  That is the part that needs an answer, and no amount of implementation detail
+  supplies one.

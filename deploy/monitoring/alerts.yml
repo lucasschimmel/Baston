@@ -108,11 +108,11 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "BASTON resource script failed to load/decrypt"
+          summary: "BASTON resource script failed to load"
           description: >-
-            A resource script failed to decrypt or load in the last 5m
-            (status=error) and did not start — usually an escrow/licence
-            misconfiguration or a corrupt encrypted asset. Check zone logs
+            A resource script failed to load in the last 5m (status=error) and
+            did not start — a syntax error, a missing file, or a CFX-escrowed
+            (.fxap) asset, which BASTON cannot decrypt. Check zone logs
             (`docker compose logs`, target=resources) and `GET /api/v1/resources`
             for the failing resource.
 

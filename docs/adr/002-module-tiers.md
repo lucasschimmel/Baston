@@ -4,7 +4,14 @@ description: "Core, modules, capabilities and addons: the rule that decides wher
 ---
 
 Date: 2026-08-30
-Status: accepted
+Status: accepted — amended by [ADR-003](003-remove-the-fxserver-sidecar.md)
+
+> **Amendment (2026-08-30).** The `escrow` capability named below was removed
+> with the FXServer sidecar; see
+> [ADR-003](003-remove-the-fxserver-sidecar.md). Tier 2 now holds
+> `scripting-js`, `scripting-lua` and `db`. Nothing else in this ADR changes —
+> the tier rule is what it decided, not the list of capabilities that happened
+> to exist when it was written.
 
 ## Context
 
@@ -100,8 +107,7 @@ dependency graph. Shipped to operators as prebuilt **bundles**, so that
 selecting a capability never requires the operator to own a Rust toolchain.
 
 Current members: `scripting-js` (deno_core/V8), `scripting-lua` (mlua/Lua 5.4),
-`escrow` (Windows + operator-supplied FXServer), and `db` with a driver per
-backend (`sqlite`, `postgres`, `mysql`).
+and `db` with a driver per backend (`sqlite`, `postgres`, `mysql`).
 
 Lua 5.4 rather than LuaJIT because `luajit-src` bootstraps through `minilua`,
 which does not build on every target BASTON ships; CFX supports both (`lua54`),
@@ -160,7 +166,7 @@ small set of bundles is built and tested in CI:
 | `lite` | none | zone worker, relay, benchmarking |
 | `js` | `scripting-js` | **default** |
 | `lua` | `scripting-lua` | Lua-only servers |
-| `full` | `scripting-js`, `scripting-lua`, `escrow`, every `db` driver | migration and mixed estates |
+| `full` | `scripting-js`, `scripting-lua`, every `db` driver | migration and mixed estates |
 
 This bounds the test matrix at four, instead of 2^n.
 
@@ -247,5 +253,6 @@ Tier 3 without revisiting this ADR.
 ## References
 
 - `docs/guides/modules.md` — operator-facing module and bundle reference.
-- ADR-001 — CFX trust broker; the escrow capability's Tier 2 placement follows
-  from it.
+- ADR-001 — CFX trust broker (superseded), which is where the removed `escrow`
+  capability's Tier 2 placement came from.
+- [ADR-003](003-remove-the-fxserver-sidecar.md) — removes it.

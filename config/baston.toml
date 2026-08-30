@@ -12,7 +12,7 @@
 # surface, so they open only where you ask).
 #
 # The older per-section flags ([voice] enabled, [metrics] enabled,
-# [debug] display_info, [escrow] enabled, [dev] hot_reload) still work and stay
+# [debug] display_info, [dev] hot_reload) still work and stay
 # authoritative for their own module. If a flag and this section disagree, the
 # server refuses to boot rather than silently picking one.
 [modules]
@@ -65,29 +65,17 @@ allow = []
 # Snapshots per second, per subscriber (1-30).
 refresh_hz = 5
 
-# CFX server-licence integration. BASTON never validates a licence itself and
-# never talks to CFX — the genuine, unmodified FXServer component does. See
-# docs/operations/licensing.md.
+# Your CFX server-licence key. BASTON does **not** validate it and never talks
+# to CFX: it holds the key so a future authenticated integration has one place
+# to read it from, and can refuse to boot when it is missing or malformed.
+# See docs/operations/licensing.md.
 [license]
-# "off"      : no check (dev/LAN only — warns every boot). Default for this dev cfg.
-# "gate"     : require a well-formed sv_license_key in config (shape only, no sidecar).
-# "verified" : run the official FXServer broker to validate the key against CFX and
-#              enforce the verdict + entitlements locally (Windows).
+# "off"  : no check at all (dev/LAN). Warns every boot.
+# "gate" : require a well-formed sv_license_key — shape only, never validity.
+#          Catches the empty or placeholder key before you go live.
 mode = "off"
-# Your CFX server licence, created at https://portal.cfx.re. Required for gate/verified.
+# Your CFX server licence, created at https://portal.cfx.re. Required for "gate".
 sv_license_key = ""
-# mode = "verified": path to an official FXServer.exe you downloaded from CFX.
-# BASTON never ships this binary.
-# fxserver_path = "Artifacts/windows/31623/FXServer.exe"
-# Private, localhost-only port for the sidecar (verified/escrow). Nothing connects to
-# it (IPC is a local file-drop) — it only keeps the sidecar off BASTON's public port.
-# Give each BASTON instance on a host a distinct value if you run several.
-# sidecar_port = 30130
-# Let the genuine FXServer broker register this endpoint in the CFX server list.
-# Requires server.bind_address to be one concrete non-loopback local interface.
-public_listing = false
-# Public IP advertised to CFX; required when public_listing = true.
-# listing_ip_override = "203.0.113.10"
 
 # Monitoring/control HTTP API keys (served on meshing.admin_port, default
 # 8080). Each key is a named bearer token with explicit permissions; control
@@ -123,20 +111,6 @@ url = ""
 pool_size = 10
 # A query over this many seconds is abandoned and reported to the script.
 query_timeout_secs = 15
-
-# CFX Asset Escrow support (Phase D-bis). Off by default. See
-# docs/operations/escrow.md. Requires a Windows build with `--features escrow`.
-[escrow]
-enabled = false
-# "sidecar" (supported) — a minimal FXServer subprocess decrypts via svadhesive.
-# "direct" (FFI) is unsupported: svadhesive.dll exposes no callable decrypt symbol.
-backend = "sidecar"
-# CFX server licence ("license:..."), required when enabled.
-server_license = ""
-# backend = "sidecar": path to FXServer.exe
-fxserver_path = "Artifacts/windows/31623/FXServer.exe"
-# backend = "direct": path to svadhesive.dll (unsupported backend)
-# dll_path = "Artifacts/windows/31623/svadhesive.dll"
 
 # NOTE: no [tls] section on purpose. The FiveM client sends some requests to
 # the game port in plaintext HTTP; a TLS-only listener breaks them with

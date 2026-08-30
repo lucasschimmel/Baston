@@ -3,17 +3,18 @@ title: "The crates"
 description: "What each crate owns, what it depends on, and where its interesting code lives."
 ---
 
-Twelve crates. The dependency direction is strict: `baston-protocol` and
+Ten crates. The dependency direction is strict: `baston-protocol` and
 `baston-modules` sit at the bottom and depend on almost nothing; the binaries
 sit at the top.
 
 ```
-baston-gateway ──┬─▶ baston-zone ──┬─▶ baston-scripting ──┬─▶ baston-protocol
-                 │                 │                      └─▶ baston-core
+baston-gateway ──┬─▶ baston-zone ──┬─▶ baston-scripting ──▶ baston-protocol
                  ├─▶ baston-voice  ├─▶ baston-core
-                 ├─▶ baston-db     └─▶ baston-config ──▶ baston-modules
-                 └─▶ baston-cfx-platform ──▶ baston-escrow-plugin
+                 └─▶ baston-db     └─▶ baston-config ──▶ baston-modules
 ```
+
+`baston-db` is optional (the `db` feature). `baston-loadtest` is a standalone
+benchmark client: it links `baston-protocol` and nothing else in the tree.
 
 | Crate | Lines | Owns |
 | --- | --- | --- |
@@ -23,12 +24,10 @@ baston-gateway ──┬─▶ baston-zone ──┬─▶ baston-scripting ─�
 | [`baston-zone`](#baston-zone) | ~7 000 | Entities, state sync, resource loading |
 | [`baston-voice`](#baston-voice) | ~3 000 | Mumble-compatible voice |
 | [`baston-config`](#baston-config) | ~2 300 | `baston.toml` and its validation |
-| [`baston-cfx-platform`](#baston-cfx-platform) | ~1 300 | CFX identity and licensing |
 | [`baston-loadtest`](#baston-loadtest) | ~900 | The benchmark client |
 | [`baston-db`](#baston-db) | ~750 | Pooled SQL for scripts |
 | [`baston-modules`](#baston-modules) | ~500 | The module registry |
-| [`baston-core`](#baston-core) | ~430 | Shared primitives |
-| [`baston-escrow-plugin`](#baston-escrow-plugin) | ~190 | Escrow decryption |
+| [`baston-core`](#baston-core) | ~160 | The script-decryptor seam |
 
 ---
 
@@ -142,23 +141,19 @@ routing core. A leaf crate with no V8, so its tests compile fast.
 
 Currently emits **no metrics**, and proximity culling is not implemented.
 
-## `baston-cfx-platform`
-
-CFX identity, licensing and the FXServer sidecar. BASTON never talks to CFX
-itself — it drives an operator-supplied, unmodified FXServer over a file-drop
-IPC channel. See [ADR-001](../adr/001-use-official-fxserver-as-cfx-trust-broker.md).
-
-Also owns `assets/baston-cfx-shim/`, the Lua shim compiled into the binary.
-
-## `baston-escrow-plugin`
-
-CFX Asset Escrow decryption through the sidecar. Behind the `escrow` feature;
-the core never depends on it.
-
 ## `baston-core`
 
-Shared primitives: licence types with redacted `Debug`, the script decryptor
-trait, CFX-encryption detection. Small on purpose.
+The `ScriptDecryptor` seam the zone's resource loader passes every script
+through, plus CFX-encryption (`.fxap`) detection. `PlainDecryptor` is the only
+implementation: it passes plaintext through and refuses an escrowed file with
+an error the operator can act on.
+
+There used to be a second implementation, and two crates behind it —
+`baston-cfx-platform` and `baston-escrow-plugin` — driving an operator-supplied
+FXServer as a licence broker and escrow decryptor. Both were removed; see
+[ADR-003](../adr/003-remove-the-fxserver-sidecar.md). The trait stays because it
+is where escrow support would return and the one place that knows an `.fxap`
+payload is not loadable.
 
 ## `baston-loadtest`
 

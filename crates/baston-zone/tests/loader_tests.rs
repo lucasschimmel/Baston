@@ -123,9 +123,10 @@ async fn plain_resource_unaffected_by_decryptor_pipeline() {
 }
 
 #[tokio::test]
-async fn cfx_encrypted_script_without_plugin_fails_to_start() {
+async fn a_cfx_encrypted_script_fails_cleanly_rather_than_reaching_the_engine() {
     // A file carrying the CFX "FXAP" magic, loaded with the default
     // PlainDecryptor, must fail cleanly (not a V8 SyntaxError) and mark Error.
+    // This is the whole of BASTON's escrow story: it refuses, legibly.
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("escrow-test");
     std::fs::create_dir_all(root.join("dist/server")).unwrap();

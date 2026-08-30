@@ -37,7 +37,6 @@ prost = { workspace = true }
 baston-modules = { workspace = true }
 baston-config = { workspace = true }
 baston-core = { workspace = true }
-baston-cfx-platform = { workspace = true }
 baston-protocol = { workspace = true }
 baston-scripting = { workspace = true, default-features = false }
 baston-zone = { workspace = true, default-features = false }
@@ -51,7 +50,6 @@ baston-voice = { workspace = true }
 default = ["scripting-js"]
 scripting-js = ["baston-modules/scripting-js", "baston-scripting/js", "baston-zone/scripting-js"]
 scripting-lua = ["baston-modules/scripting-lua", "baston-scripting/lua", "baston-zone/scripting-lua"]
-escrow = ["baston-modules/escrow", "baston-zone/escrow"]
 # The db capability, and its drivers. An operator running PostgreSQL should not
 # compile a MySQL client; `db` alone gives sqlite, which needs no server.
 db = ["dep:baston-db", "baston-modules/db", "baston-db/sqlite"]

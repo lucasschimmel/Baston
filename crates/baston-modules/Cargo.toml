@@ -17,5 +17,4 @@ default = []
 # its flag here, or `--modules` will under-report what the build contains.
 scripting-js = []
 scripting-lua = []
-escrow = []
 db = []

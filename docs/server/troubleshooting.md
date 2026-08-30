@@ -40,7 +40,7 @@ the fix. Read the message — it is more specific than this page.
 | `module "…" is configured in two places that disagree` | A legacy flag and `[modules]` contradict each other. Keep one. |
 | `module "…" is not compiled into this build` | Wrong bundle. Run `--modules`. |
 | `[db] the db module is enabled but url is empty` | Set `[db] url`, or remove `db` from `[modules] enable`. |
-| `public_listing requires mode = "verified"` | You cannot list a server whose identity is unverified. |
+| `unknown variant \`verified\`` | `[license] mode = "verified"` no longer exists. Use `"gate"` or `"off"`. |
 | `ZONE_BOUNDS … is required` | A zone process needs bounds. See [zone config](zone-config.md). |
 
 ### "It cannot find my config"

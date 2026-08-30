@@ -140,11 +140,17 @@ and all are written to the audit log. Scripts can do the same through the
 
 ## Encrypted (escrow) resources
 
-CFX escrowed resources work on Windows, with the `escrow` capability compiled in
-and an operator-supplied FXServer. BASTON never ships CFX components — it drives
-an official one. See [Asset escrow](../operations/escrow.md).
+**They do not run.** A resource whose server scripts are CFX Asset
+Escrow-encrypted (`.fxap`) is refused at load:
 
-Escrow covers **scripts only**. Encrypted `stream/` assets are out of scope.
+```
+file is CFX-encrypted (escrow) and BASTON cannot decrypt it
+```
+
+BASTON has no way to decrypt them: doing so meant hosting an FXServer process
+alongside itself, which was Windows-only and was removed
+([ADR-003](../adr/003-remove-the-fxserver-sidecar.md)). Ask the resource's
+author for an unescrowed build.
 
 ## When a resource does not start
 
