@@ -991,13 +991,7 @@ async fn run_lua_loop(mut runtime: crate::lua::LuaRuntime, mut rx: mpsc::Receive
                 player_name,
                 reply,
             } => {
-                let args = serde_json::json!([player_name]).to_string();
-                let result = runtime.dispatch_event(
-                    "playerConnecting",
-                    &args,
-                    Some(source),
-                    DispatchKind::PlayerConnecting,
-                );
+                let result = runtime.dispatch_player_connecting(source, &player_name);
                 let _ = reply.send(result.map(|()| runtime.drain_queued_events()));
             }
             RuntimeCommand::DispatchCommand {
@@ -1012,14 +1006,12 @@ async fn run_lua_loop(mut runtime: crate::lua::LuaRuntime, mut rx: mpsc::Receive
                     .map(|_handled| runtime.drain_queued_events());
                 let _ = reply.send(result);
             }
-            // Zone transfer state is a JS-only surface today: no Lua resource
-            // can register a collector, so there is nothing to collect. `None`
-            // is the honest answer, not an error.
-            RuntimeCommand::CollectTransferState { reply, .. } => {
-                let _ = reply.send(Ok(None));
+            RuntimeCommand::CollectTransferState { source, reply } => {
+                let _ = reply.send(runtime.collect_zone_transfer_state(source));
             }
             RuntimeCommand::DispatchStateBagChanges { reply } => {
-                let _ = reply.send(Ok(runtime.drain_queued_events()));
+                let result = runtime.dispatch_state_bag_changes();
+                let _ = reply.send(result.map(|()| runtime.drain_queued_events()));
             }
         }
     }

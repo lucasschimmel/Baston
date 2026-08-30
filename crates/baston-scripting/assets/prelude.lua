@@ -102,6 +102,115 @@ function RegisterCommand(name, fn, restricted)
     host.register_command(name, restricted and true or false)
 end
 
+-- ---------------------------------------------------------------- exports ---
+
+local local_exports = {}
+
+--- `exports('name', fn)` registers; `exports.resource.fn(...)` calls.
+---
+--- Same two shapes as the JS proxy. Cross-resource calls are not supported
+--- yet, and say so rather than returning nil: a silent nil in a Lua resource
+--- surfaces hundreds of lines later as "attempt to index a nil value".
+exports = setmetatable({}, {
+    __call = function(_, name, fn)
+        local_exports[name] = fn
+        host.add_export(name)
+    end,
+    __index = function(_, resource)
+        local proxy
+        proxy = setmetatable({}, {
+            __index = function(_, fn_name)
+                return function(...)
+                    -- Both spellings are idiomatic in the FiveM ecosystem:
+                    -- `exports.res:fn(a)` passes the proxy as `self`,
+                    -- `exports.res.fn(a)` does not. Drop the receiver rather
+                    -- than shifting every argument by one.
+                    local args = table.pack(...)
+                    local first, count = 1, args.n
+                    if count > 0 and args[1] == proxy then
+                        first = 2
+                    end
+                    if resource == host.resource_name() and local_exports[fn_name] then
+                        return local_exports[fn_name](table.unpack(args, first, count))
+                    end
+                    error(("export %s.%s unavailable (no cross-resource exports yet)")
+                        :format(tostring(resource), tostring(fn_name)), 2)
+                end
+            end,
+        })
+        return proxy
+    end,
+})
+
+-- -------------------------------------------------------------- state bags ---
+
+local state_bag_handlers = {}
+
+function AddStateBagChangeHandler(key_filter, bag_filter, handler)
+    local id = #state_bag_handlers + 1
+    state_bag_handlers[id] = handler
+    return host.add_state_bag_handler(key_filter or "", bag_filter or "", id)
+end
+
+function RemoveStateBagChangeHandler(cookie)
+    return host.remove_state_bag_handler(cookie)
+end
+
+-- ------------------------------------------- server → client native calls ---
+
+--- Run a GTA native on `source`'s client.
+---
+--- Without `expects_return` this is fire-and-forget and returns immediately.
+--- With it, the call must run inside a `CreateThread` coroutine: the reply
+--- comes back over the network, so the script yields until it lands instead of
+--- blocking the runtime that would have to deliver it.
+function InvokeNativeOnClient(source, hash, args, expects_return)
+    -- Checked before the call goes out: a caller who cannot wait for the reply
+    -- should not have spent a network round trip discovering that.
+    if expects_return and not coroutine.isyieldable() then
+        error("InvokeNativeOnClient with a return value must run inside "
+            .. "Citizen.CreateThread — the reply arrives on a later tick", 2)
+    end
+    local id, err = host.invoke_client_native(
+        tonumber(source) or 0,
+        tostring(hash),
+        json_encode(args or {}),
+        expects_return and true or false
+    )
+    if err then
+        error("InvokeNativeOnClient: " .. err, 2)
+    end
+    if not expects_return then
+        return nil
+    end
+    while true do
+        local raw = host.poll_client_native(id)
+        if raw then
+            local result = json_decode(raw)
+            if type(result) == "table" and result.__error then
+                error("InvokeNativeOnClient: " .. tostring(result.__error), 2)
+            end
+            return result
+        end
+        coroutine.yield(0)
+    end
+end
+
+Citizen.InvokeNativeOnClient = InvokeNativeOnClient
+
+-- --------------------------------------------------- zone transfer (mesh) ---
+
+local zone_transfer_callbacks = {}
+
+--- Register state BASTON must carry with a player across a zone handoff.
+function RegisterZoneTransferState(cb)
+    if type(cb) ~= "function" then
+        return
+    end
+    zone_transfer_callbacks[#zone_transfer_callbacks + 1] = cb
+    host.register_zone_transfer_state()
+end
+
 -- ---------------------------------------------------------------- threads ---
 
 --- Cooperative threads, as CFX defines them: `Wait(ms)` yields, and the host
@@ -214,5 +323,83 @@ __baston_dispatch = {
             host.report_error(tostring(err))
         end
         return true
+    end,
+
+    --- `playerConnecting(name, setKickReason, deferrals)`.
+    ---
+    --- Handlers run synchronously; a handler that defers keeps the connection
+    --- parked until it calls `deferrals.done()`, exactly as on the JS side.
+    --- A handler that throws after deferring would strand the player, so the
+    --- connection is released with a server-error reason.
+    player_connecting = function(source, player_name)
+        local list = handlers["playerConnecting"]
+        if not list then
+            return 0
+        end
+        local set_kick_reason = function(reason)
+            host.set_kick_reason(source, tostring(reason))
+        end
+        local deferrals = {
+            defer = function() host.deferral_defer(source) end,
+            update = function(msg) host.deferral_update(source, tostring(msg)) end,
+            done = function(reason)
+                host.deferral_done(source, reason == nil and "" or tostring(reason))
+            end,
+            presentCard = function(card)
+                host.deferral_present_card(
+                    source,
+                    type(card) == "string" and card or json_encode(card)
+                )
+            end,
+        }
+        local errors = 0
+        for _, fn in pairs(list) do
+            local ok, err = pcall(fn, player_name, set_kick_reason, deferrals)
+            if not ok then
+                errors = errors + 1
+                host.report_error(tostring(err))
+                host.deferral_done(source, "server error in playerConnecting handler")
+            end
+        end
+        return errors
+    end,
+
+    --- Deliver the state-bag changes queued for this resource.
+    state_bag_changes = function()
+        local deliveries = json_decode(host.poll_state_bag_changes()) or {}
+        local errors = 0
+        for _, delivery in ipairs(deliveries) do
+            local handler = state_bag_handlers[delivery.callback_id]
+            if handler then
+                local change = delivery.change
+                local ok, err = pcall(
+                    handler, change.bag, change.key, change.value, 0, change.replicated
+                )
+                if not ok then
+                    errors = errors + 1
+                    host.report_error(tostring(err))
+                end
+            end
+        end
+        return errors
+    end,
+
+    --- Merge every zone-transfer callback into one object for the handoff.
+    collect_zone_transfer_state = function(source)
+        if #zone_transfer_callbacks == 0 then
+            return nil
+        end
+        local merged = {}
+        for _, cb in ipairs(zone_transfer_callbacks) do
+            local ok, result = pcall(cb, source)
+            if not ok then
+                host.report_error(tostring(result))
+            elseif type(result) == "table" then
+                for k, v in pairs(result) do
+                    merged[k] = v
+                end
+            end
+        end
+        return json_encode(merged)
     end,
 }

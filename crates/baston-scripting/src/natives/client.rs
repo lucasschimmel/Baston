@@ -13,10 +13,8 @@ use std::time::Instant;
 /// legitimate results aren't dropped. Removing the stall entirely needs the
 /// host loop to drive dispatches concurrently on the shared isolate (tracked
 /// separately — it's a redesign of the execution model, not a local change).
-// Gap: the Lua prelude does not expose client-native dispatch yet, so this
-// path exists only where the JS polyfill can reach it. See docs/modules.md.
-#[cfg(feature = "js")]
-const NATIVE_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1000);
+#[cfg(any(feature = "js", feature = "lua"))]
+pub(crate) const NATIVE_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1000);
 
 /// Queue one native call on the net bridge, addressed to `source`'s client.
 ///
@@ -24,7 +22,7 @@ const NATIVE_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_milli
 /// fire-and-forget context dispatcher ([`super::rpc`]) so both put the
 /// exact same `__baston:invokeNative` payload on the wire. Returns `false` when
 /// the bridge is full or closed — backpressure, not a fatal error.
-pub(super) fn queue_native_call(
+pub(crate) fn queue_native_call(
     net: &crate::net_bridge::NetBridge,
     source: u32,
     id: u64,

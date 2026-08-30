@@ -14,7 +14,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use mlua::{Lua, LuaSerdeExt, Value, Variadic};
 
@@ -30,6 +30,79 @@ use crate::observability::Observability;
 
 const PRELUDE_LUA: &str = include_str!("../assets/prelude.lua");
 
+/// Wall-clock budget for a single dispatch, matching the V8 path's
+/// `DISPATCH_BUDGET`. Generous on purpose: legitimate handlers finish in
+/// milliseconds, so this only fires on a genuinely runaway script.
+const DISPATCH_BUDGET: Duration = Duration::from_secs(10);
+
+/// How often the watchdog hook runs, in VM instructions.
+///
+/// Small enough that a tight `while true do end` is caught within a few
+/// milliseconds, large enough that the check is noise next to the work a real
+/// handler does.
+const WATCHDOG_INSTRUCTIONS: u32 = 100_000;
+
+/// Interrupts a runaway Lua script.
+///
+/// Where V8 needs a separate thread holding an `IsolateHandle` — its
+/// `execute_script` cannot be cancelled from inside — Lua can interrupt
+/// itself: a debug hook runs every N instructions and returns an error once
+/// the dispatch overruns its budget, which unwinds the script exactly like any
+/// other Lua error. No thread, no handle, no cross-thread synchronisation.
+#[derive(Clone)]
+struct Watchdog {
+    /// Millis since the host started; `0` means disarmed.
+    deadline: Rc<std::cell::Cell<u64>>,
+    /// Set when the hook actually terminated a dispatch.
+    fired: Rc<std::cell::Cell<bool>>,
+    /// How long one dispatch may run. A field rather than a constant so tests
+    /// can exercise the real arming path in milliseconds instead of waiting
+    /// out the production budget.
+    budget: Rc<std::cell::Cell<Duration>>,
+}
+
+impl Default for Watchdog {
+    fn default() -> Self {
+        Self {
+            deadline: Rc::new(std::cell::Cell::new(0)),
+            fired: Rc::new(std::cell::Cell::new(false)),
+            budget: Rc::new(std::cell::Cell::new(DISPATCH_BUDGET)),
+        }
+    }
+}
+
+/// Disarms the watchdog when a dispatch returns, including on an early `?`.
+struct WatchdogGuard(Rc<std::cell::Cell<u64>>);
+
+impl Drop for WatchdogGuard {
+    fn drop(&mut self) {
+        self.0.set(0);
+    }
+}
+
+impl Watchdog {
+    /// Arm for one dispatch; the returned guard disarms on drop.
+    fn arm(&self, host_started_at: Instant) -> WatchdogGuard {
+        self.fired.set(false);
+        let deadline = (host_started_at.elapsed() + self.budget.get()).as_millis() as u64;
+        self.deadline.set(deadline.max(1));
+        WatchdogGuard(Rc::clone(&self.deadline))
+    }
+
+    /// Whether the watchdog terminated the dispatch that just ran.
+    fn took_fired(&self) -> bool {
+        self.fired.replace(false)
+    }
+}
+
+/// A server → client native call this runtime is waiting on.
+struct PendingClientNative {
+    rx: tokio::sync::oneshot::Receiver<serde_json::Value>,
+    started: Instant,
+    hash: u64,
+    source: u32,
+}
+
 /// One resource's Lua state plus the native services behind it.
 pub struct LuaRuntime {
     lua: Lua,
@@ -39,6 +112,16 @@ pub struct LuaRuntime {
     state: Rc<RefCell<NativeState>>,
     resource_name: String,
     observability: Arc<Observability>,
+    watchdog: Watchdog,
+    host_started_at: Instant,
+    /// Client-native calls awaiting a reply.
+    ///
+    /// The JS path awaits a `oneshot` inside the op. Lua cannot: a Lua
+    /// function is synchronous, and blocking the thread would stop the very
+    /// tick loop that delivers the reply. So the call is registered here and
+    /// the script polls it from a coroutine — cooperative waiting, which is
+    /// how CFX Lua models every other asynchronous surface.
+    pending_client_natives: Rc<RefCell<std::collections::HashMap<u64, PendingClientNative>>>,
 }
 
 impl LuaRuntime {
@@ -76,7 +159,11 @@ impl LuaRuntime {
             state: Rc::new(RefCell::new(native_state)),
             resource_name: resource_name.to_owned(),
             observability,
+            watchdog: Watchdog::default(),
+            host_started_at,
+            pending_client_natives: Rc::new(RefCell::new(std::collections::HashMap::new())),
         };
+        runtime.install_watchdog();
         runtime.install_host_table(host_started_at)?;
         runtime
             .lua
@@ -92,6 +179,41 @@ impl LuaRuntime {
 
     pub fn resource_name(&self) -> &str {
         &self.resource_name
+    }
+
+    /// Arm the debug hook that terminates a runaway dispatch.
+    ///
+    /// The hook is installed once and stays installed; the cost when disarmed
+    /// is one `Cell` read every [`WATCHDOG_INSTRUCTIONS`] instructions.
+    fn install_watchdog(&self) {
+        let deadline = Rc::clone(&self.watchdog.deadline);
+        let fired = Rc::clone(&self.watchdog.fired);
+        let budget = Rc::clone(&self.watchdog.budget);
+        let started = self.host_started_at;
+        let resource = self.resource_name.clone();
+        self.lua.set_hook(
+            mlua::HookTriggers::new().every_nth_instruction(WATCHDOG_INSTRUCTIONS),
+            move |_lua, _debug| {
+                let deadline_ms = deadline.get();
+                if deadline_ms == 0 || (started.elapsed().as_millis() as u64) < deadline_ms {
+                    return Ok(mlua::VmState::Continue);
+                }
+                // Disarm before erroring: the unwind runs Lua code (`pcall`
+                // handlers, `__close`), and re-firing there would mask the
+                // original site.
+                deadline.set(0);
+                fired.set(true);
+                tracing::error!(
+                    target: "script",
+                    resource = %resource,
+                    budget_ms = budget.get().as_millis() as u64,
+                    "terminated a Lua dispatch that overran its budget"
+                );
+                Err(mlua::Error::runtime(
+                    "BASTON: script exceeded its dispatch budget and was terminated",
+                ))
+            },
+        );
     }
 
     /// Bind `__baston`: the only surface the prelude may call into Rust with.
@@ -227,6 +349,308 @@ impl LuaRuntime {
             .set("register_command", register_command)
             .map_err(|e| self.init_error(&e))?;
 
+        // --- exports ---
+        let state = Rc::clone(&self.state);
+        let add_export = lua
+            .create_function(move |_, name: String| {
+                state
+                    .borrow_mut()
+                    .borrow_mut::<RuntimeContext>()
+                    .exports
+                    .insert(name);
+                Ok(())
+            })
+            .map_err(|e| self.init_error(&e))?;
+        table
+            .set("add_export", add_export)
+            .map_err(|e| self.init_error(&e))?;
+
+        let resource = self.resource_name.clone();
+        let resource_name = lua
+            .create_function(move |_, ()| Ok(resource.clone()))
+            .map_err(|e| self.init_error(&e))?;
+        table
+            .set("resource_name", resource_name)
+            .map_err(|e| self.init_error(&e))?;
+
+        // --- state bags ---
+        let state = Rc::clone(&self.state);
+        let add_state_bag_handler = lua
+            .create_function(
+                move |_, (key_filter, bag_filter, callback_id): (String, String, u32)| {
+                    let state = state.borrow();
+                    let resource = state.borrow::<RuntimeContext>().resource_name.clone();
+                    Ok(state.borrow::<SharedStateBags>().0.add_handler(
+                        resource,
+                        Some(key_filter),
+                        Some(bag_filter),
+                        callback_id,
+                    ))
+                },
+            )
+            .map_err(|e| self.init_error(&e))?;
+        table
+            .set("add_state_bag_handler", add_state_bag_handler)
+            .map_err(|e| self.init_error(&e))?;
+
+        let state = Rc::clone(&self.state);
+        let remove_state_bag_handler = lua
+            .create_function(move |_, cookie: u32| {
+                let state = state.borrow();
+                let resource = state.borrow::<RuntimeContext>().resource_name.clone();
+                Ok(state
+                    .borrow::<SharedStateBags>()
+                    .0
+                    .remove_handler(&resource, cookie))
+            })
+            .map_err(|e| self.init_error(&e))?;
+        table
+            .set("remove_state_bag_handler", remove_state_bag_handler)
+            .map_err(|e| self.init_error(&e))?;
+
+        let state = Rc::clone(&self.state);
+        let poll_state_bag_changes = lua
+            .create_function(move |_, ()| {
+                // Same cap as the JS op: a burst must not turn one dispatch
+                // into an unbounded amount of script work.
+                const MAX_DELIVERIES_PER_POLL: usize = 4096;
+                let state = state.borrow();
+                let resource = state.borrow::<RuntimeContext>().resource_name.clone();
+                let deliveries = state
+                    .borrow::<SharedStateBags>()
+                    .0
+                    .drain_deliveries(&resource, MAX_DELIVERIES_PER_POLL);
+                Ok(serde_json::to_string(&deliveries).unwrap_or_else(|_| "[]".to_owned()))
+            })
+            .map_err(|e| self.init_error(&e))?;
+        table
+            .set("poll_state_bag_changes", poll_state_bag_changes)
+            .map_err(|e| self.init_error(&e))?;
+
+        // --- deferrals (playerConnecting) ---
+        let state = Rc::clone(&self.state);
+        let deferral_defer = lua
+            .create_function(move |_, source: u32| {
+                state.borrow().borrow::<SharedDeferrals>().0.defer(source);
+                Ok(())
+            })
+            .map_err(|e| self.init_error(&e))?;
+        table
+            .set("deferral_defer", deferral_defer)
+            .map_err(|e| self.init_error(&e))?;
+
+        let state = Rc::clone(&self.state);
+        let deferral_update = lua
+            .create_function(move |_, (source, message): (u32, String)| {
+                state
+                    .borrow()
+                    .borrow::<SharedDeferrals>()
+                    .0
+                    .update(source, message);
+                Ok(())
+            })
+            .map_err(|e| self.init_error(&e))?;
+        table
+            .set("deferral_update", deferral_update)
+            .map_err(|e| self.init_error(&e))?;
+
+        let state = Rc::clone(&self.state);
+        let deferral_done = lua
+            .create_function(move |_, (source, reason): (u32, String)| {
+                // Empty means "accepted"; a reason means "rejected with this
+                // message". Same contract as the JS op.
+                let reason = (!reason.is_empty()).then_some(reason);
+                state
+                    .borrow()
+                    .borrow::<SharedDeferrals>()
+                    .0
+                    .done(source, reason);
+                Ok(())
+            })
+            .map_err(|e| self.init_error(&e))?;
+        table
+            .set("deferral_done", deferral_done)
+            .map_err(|e| self.init_error(&e))?;
+
+        let state = Rc::clone(&self.state);
+        let deferral_present_card = lua
+            .create_function(move |_, (source, card_json): (u32, String)| {
+                state
+                    .borrow()
+                    .borrow::<SharedDeferrals>()
+                    .0
+                    .present_card(source, card_json);
+                Ok(())
+            })
+            .map_err(|e| self.init_error(&e))?;
+        table
+            .set("deferral_present_card", deferral_present_card)
+            .map_err(|e| self.init_error(&e))?;
+
+        let state = Rc::clone(&self.state);
+        let set_kick_reason = lua
+            .create_function(move |_, (source, reason): (u32, String)| {
+                state
+                    .borrow()
+                    .borrow::<SharedDeferrals>()
+                    .0
+                    .set_kick_reason(source, reason);
+                Ok(())
+            })
+            .map_err(|e| self.init_error(&e))?;
+        table
+            .set("set_kick_reason", set_kick_reason)
+            .map_err(|e| self.init_error(&e))?;
+
+        // --- zone transfer (mesh handoffs) ---
+        let state = Rc::clone(&self.state);
+        let register_zone_transfer_state = lua
+            .create_function(move |_, ()| {
+                state
+                    .borrow_mut()
+                    .borrow_mut::<RuntimeContext>()
+                    .has_zone_transfer_state = true;
+                Ok(())
+            })
+            .map_err(|e| self.init_error(&e))?;
+        table
+            .set("register_zone_transfer_state", register_zone_transfer_state)
+            .map_err(|e| self.init_error(&e))?;
+
+        // --- server → client native dispatch ---
+        let state = Rc::clone(&self.state);
+        let pending = Rc::clone(&self.pending_client_natives);
+        let invoke_client_native = lua
+            .create_function(
+                move |_,
+                      (source, hash_hex, args_json, expects_return): (
+                    u32,
+                    String,
+                    String,
+                    bool,
+                )| {
+                    let hash = match u64::from_str_radix(hash_hex.trim_start_matches("0x"), 16) {
+                        Ok(hash) => hash,
+                        Err(e) => {
+                            return Ok((None, Some(format!("invalid native hash {hash_hex}: {e}"))))
+                        }
+                    };
+                    let args: Vec<serde_json::Value> = match serde_json::from_str(&args_json) {
+                        Ok(args) => args,
+                        Err(e) => return Ok((None, Some(format!("invalid native args: {e}")))),
+                    };
+                    // Same validation the JS path runs: a bogus hash or arity
+                    // must not reach a client as a malformed call.
+                    static REGISTRY: std::sync::OnceLock<baston_protocol::native::NativeRegistry> =
+                        std::sync::OnceLock::new();
+                    if let Err(e) = REGISTRY
+                        .get_or_init(baston_protocol::native::NativeRegistry::new)
+                        .validate(hash, args.len())
+                    {
+                        return Ok((None, Some(e.to_string())));
+                    }
+
+                    let (net, observability, resource) = {
+                        let state = state.borrow();
+                        (
+                            state.borrow::<SharedNet>().0.clone(),
+                            Arc::clone(&state.borrow::<SharedObservability>().0),
+                            state.borrow::<RuntimeContext>().resource_name.clone(),
+                        )
+                    };
+                    let started = Instant::now();
+                    let (id, rx) = net.pending_natives.register();
+                    if !crate::natives::client::queue_native_call(&net, source, id, hash, args) {
+                        net.pending_natives.cancel(id);
+                        observability
+                            .record_native_roundtrip(&resource, hash, source, 0, false, true);
+                        return Ok((None, Some("net bridge full or closed".to_owned())));
+                    }
+                    if !expects_return {
+                        // The shim still replies; nobody is waiting for it.
+                        net.pending_natives.cancel(id);
+                        observability.record_native_roundtrip(
+                            &resource,
+                            hash,
+                            source,
+                            started.elapsed().as_micros() as u64,
+                            false,
+                            false,
+                        );
+                        return Ok((None, None));
+                    }
+                    pending.borrow_mut().insert(
+                        id,
+                        PendingClientNative {
+                            rx,
+                            started,
+                            hash,
+                            source,
+                        },
+                    );
+                    Ok((Some(id), None))
+                },
+            )
+            .map_err(|e| self.init_error(&e))?;
+        table
+            .set("invoke_client_native", invoke_client_native)
+            .map_err(|e| self.init_error(&e))?;
+
+        let state = Rc::clone(&self.state);
+        let pending = Rc::clone(&self.pending_client_natives);
+        let poll_client_native = lua
+            .create_function(move |_, id: u64| {
+                let mut pending = pending.borrow_mut();
+                let Some(call) = pending.get_mut(&id) else {
+                    // Unknown id: already collected, or never registered.
+                    return Ok(Some(
+                        serde_json::json!({ "__error": "unknown native call" }).to_string(),
+                    ));
+                };
+                let elapsed = call.started.elapsed();
+                let (outcome, timed_out) = match call.rx.try_recv() {
+                    Ok(value) => (Some(value.to_string()), false),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                        if elapsed < crate::natives::client::NATIVE_CALL_TIMEOUT =>
+                    {
+                        return Ok(None); // still in flight; the caller yields
+                    }
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty) => (
+                        Some(
+                            serde_json::json!({ "__error": "client did not answer in time" })
+                                .to_string(),
+                        ),
+                        true,
+                    ),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed) => (
+                        Some(
+                            serde_json::json!({ "__error": "native result channel closed" })
+                                .to_string(),
+                        ),
+                        true,
+                    ),
+                };
+                let (hash, source) = (call.hash, call.source);
+                pending.remove(&id);
+                let state = state.borrow();
+                state
+                    .borrow::<SharedObservability>()
+                    .0
+                    .record_native_roundtrip(
+                        &state.borrow::<RuntimeContext>().resource_name,
+                        hash,
+                        source,
+                        elapsed.as_micros() as u64,
+                        timed_out,
+                        timed_out,
+                    );
+                Ok(outcome)
+            })
+            .map_err(|e| self.init_error(&e))?;
+        table
+            .set("poll_client_native", poll_client_native)
+            .map_err(|e| self.init_error(&e))?;
+
         // --- clock and error reporting ---
         let game_timer = lua
             .create_function(move |_, ()| Ok(host_started_at.elapsed().as_millis() as i64))
@@ -294,6 +718,9 @@ impl LuaRuntime {
     /// Run one resource script.
     pub fn execute_script(&mut self, path: &str, code: &str) -> Result<(), ScriptError> {
         let started = Instant::now();
+        // A runaway top-level load is covered from the first script, not only
+        // once handlers start running.
+        let guard = self.watchdog.arm(self.host_started_at);
         let result = self
             .lua
             .load(code)
@@ -304,6 +731,7 @@ impl LuaRuntime {
                 script: path.to_owned(),
                 message: e.to_string(),
             });
+        drop(guard);
         let elapsed = started.elapsed().as_micros() as u64;
         self.observability
             .record_dispatch(crate::observability::DispatchMeasurement {
@@ -316,9 +744,7 @@ impl LuaRuntime {
                 event_loop_us: 0,
                 total_us: elapsed,
                 errored: result.is_err(),
-                // No watchdog on the Lua path yet — a runaway Lua script blocks
-                // its own runtime and only its own. See docs/modules.md.
-                watchdog_fired: false,
+                watchdog_fired: self.watchdog.took_fired(),
                 memory: None,
                 source: None,
                 zone: None,
@@ -344,14 +770,17 @@ impl LuaRuntime {
         }
         let started = Instant::now();
         let dispatch: mlua::Table = self.dispatch_table()?;
-        let errors: u32 = dispatch
+        let guard = self.watchdog.arm(self.host_started_at);
+        let errors: Result<u32, mlua::Error> = dispatch
             .get::<mlua::Function>("event")
-            .and_then(|f| f.call((event, args_json, source)))
-            .map_err(|e| ScriptError::Execute {
-                resource: self.resource_name.clone(),
-                script: event.to_owned(),
-                message: e.to_string(),
-            })?;
+            .and_then(|f| f.call((event, args_json, source)));
+        drop(guard);
+        let watchdog_fired = self.watchdog.took_fired();
+        let errors = errors.map_err(|e| ScriptError::Execute {
+            resource: self.resource_name.clone(),
+            script: event.to_owned(),
+            message: e.to_string(),
+        })?;
         let elapsed = started.elapsed().as_micros() as u64;
         self.observability
             .record_dispatch(crate::observability::DispatchMeasurement {
@@ -361,13 +790,100 @@ impl LuaRuntime {
                 execute_us: elapsed,
                 event_loop_us: 0,
                 total_us: elapsed,
-                errored: errors > 0,
-                watchdog_fired: false,
+                errored: errors > 0 || watchdog_fired,
+                watchdog_fired,
                 memory: None,
                 source,
                 zone: None,
             });
         Ok(())
+    }
+
+    /// Run the `playerConnecting` handlers, deferrals and all.
+    ///
+    /// Separate from [`Self::dispatch_event`] because the handler signature is
+    /// different: CFX passes `(name, setKickReason, deferrals)`, not the event
+    /// arguments.
+    pub fn dispatch_player_connecting(
+        &mut self,
+        source: u32,
+        player_name: &str,
+    ) -> Result<(), ScriptError> {
+        let started = Instant::now();
+        let dispatch = self.dispatch_table()?;
+        let guard = self.watchdog.arm(self.host_started_at);
+        let errors: Result<u32, mlua::Error> = dispatch
+            .get::<mlua::Function>("player_connecting")
+            .and_then(|f| f.call((source, player_name)));
+        drop(guard);
+        let watchdog_fired = self.watchdog.took_fired();
+        let errors = errors.map_err(|e| ScriptError::Execute {
+            resource: self.resource_name.clone(),
+            script: "playerConnecting".to_owned(),
+            message: e.to_string(),
+        })?;
+        let elapsed = started.elapsed().as_micros() as u64;
+        self.observability
+            .record_dispatch(crate::observability::DispatchMeasurement {
+                resource: self.resource_name.clone(),
+                kind: crate::observability::DispatchKind::PlayerConnecting,
+                name: "playerConnecting".to_owned(),
+                execute_us: elapsed,
+                event_loop_us: 0,
+                total_us: elapsed,
+                errored: errors > 0 || watchdog_fired,
+                watchdog_fired,
+                memory: None,
+                source: Some(source),
+                zone: None,
+            });
+        Ok(())
+    }
+
+    /// Deliver queued state-bag changes to this resource's handlers.
+    pub fn dispatch_state_bag_changes(&mut self) -> Result<(), ScriptError> {
+        let dispatch = self.dispatch_table()?;
+        let guard = self.watchdog.arm(self.host_started_at);
+        let result: Result<u32, mlua::Error> = dispatch
+            .get::<mlua::Function>("state_bag_changes")
+            .and_then(|f| f.call(()));
+        drop(guard);
+        self.watchdog.took_fired();
+        result.map(|_| ()).map_err(|e| ScriptError::Execute {
+            resource: self.resource_name.clone(),
+            script: "stateBagChange".to_owned(),
+            message: e.to_string(),
+        })
+    }
+
+    /// Merge this resource's zone-transfer callbacks for a handoff.
+    ///
+    /// `None` means the resource registered none, which is the common case and
+    /// not an error.
+    pub fn collect_zone_transfer_state(
+        &mut self,
+        source: u32,
+    ) -> Result<Option<String>, ScriptError> {
+        if !self
+            .state
+            .borrow()
+            .borrow::<RuntimeContext>()
+            .has_zone_transfer_state
+        {
+            return Ok(None);
+        }
+        let dispatch = self.dispatch_table()?;
+        let guard = self.watchdog.arm(self.host_started_at);
+        let result: Result<Option<String>, mlua::Error> = dispatch
+            .get::<mlua::Function>("collect_zone_transfer_state")
+            .and_then(|f| f.call(source));
+        drop(guard);
+        self.watchdog.took_fired();
+        result.map_err(|e| ScriptError::Execute {
+            resource: self.resource_name.clone(),
+            script: "collectZoneTransferState".to_owned(),
+            message: e.to_string(),
+        })
     }
 
     /// Whether the resource registered this event for client → server traffic.
@@ -391,19 +907,25 @@ impl LuaRuntime {
     ) -> Result<bool, ScriptError> {
         let args_json = serde_json::to_string(args).unwrap_or_else(|_| "[]".to_owned());
         let dispatch = self.dispatch_table()?;
-        dispatch
+        let guard = self.watchdog.arm(self.host_started_at);
+        let handled = dispatch
             .get::<mlua::Function>("command")
-            .and_then(|f| f.call((command, source, args_json, raw)))
-            .map_err(|e| ScriptError::Execute {
-                resource: self.resource_name.clone(),
-                script: command.to_owned(),
-                message: e.to_string(),
-            })
+            .and_then(|f| f.call((command, source, args_json, raw)));
+        drop(guard);
+        self.watchdog.took_fired();
+        handled.map_err(|e| ScriptError::Execute {
+            resource: self.resource_name.clone(),
+            script: command.to_owned(),
+            message: e.to_string(),
+        })
     }
 
     /// Resume coroutines and fire timers; returns how long the runtime would
     /// like to sleep before the next tick.
     pub fn tick(&mut self) -> std::time::Duration {
+        // Coroutines are script code too: a thread that never yields is the
+        // most likely way to wedge a Lua runtime, so the tick is covered.
+        let guard = self.watchdog.arm(self.host_started_at);
         let ms = self
             .dispatch_table()
             .and_then(|t| {
@@ -412,6 +934,8 @@ impl LuaRuntime {
             })
             .and_then(|f| f.call::<i64>(()).map_err(|e| self.init_error(&e)))
             .unwrap_or(50);
+        drop(guard);
+        self.watchdog.took_fired();
         std::time::Duration::from_millis(ms.clamp(1, 50) as u64)
     }
 
@@ -672,6 +1196,322 @@ mod tests {
         assert_eq!(rt.lua.globals().get::<i64>("steps").unwrap(), 1);
         rt.tick();
         assert_eq!(rt.lua.globals().get::<i64>("steps").unwrap(), 2);
+    }
+
+    #[test]
+    fn player_connecting_handlers_receive_the_deferrals_table() {
+        // The whitelist/queue pattern: defer, tell the player what is
+        // happening, then let them in. This is the single most common reason a
+        // FiveM server has server-side script at all.
+        let mut rt = runtime("gate");
+        // The gateway registers the in-flight connection before dispatching;
+        // without it `defer`/`done` have no entry to act on.
+        let outcome = rt.state.borrow().borrow::<SharedDeferrals>().0.register(7);
+        rt.execute_script(
+            "main.lua",
+            r#"
+            seen_name, steps = nil, {}
+            AddEventHandler("playerConnecting", function(name, setKickReason, deferrals)
+                seen_name = name
+                deferrals.defer()
+                steps[#steps + 1] = "defer"
+                deferrals.update("checking the whitelist")
+                steps[#steps + 1] = "update"
+                deferrals.done()
+                steps[#steps + 1] = "done"
+            end)
+            "#,
+        )
+        .unwrap();
+        rt.dispatch_player_connecting(7, "Lucas").unwrap();
+
+        assert_eq!(
+            rt.lua.globals().get::<String>("seen_name").unwrap(),
+            "Lucas"
+        );
+        let steps: mlua::Table = rt.lua.globals().get("steps").unwrap();
+        assert_eq!(steps.len().unwrap(), 3);
+        assert_eq!(steps.get::<String>(1).unwrap(), "defer");
+        assert_eq!(steps.get::<String>(3).unwrap(), "done");
+        // The registry is the authority on whether the player may proceed.
+        assert!(!rt
+            .state
+            .borrow()
+            .borrow::<SharedDeferrals>()
+            .0
+            .is_pending(7));
+        assert!(
+            matches!(outcome.blocking_recv(), Ok(Ok(()))),
+            "an accepted deferral must let the connection through"
+        );
+    }
+
+    #[test]
+    fn a_throwing_player_connecting_handler_never_strands_the_player() {
+        // A handler that defers and then throws would otherwise park the
+        // connection until the timeout — for every player, forever.
+        let mut rt = runtime("gate");
+        let outcome = rt.state.borrow().borrow::<SharedDeferrals>().0.register(9);
+        rt.execute_script(
+            "main.lua",
+            r#"
+            AddEventHandler("playerConnecting", function(name, _, deferrals)
+                deferrals.defer()
+                error("boom")
+            end)
+            "#,
+        )
+        .unwrap();
+        rt.dispatch_player_connecting(9, "Lucas").unwrap();
+        assert!(
+            !rt.state
+                .borrow()
+                .borrow::<SharedDeferrals>()
+                .0
+                .is_pending(9),
+            "the connection must be released, not left parked"
+        );
+        assert!(
+            matches!(outcome.blocking_recv(), Ok(Err(_))),
+            "the player is rejected with a reason, not silently accepted"
+        );
+    }
+
+    #[test]
+    fn exports_register_and_call_locally() {
+        let mut rt = runtime("my-lib");
+        rt.execute_script(
+            "main.lua",
+            r#"
+            exports('add', function(a, b) return a + b end)
+            -- Both spellings are idiomatic in the FiveM ecosystem.
+            method_style = exports['my-lib']:add(2, 3)
+            field_style = exports['my-lib'].add(10, 5)
+            "#,
+        )
+        .unwrap();
+        assert_eq!(rt.lua.globals().get::<i64>("method_style").unwrap(), 5);
+        assert_eq!(rt.lua.globals().get::<i64>("field_style").unwrap(), 15);
+        assert!(rt
+            .state
+            .borrow()
+            .borrow::<RuntimeContext>()
+            .exports
+            .contains("add"));
+    }
+
+    #[test]
+    fn a_cross_resource_export_fails_loudly() {
+        // Returning nil would surface hundreds of lines later as "attempt to
+        // index a nil value", pointing at the wrong resource.
+        let mut rt = runtime("caller");
+        let err = rt
+            .execute_script("main.lua", r#"exports['other']:thing()"#)
+            .expect_err("must not silently return nil");
+        assert!(err.to_string().contains("unavailable"), "{err}");
+    }
+
+    #[test]
+    fn state_bag_handlers_receive_their_changes() {
+        let mut rt = runtime("bags");
+        rt.execute_script(
+            "main.lua",
+            r#"
+            got = {}
+            AddStateBagChangeHandler(nil, nil, function(bag, key, value)
+                got[#got + 1] = bag .. "/" .. key .. "=" .. tostring(value)
+            end)
+            "#,
+        )
+        .unwrap();
+
+        rt.state.borrow().borrow::<SharedStateBags>().0.set(
+            "player:7".to_owned(),
+            "hunger".to_owned(),
+            serde_json::json!(42),
+            true,
+            crate::StateBagSource::resource("bags".to_owned()),
+        );
+        rt.dispatch_state_bag_changes().unwrap();
+
+        let got: mlua::Table = rt.lua.globals().get("got").unwrap();
+        assert_eq!(got.get::<String>(1).unwrap(), "player:7/hunger=42");
+    }
+
+    #[test]
+    fn zone_transfer_callbacks_merge_into_one_object() {
+        let mut rt = runtime("mesh-test");
+        // A resource that registered nothing has nothing to carry, and that is
+        // not an error — it is the common case.
+        assert!(rt.collect_zone_transfer_state(7).unwrap().is_none());
+
+        rt.execute_script(
+            "main.lua",
+            r#"
+            RegisterZoneTransferState(function(src) return { hunger = 42 } end)
+            RegisterZoneTransferState(function(src) return { thirst = 7, src = src } end)
+            "#,
+        )
+        .unwrap();
+        let json = rt
+            .collect_zone_transfer_state(7)
+            .unwrap()
+            .expect("registered callbacks produce state");
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["hunger"], 42);
+        assert_eq!(value["thirst"], 7);
+        assert_eq!(value["src"], 7);
+    }
+
+    #[test]
+    fn a_fire_and_forget_client_native_reaches_the_net_bridge() {
+        let (net, mut rx) = crate::net_bridge::NetBridge::new();
+        let mut rt = LuaRuntime::new(
+            "client-natives",
+            Instant::now(),
+            Arc::new(crate::deferrals::DeferralRegistry::new()),
+            Arc::new(baston_protocol::PlayerDirectory::default()),
+            net,
+            Arc::new(Observability::new()),
+        )
+        .unwrap();
+
+        // GET_PLAYER_PED, one argument — a hash the registry knows.
+        rt.execute_script(
+            "main.lua",
+            r#"InvokeNativeOnClient(7, "0x43A66C31C68491C0", { 1 }, false)"#,
+        )
+        .unwrap();
+
+        let outbound = rx.try_recv().expect("the call reaches the bridge");
+        match outbound {
+            crate::net_bridge::NetOutbound::ClientEvent { source, event, .. } => {
+                assert_eq!(source, 7);
+                assert_eq!(event, baston_protocol::native::INVOKE_NATIVE_EVENT);
+            }
+            other => panic!("unexpected outbound: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_native_hash_is_refused_before_it_reaches_a_client() {
+        let mut rt = runtime("client-natives");
+        let err = rt
+            .execute_script(
+                "main.lua",
+                r#"InvokeNativeOnClient(7, "0xDEADBEEF", {}, false)"#,
+            )
+            .expect_err("a bogus hash must not go on the wire");
+        assert!(err.to_string().contains("InvokeNativeOnClient"), "{err}");
+    }
+
+    #[test]
+    fn an_awaited_client_native_resumes_its_thread_with_the_result() {
+        // The whole cooperative round trip: the thread yields, the reply lands
+        // on a later tick, and the thread resumes where it left off.
+        let (net, mut rx) = crate::net_bridge::NetBridge::new();
+        let pending = Arc::clone(&net.pending_natives);
+        let mut rt = LuaRuntime::new(
+            "client-natives",
+            Instant::now(),
+            Arc::new(crate::deferrals::DeferralRegistry::new()),
+            Arc::new(baston_protocol::PlayerDirectory::default()),
+            net,
+            Arc::new(Observability::new()),
+        )
+        .unwrap();
+
+        rt.execute_script(
+            "main.lua",
+            r#"
+            ped = nil
+            CreateThread(function()
+                ped = InvokeNativeOnClient(7, "0x43A66C31C68491C0", { 1 }, true)
+            end)
+            "#,
+        )
+        .unwrap();
+
+        // First tick starts the thread, which dispatches and then yields.
+        rt.tick();
+        let call_id = match rx.try_recv().expect("the call reaches the bridge") {
+            crate::net_bridge::NetOutbound::ClientEvent { args_json, .. } => {
+                let parsed: serde_json::Value = serde_json::from_str(&args_json).unwrap();
+                parsed[0]["id"].as_u64().expect("the call carries an id")
+            }
+            other => panic!("unexpected outbound: {other:?}"),
+        };
+        assert!(
+            rt.lua.globals().get::<Value>("ped").unwrap() == Value::Nil,
+            "the thread must still be waiting"
+        );
+
+        // The client answers.
+        assert!(pending.resolve(call_id, serde_json::json!(4242)));
+        rt.tick();
+        assert_eq!(rt.lua.globals().get::<i64>("ped").unwrap(), 4242);
+    }
+
+    #[test]
+    fn an_awaited_client_native_requires_a_coroutine() {
+        // Outside a thread there is nothing to yield to, and blocking would
+        // stop the very tick loop that delivers the reply. Say so instead.
+        let mut rt = runtime("client-natives");
+        let err = rt
+            .execute_script(
+                "main.lua",
+                r#"InvokeNativeOnClient(7, "0x43A66C31C68491C0", { 1 }, true)"#,
+            )
+            .expect_err("must refuse outside a coroutine");
+        assert!(
+            err.to_string().contains("CreateThread"),
+            "the error must name the fix: {err}"
+        );
+    }
+
+    #[test]
+    fn the_watchdog_terminates_a_runaway_script_and_the_runtime_survives() {
+        let mut rt = runtime("runaway");
+        // The production budget is ten seconds. What this test needs to prove
+        // is that the hook fires and the state survives, so it shortens the
+        // budget rather than waiting one out.
+        rt.watchdog.budget.set(Duration::from_millis(50));
+        let err = rt
+            .execute_script("spin.lua", "while true do end")
+            .expect_err("must be terminated");
+        assert!(
+            err.to_string().contains("dispatch budget"),
+            "the error must say why: {err}"
+        );
+
+        // The whole point of interrupting rather than aborting: this runtime
+        // keeps serving.
+        rt.execute_script("after.lua", "survived = 1")
+            .expect("the runtime survives its own watchdog");
+        assert_eq!(rt.lua.globals().get::<i64>("survived").unwrap(), 1);
+    }
+
+    #[test]
+    fn the_watchdog_does_not_fire_on_a_normal_dispatch() {
+        let mut rt = runtime("calm");
+        rt.execute_script(
+            "main.lua",
+            r#"
+            total = 0
+            AddEventHandler("work", function()
+                for i = 1, 200000 do total = total + i end
+            end)
+            "#,
+        )
+        .unwrap();
+        rt.dispatch_event(
+            "work",
+            "[]",
+            None,
+            crate::observability::DispatchKind::Event,
+        )
+        .expect("real work must not be mistaken for a runaway script");
+        assert!(rt.lua.globals().get::<i64>("total").unwrap() > 0);
     }
 
     #[test]
