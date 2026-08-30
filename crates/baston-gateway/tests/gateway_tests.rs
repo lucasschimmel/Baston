@@ -77,6 +77,7 @@ async fn app_with_mode(dir: &Path, script: &str, onesync: OneSyncMode) -> axum::
         downloads: baston_gateway::http::DownloadPolicy::new(&config.resources),
         builtins: baston_gateway::http::BuiltinResources::from_config(&config),
         config,
+        cfx: None,
         resource_manager,
         players,
         script_host,
@@ -104,9 +105,9 @@ async fn info_json_returns_server_metadata() {
     let json = body_json(response).await;
     assert_eq!(json["name"], "BASTON Dev");
     assert_eq!(json["onesync"]["enabled"], false);
-    // BASTON has no authenticated CFX identity, so it must not publish a
-    // token it never obtained — a client reading one here would believe the
-    // server is licensed (ADR-003).
+    // With no CFX identity, the token must be absent rather than empty: the
+    // client skips its entitlement lookup entirely when it finds nothing here,
+    // and an empty string would send it looking up a policy for "".
     assert!(json["vars"].get("sv_licenseKeyToken").is_none());
     assert_eq!(json["vars"]["sv_maxClients"], "32");
     assert_eq!(json["resources"][0], "axiom-core");

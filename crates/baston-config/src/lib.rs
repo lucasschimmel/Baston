@@ -145,6 +145,8 @@ pub struct BastonConfig {
     #[serde(default)]
     pub license: LicenseConfig,
     #[serde(default)]
+    pub listing: ListingConfig,
+    #[serde(default)]
     pub api: ApiConfig,
     #[serde(default)]
     pub voice: VoiceConfig,
@@ -297,18 +299,22 @@ impl ApiConfig {
 
 /// `[license]` section — the operator's CFX server-licence key.
 ///
-/// BASTON does not validate a licence and does not talk to any CFX service.
-/// It holds the operator's key so a future authenticated integration has one
-/// place to read it from, and refuses to boot without one when asked to. Modes:
+/// Modes:
 /// - `"off"`: no check (dev/LAN only). Emits a visible warning each boot.
-/// - `"gate"`: require a well-formed `sv_license_key` in config — shape only,
-///   no validation. Catches the empty or placeholder key before you go live.
+/// - `"gate"`: require a well-formed `sv_license_key` — shape only, never
+///   validity. Catches the empty or placeholder key before you go live.
+/// - `"cfx"`: validate the key with CFX, read the entitlements it grants, and
+///   apply them **restrictively** before any listener opens. Required for
+///   [`ListingConfig`].
 ///
-/// There is deliberately no mode that claims the key is *verified*. BASTON has
-/// no authenticated path to CFX today; see `docs/adr/003-remove-the-fxserver-sidecar.md`.
+/// `"cfx"` couples two things an operator should understand before choosing
+/// it: the server becomes discoverable, *and* its slot count becomes bounded
+/// by what the licence actually grants. A server that wants more slots than
+/// its tier allows wants `"off"`. See
+/// `docs/adr/004-cfx-identity-without-fxserver.md`.
 #[derive(Clone, Deserialize)]
 pub struct LicenseConfig {
-    /// `off` | `gate`.
+    /// `off` | `gate` | `cfx`.
     #[serde(default)]
     pub mode: LicenseMode,
     /// CFX server licence key, created at <https://portal.cfx.re>.
@@ -335,8 +341,9 @@ impl Default for LicenseConfig {
 }
 
 /// Licence enforcement mode (`[license] mode`). Missing → `Off` so existing
-/// dev/LAN configs keep booting; operators opt into `gate` (see
-/// `docs/operations/licensing.md`). Unknown values are rejected by serde at parse time.
+/// dev/LAN configs keep booting (see `docs/operations/licensing.md`). Unknown
+/// values are rejected by serde at parse time — including the removed
+/// `"verified"`, which must stop a boot rather than silently downgrade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LicenseMode {
@@ -345,6 +352,16 @@ pub enum LicenseMode {
     Off,
     /// Require a well-formed `sv_license_key`. Shape only — never validity.
     Gate,
+    /// Authenticate with CFX and enforce what the licence grants.
+    Cfx,
+}
+
+impl LicenseMode {
+    /// Whether this mode talks to CFX at boot.
+    #[must_use]
+    pub fn authenticates(self) -> bool {
+        matches!(self, Self::Cfx)
+    }
 }
 
 impl LicenseConfig {
@@ -364,9 +381,14 @@ impl LicenseConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         match self.mode {
             LicenseMode::Off => Ok(()),
-            LicenseMode::Gate => {
+            LicenseMode::Gate | LicenseMode::Cfx => {
+                let mode = if self.mode == LicenseMode::Cfx {
+                    "cfx"
+                } else {
+                    "gate"
+                };
                 if self.sv_license_key.trim().is_empty() {
-                    return Err(ConfigError::LicenseMissingKey("gate".into()));
+                    return Err(ConfigError::LicenseMissingKey(mode.into()));
                 }
                 if !self.is_well_formed_key() {
                     return Err(ConfigError::LicenseMalformedKey);
@@ -375,6 +397,22 @@ impl LicenseConfig {
             }
         }
     }
+}
+
+/// `[listing]` section — presence in the public CFX server list.
+///
+/// Off by default, and requires `[license] mode = "cfx"`: the heartbeat is
+/// signed with a credential only that exchange produces, and being listed
+/// without publishing the licence token would mean being discoverable while no
+/// client ever checks the slot count.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ListingConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// The public address players connect to, advertised to the server list.
+    /// Required when enabled; BASTON refuses to guess it.
+    #[serde(default)]
+    pub ip_override: Option<IpAddr>,
 }
 
 /// `[meshing]` section — Phase D zone federation.
@@ -1274,6 +1312,38 @@ impl BastonConfig {
         // left in a config with the module off is not a reason to refuse boot.
         if self.enabled_modules.is_enabled(ModuleId::Db) {
             self.db.validate()?;
+        }
+        if self.listing.enabled {
+            // Being listed and being slot-checked are the same bargain: the
+            // heartbeat needs a credential only `cfx` produces, and the client
+            // only checks entitlements when it finds the token that comes with
+            // it. Allowing a listing without one would be the whole point of
+            // the licence, skipped.
+            if !self.license.mode.authenticates() {
+                return Err(ConfigError::Invalid {
+                    section: "listing",
+                    reason: "listing requires [license] mode = \"cfx\"; a server cannot be \
+                             listed without an authenticated CFX identity"
+                        .to_owned(),
+                });
+            }
+            let ip = self
+                .listing
+                .ip_override
+                .ok_or_else(|| ConfigError::Invalid {
+                    section: "listing",
+                    reason: "listing requires ip_override, the public address players connect to"
+                        .to_owned(),
+                })?;
+            if ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() {
+                return Err(ConfigError::Invalid {
+                    section: "listing",
+                    reason: format!(
+                        "ip_override ({ip}) must be a concrete public address, not a wildcard, \
+                         loopback or multicast one"
+                    ),
+                });
+            }
         }
         if self.voice.enabled && self.voice.port == self.server.port {
             return Err(ConfigError::Invalid {

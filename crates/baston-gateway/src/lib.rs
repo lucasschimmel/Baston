@@ -4,6 +4,7 @@
 pub mod admin;
 pub mod api;
 pub mod auth;
+pub mod cfx;
 pub mod connection_router;
 #[cfg(feature = "db")]
 pub mod db;

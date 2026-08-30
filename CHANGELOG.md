@@ -53,6 +53,29 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - A resource with no server scripts no longer spawns a runtime; client-only and
   streaming-only resources used to cost an empty V8 isolate each.
 
+- Added CFX server identity **without FXServer** (`baston-cfx`,
+  [ADR-004](docs/adr/004-cfx-identity-without-fxserver.md)). `[license] mode =
+  "cfx"` validates the operator's key with CFX, reads the entitlements from the
+  same endpoint the FiveM client checks, lowers `max_players` to the granted
+  ceiling before any listener opens, and publishes `sv_licenseKeyToken`.
+  `[listing] enabled` adds nucleus registration and the server-list heartbeat.
+
+  BASTON identifies itself as BASTON — `User-Agent: BASTON/…`, never
+  FXServer's. A refusal from CFX is reported as a refusal, with the agent that
+  was sent, and the answer is `mode = "off"` rather than a forged agent.
+
+  The two properties this couples are enforced structurally, not by convention.
+  A licence may lower a slot count and never raise one, and the check runs at
+  boot rather than leaving the client to bounce players at connect time. And a
+  server cannot be listed while serving an `/info.json` without its licence
+  token: `/info.json` and the heartbeat are built by one function, and
+  `Listing::heartbeat` refuses a snapshot that omits it — being discoverable
+  and being slot-checked are the same bargain.
+
+  One deliberate divergence from the client: `NetLibrary.cpp`'s ladder has no
+  branch above 2048, so a server declaring more is checked against plain
+  `onesync`. BASTON caps at 2048 instead of using the gap.
+
 ### Removed
 
 - Removed the FXServer sidecar and everything that existed only to serve it:

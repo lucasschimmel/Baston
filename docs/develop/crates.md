@@ -3,7 +3,7 @@ title: "The crates"
 description: "What each crate owns, what it depends on, and where its interesting code lives."
 ---
 
-Ten crates. The dependency direction is strict: `baston-protocol` and
+Eleven crates. The dependency direction is strict: `baston-protocol` and
 `baston-modules` sit at the bottom and depend on almost nothing; the binaries
 sit at the top.
 
@@ -27,6 +27,7 @@ benchmark client: it links `baston-protocol` and nothing else in the tree.
 | [`baston-loadtest`](#baston-loadtest) | ~900 | The benchmark client |
 | [`baston-db`](#baston-db) | ~750 | Pooled SQL for scripts |
 | [`baston-modules`](#baston-modules) | ~500 | The module registry |
+| [`baston-cfx`](#baston-cfx) | ~700 | CFX identity, entitlements, server list |
 | [`baston-core`](#baston-core) | ~160 | The script-decryptor seam |
 
 ---
@@ -140,6 +141,19 @@ Mumble control and voice protocol to the stock FiveM client, with its own
 routing core. A leaf crate with no V8, so its tests compile fast.
 
 Currently emits **no metrics**, and proximity culling is not implemented.
+
+## `baston-cfx`
+
+CFX platform identity, without FXServer: key validation, the entitlement
+ladder, nucleus registration and the server-list heartbeat. Identifies itself
+as BASTON and never as FXServer — see
+[ADR-004](../adr/004-cfx-identity-without-fxserver.md).
+
+Two invariants live here rather than in the gateway, because they have to hold
+whoever calls them. A licence may lower a slot count and never raise one; and
+`Listing::heartbeat` refuses to advertise a server whose `/info.json` does not
+publish the identity's token, because being listed and being slot-checked are
+the same bargain.
 
 ## `baston-core`
 

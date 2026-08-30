@@ -105,6 +105,112 @@ fn the_removed_verified_mode_fails_loudly_instead_of_silently_downgrading() {
 }
 
 #[test]
+fn cfx_mode_needs_a_key_of_the_same_shape_gate_does() {
+    let missing = LicenseConfig {
+        mode: LicenseMode::Cfx,
+        sv_license_key: String::new(),
+    };
+    assert!(matches!(
+        missing.validate(),
+        Err(ConfigError::LicenseMissingKey(ref m)) if m == "cfx"
+    ));
+
+    let placeholder = LicenseConfig {
+        mode: LicenseMode::Cfx,
+        sv_license_key: "cfxk_REPLACE_ME_please".into(),
+    };
+    assert!(matches!(
+        placeholder.validate(),
+        Err(ConfigError::LicenseMalformedKey)
+    ));
+}
+
+#[test]
+fn only_cfx_mode_claims_to_authenticate() {
+    assert!(LicenseMode::Cfx.authenticates());
+    assert!(!LicenseMode::Gate.authenticates());
+    assert!(!LicenseMode::Off.authenticates());
+}
+
+#[test]
+fn listing_defaults_off_and_needs_nothing() {
+    let config: BastonConfig = toml::from_str("[server]\nport = 30120\n").unwrap();
+    assert!(!config.listing.enabled);
+    assert!(config.listing.ip_override.is_none());
+    config
+        .validate()
+        .expect("a server that does not list is always valid");
+}
+
+#[test]
+fn listing_without_an_authenticated_identity_is_rejected() {
+    // The bargain: no token published means no client ever checks the slot
+    // count, so a listing without `cfx` would be discoverable and unchecked.
+    let config: BastonConfig = toml::from_str(
+        "[server]\nport = 30120\n\
+         [license]\nmode = \"gate\"\nsv_license_key = \"cfxk_1a2b3c4d5e6f7g8h9i0j_key\"\n\
+         [listing]\nenabled = true\nip_override = \"203.0.113.10\"\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        config.validate(),
+        Err(ConfigError::Invalid {
+            section: "listing",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn listing_requires_a_concrete_public_address() {
+    let base = "[server]\nport = 30120\n\
+                [license]\nmode = \"cfx\"\nsv_license_key = \"cfxk_1a2b3c4d5e6f7g8h9i0j_key\"\n";
+
+    let missing: BastonConfig =
+        toml::from_str(&format!("{base}[listing]\nenabled = true\n")).unwrap();
+    assert!(
+        matches!(
+            missing.validate(),
+            Err(ConfigError::Invalid {
+                section: "listing",
+                ..
+            })
+        ),
+        "an absent ip_override must be refused, never guessed"
+    );
+
+    for bad in ["0.0.0.0", "127.0.0.1", "224.0.0.1"] {
+        let config: BastonConfig = toml::from_str(&format!(
+            "{base}[listing]\nenabled = true\nip_override = \"{bad}\"\n"
+        ))
+        .unwrap();
+        assert!(
+            matches!(
+                config.validate(),
+                Err(ConfigError::Invalid {
+                    section: "listing",
+                    ..
+                })
+            ),
+            "{bad} is not an address players can reach"
+        );
+    }
+}
+
+#[test]
+fn a_fully_configured_listing_validates() {
+    let config: BastonConfig = toml::from_str(
+        "[server]\nport = 30120\n\
+         [license]\nmode = \"cfx\"\nsv_license_key = \"cfxk_1a2b3c4d5e6f7g8h9i0j_key\"\n\
+         [listing]\nenabled = true\nip_override = \"203.0.113.10\"\n",
+    )
+    .unwrap();
+    config
+        .validate()
+        .expect("a complete listing config is valid");
+}
+
+#[test]
 fn a_config_still_carrying_the_escrow_section_is_ignored_not_rejected() {
     // Escrow support went with the sidecar. An operator's old `[escrow]`
     // block is dead weight, not a reason to refuse boot — serde ignores

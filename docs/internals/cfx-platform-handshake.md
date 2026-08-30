@@ -3,27 +3,30 @@ title: "CFX platform handshake"
 description: "What the client and the platform exchange before a player reaches the game."
 ---
 
-> ⚠️ **Reference only — not implemented, and not a plan.**
-> This documents the *closed* CFX platform flow (licence validation → nucleus
-> register → server-list ingress) as captured by MITM from a live FXServer.
-> Reproducing it from a non-FXServer binary means presenting BASTON to CFX as
-> FXServer, which is a compliance question before it is a technical one.
+> **Implemented, as BASTON.** This documents the CFX platform flow (licence
+> validation → nucleus register → server-list ingress) as captured from a live
+> FXServer in July 2026. Steps ② and ③ are also in the public tree
+> (`ServerNucleusMock.cpp`, `GameServer.cpp`); step ① is the one that lives
+> inside the closed `svadhesive` component, and it is what this capture added.
 >
-> **BASTON implements none of this.** It does not contact CFX at all: there is
-> no licence validation, no registration, no heartbeat, and no server-list
-> presence — see [`operations/licensing.md`](../operations/licensing.md).
+> BASTON performs all three in `baston-cfx` when `[license] mode = "cfx"`,
+> sending `User-Agent: BASTON/…` — **never FXServer's**. The decision, and the
+> line it does not cross, are in
+> [ADR-004](../adr/004-cfx-identity-without-fxserver.md).
 >
-> The sidecar approach that once stood in for it (hosting a genuine FXServer
-> and reading its verdict) was removed in
-> [ADR-003](../adr/003-remove-the-fxserver-sidecar.md). Nothing replaces it
-> today. This file is the record of what is known, kept so it does not have to
-> be rediscovered — deciding to act on it would need its own ADR.
+> Two details below are *not* implemented as described, deliberately: the
+> `User-Agent` values in ① and ②, and the >2048 gap in the client's slot ladder
+> (see ④). Both are recorded here because they are what FXServer does, not
+> because BASTON does them.
 
 
 Reverse-engineered from a live FXServer 31623 boot (mitmproxy capture,
 2026-07-04), filling the gap the engine-source mirror leaves open. This is the
 sequence a **registered** server goes through (server list, and — with a paid
-key — OneSync slots / policy features). BASTON goes through none of it.
+key — OneSync slots / policy features).
+
+Re-observed 2026-08-30 against a BASTON-identified client: ① returns HTTP 200
+and one additional field, `hashid`.
 
 All calls use plain HTTPS, no client certs. FXServer sends
 `User-Agent: FXServer/1 (...)` for the license call and `CitizenFX/1` for
@@ -140,18 +143,22 @@ strings (`onesync`, `onesync_plus`, …). On a free key this is empty, so the
 client caps at 48 slots. Not captured here because no client connected during
 the run; re-run with `connect 127.0.0.1:30120` to grab it.
 
-## What this would cost, if it were ever decided
+## How BASTON implements it
 
-Recorded as a scoping note, not a task list. The technical work is small; the
-reason it is not done is the first line of this file.
+`crates/baston-cfx/`, gated on `[license] mode = "cfx"`.
 
-- ① is the only step that was ever unknown, and it is the whole of the
-  difficulty. Steps ②–③ are ordinary HTTP against documented-shaped payloads.
-- `fallbackData.info` in ③ is essentially `/info.json`, which BASTON already
-  produces.
-- A free (Pebble) key yields listing visibility and nothing else: empty
-  `grants`, empty `policy`, so the client caps at 48 slots. Slots and clothing
-  pools need a paid tier.
-- Doing any of it means BASTON identifying itself to CFX the way FXServer does.
-  That is the part that needs an answer, and no amount of implementation detail
-  supplies one.
+- **① `identity.rs`** — including the double slash, which is reproduced
+  exactly: a normalised path is a different request, and this one is known to
+  work.
+- **④ `policy.rs`** — BASTON reads the same `policy-live` list the client will,
+  and applies the ladder *before opening a listener*. One divergence: the
+  client's `if/else` chain has no branch above 2048, so a server declaring more
+  falls through to plain `"onesync"`. BASTON caps at 2048 rather than using the
+  gap.
+- **② ③ `listing.rs`** — transcribed from the public tree, cadence and backoff
+  included. `fallbackData.info` is the same value `/info.json` serves, from one
+  function, so the two cannot diverge.
+
+A free (Pebble) key still yields listing visibility and nothing else: empty
+`grants`, empty `policy`, 48 slots. That is the licence working, not a
+limitation of this implementation.

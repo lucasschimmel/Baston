@@ -65,17 +65,32 @@ allow = []
 # Snapshots per second, per subscriber (1-30).
 refresh_hz = 5
 
-# Your CFX server-licence key. BASTON does **not** validate it and never talks
-# to CFX: it holds the key so a future authenticated integration has one place
-# to read it from, and can refuse to boot when it is missing or malformed.
-# See docs/operations/licensing.md.
+# Your CFX server identity. See docs/operations/licensing.md.
 [license]
 # "off"  : no check at all (dev/LAN). Warns every boot.
 # "gate" : require a well-formed sv_license_key — shape only, never validity.
 #          Catches the empty or placeholder key before you go live.
+# "cfx"  : validate the key with CFX, read what it grants, and apply it.
+#          Required to appear in the FiveM server list.
+#
+# Choosing "cfx" couples two things. The server becomes discoverable, AND its
+# slot count becomes bounded by what the licence actually grants — because
+# publishing the licence token is what makes the FiveM client look those
+# entitlements up. A server that wants more slots than its tier allows wants
+# "off": it will not be listed, and no client will check it.
 mode = "off"
-# Your CFX server licence, created at https://portal.cfx.re. Required for "gate".
+# Your CFX server licence, created at https://portal.cfx.re.
+# Required for "gate" and "cfx".
 sv_license_key = ""
+
+# Presence in the public FiveM server list. Off by default, and requires
+# [license] mode = "cfx" — the heartbeat is signed with a credential only that
+# exchange produces.
+[listing]
+enabled = false
+# The public address players connect to. Required when enabled; BASTON refuses
+# to guess it, and a wildcard, loopback or multicast address is rejected.
+# ip_override = "203.0.113.10"
 
 # Monitoring/control HTTP API keys (served on meshing.admin_port, default
 # 8080). Each key is a named bearer token with explicit permissions; control

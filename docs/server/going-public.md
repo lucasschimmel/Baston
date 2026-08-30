@@ -1,6 +1,6 @@
 ---
 title: "Going public"
-description: "The security checklist before anyone outside your friends can reach the server — and what your CFX key does not buy you."
+description: "The security checklist before anyone outside your friends can reach the server, and the one choice your CFX key forces."
 ---
 
 Everything here is unnecessary for a server you and your friends reach over a
@@ -81,43 +81,48 @@ are off by default; leave them off unless you need them.
 
 ---
 
-## The CFX licence, the server list, and escrow
+## The CFX licence and the server list
 
-Read this part before you plan anything around it.
-
-**BASTON does not appear in the FiveM server list.** Nothing in it registers
-with CFX or sends a heartbeat. Players reach your server by direct connect —
-`connect your.host:30120`, or an `fivem://connect/` link you hand out yourself.
-
-**Your CFX key buys you nothing here.** BASTON never contacts CFX, so it never
-learns what your key grants and enforces no entitlement from it. `max_players`
-is exactly what you configured, whatever tier you pay for.
-
-**Escrowed (`.fxap`) resources do not run.** A resource whose scripts are CFX
-Asset Escrow-encrypted is refused at load with an explicit error. There is no
-flag for it; ask the author for an unescrowed build.
-
-An earlier version of BASTON hosted an official FXServer alongside itself to
-do all three. It was Windows-only, never validated end to end, and it put a
-process BASTON does not control on the boot path — it was removed. The full
-reasoning is in [ADR-003](../adr/003-remove-the-fxserver-sidecar.md).
-
-### What `[license]` still does
+There is one choice here, and it decides the shape of your server.
 
 ```toml
 [license]
-mode = "gate"                       # "off" | "gate"
+mode = "cfx"                    # "off" | "gate" | "cfx"
 sv_license_key = "cfxk_…"
+
+[listing]
+enabled = true
+ip_override = "203.0.113.10"    # the public address players connect to
 ```
 
-`gate` checks the key's **shape** — non-empty, no whitespace, at least 20
-characters, not a placeholder — and refuses to boot if it fails. That is a
-typo check, not authentication: a revoked key passes it. Both modes warn at
-every boot that no licence is enforced.
+`cfx` authenticates your key with CFX, applies what it grants, and puts the
+server in the FiveM list. No FXServer involved — BASTON performs the same
+exchanges itself, identifying itself as BASTON
+([ADR-004](../adr/004-cfx-identity-without-fxserver.md)).
 
-`mode = "verified"` no longer exists and is **rejected at parse time** rather
-than quietly downgraded, so a config carrying it stops instead of booting
-unauthenticated. See [CFX licensing](../operations/licensing.md).
+**It also caps your slots to what your key grants**, and those two things
+cannot be separated. Publishing the licence token is what makes the FiveM
+client look your entitlements up; a server that publishes nothing has nothing
+looked up.
+
+| | `off` | `cfx` |
+| --- | --- | --- |
+| In the FiveM server list | no | yes |
+| Slots | whatever you configure | capped to your tier (48 / 64 / 128 / 2048) |
+
+So: **500+ players → `off`**, and hand out your connect address. **A server
+that needs to be found → `cfx`**, where the cap will never bind on you.
+
+A failure to authenticate stops the boot. A server that asked to be
+authenticated does not start unauthenticated.
+
+**Escrowed (`.fxap`) resources still do not run** — decryption lives inside
+`svadhesive` and no token opens it from outside. Ask the author for an
+unescrowed build.
+
+`mode = "verified"` is **rejected at parse time**; it ran the removed FXServer
+sidecar. Use `"cfx"`. Full detail in
+[CFX licensing](../operations/licensing.md).
 
 ---
 

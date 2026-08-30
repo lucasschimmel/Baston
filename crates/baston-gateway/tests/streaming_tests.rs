@@ -81,6 +81,7 @@ async fn app_with_downloads(dir: &Path) -> (axum::Router, std::sync::Arc<tokio::
         downloads,
         builtins: baston_gateway::http::BuiltinResources::from_config(&config),
         config,
+        cfx: None,
         resource_manager,
         players,
         script_host,

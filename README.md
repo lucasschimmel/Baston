@@ -41,6 +41,7 @@ belongs inside one of them.
 | `baston-config` | `baston.toml` and its validation |
 | `baston-db` | pooled SQL for scripts (SQLite / PostgreSQL / MySQL) |
 | `baston-voice` | Mumble-compatible voice server |
+| `baston-cfx` | CFX identity, entitlements, server-list presence |
 | `baston-core` | the script-decryptor seam |
 | `baston-loadtest` | the benchmark client |
 

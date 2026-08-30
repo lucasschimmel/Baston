@@ -154,25 +154,40 @@ Permissions: `monitor.read`, `resource.control`, `player.kick`, `zone.drain`,
 The loader refuses weak, duplicated or placeholder tokens, and keys with no
 permissions or no name — an unusable key that boots is worse than a refusal.
 
-## `[license]` — your CFX key
+## `[license]` — your CFX identity
 
-BASTON never contacts CFX and enforces no entitlement. See
-[CFX licensing](../operations/licensing.md).
+See [CFX licensing](../operations/licensing.md).
 
 | Key | Default | What it does |
 | --- | --- | --- |
-| `mode` | `"off"` | `off` \| `gate`. |
-| `sv_license_key` | `""` | Your key from [portal.cfx.re](https://portal.cfx.re). |
+| `mode` | `"off"` | `off` \| `gate` \| `cfx`. |
+| `sv_license_key` | `""` | Your key from [portal.cfx.re](https://portal.cfx.re). Required by `gate` and `cfx`. |
 
-`off` warns every boot. `gate` checks the key's *shape* — non-empty, no
-whitespace, ≥ 20 characters, not a placeholder — and refuses to boot if it
-fails. Neither validates the key: a revoked key passes `gate`.
+`off` warns every boot and checks nothing. `gate` checks the key's *shape* —
+non-empty, no whitespace, ≥ 20 characters, not a placeholder — and contacts
+nobody; a revoked key passes it.
+
+`cfx` validates the key with CFX before any listener opens, reads the
+entitlements from the same endpoint the FiveM client checks, and **lowers**
+`server.max_players` to the granted ceiling (48 / 64 / 128 / 2048 with OneSync
+on). It never raises it. Failure to authenticate stops the boot.
 
 `mode = "verified"`, `fxserver_path`, `sidecar_port`, `public_listing`,
-`listing_ip_override` and the whole `[escrow]` section were removed with the
-FXServer sidecar ([ADR-003](../adr/003-remove-the-fxserver-sidecar.md)). A
-config still carrying `"verified"` fails to parse rather than booting
-unauthenticated; a stale `[escrow]` block is ignored.
+`listing_ip_override` and the `[escrow]` section went with the FXServer sidecar
+([ADR-003](../adr/003-remove-the-fxserver-sidecar.md)). A config carrying
+`"verified"` fails to parse rather than booting unauthenticated; a stale
+`[escrow]` block is ignored.
+
+## `[listing]` — the public FiveM server list
+
+Requires `[license] mode = "cfx"`, because the heartbeat needs a credential
+only that exchange produces — and because being listed while publishing no
+licence token would mean being discoverable and never slot-checked.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `enabled` | `false` | Register and heartbeat with the CFX server list. |
+| `ip_override` | *(unset)* | The public address players connect to. Required when enabled; a wildcard, loopback or multicast address is rejected. |
 
 ## `[state_sync]` — entity synchronisation
 
@@ -327,7 +342,9 @@ The common ones:
 | Message | Cause |
 | --- | --- |
 | `[license] mode = "…" requires a licence key` | `gate` with an empty `sv_license_key`. |
-| `unknown variant \`verified\`` | `mode = "verified"` went with the FXServer sidecar. Use `"gate"` or `"off"`. |
+| `unknown variant \`verified\`` | `mode = "verified"` went with the FXServer sidecar. Use `"cfx"`. |
+| `listing requires [license] mode = "cfx"` | a server cannot be listed without an authenticated identity. |
+| `listing requires ip_override` | the public address players connect to; BASTON refuses to guess it. |
 | `[[api.keys]] key "…" has a weak or placeholder token` | tokens must be ≥ 32 characters. Use `openssl rand -hex 32`. |
 | `voice.port (…) must differ from server.port` | the game transport owns the game port. |
 | `module "…" is configured in two places that disagree` | a legacy flag and `[modules]` contradict each other. |

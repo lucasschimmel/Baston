@@ -37,6 +37,7 @@ prost = { workspace = true }
 baston-modules = { workspace = true }
 baston-config = { workspace = true }
 baston-core = { workspace = true }
+baston-cfx = { workspace = true }
 baston-protocol = { workspace = true }
 baston-scripting = { workspace = true, default-features = false }
 baston-zone = { workspace = true, default-features = false }

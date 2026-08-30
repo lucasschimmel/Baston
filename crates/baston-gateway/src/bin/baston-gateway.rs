@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use baston_config::{BastonConfig, LicenseMode};
+use baston_config::BastonConfig;
 use baston_gateway::voice::GatewayVoice;
 use baston_gateway::{router, AppState, AuthService, PlayerRegistry};
 use baston_modules::{Bundle, ModuleId, ModuleSet};
@@ -139,7 +139,7 @@ async fn main() -> anyhow::Result<()> {
     raise_timer_resolution();
 
     let config_path = BastonConfig::discover();
-    let config = BastonConfig::load(&config_path)?;
+    let mut config = BastonConfig::load(&config_path)?;
     let modules = config.enabled_modules;
     print_module_line(modules);
     // Settings whose module is off do nothing. Saying so at boot is the whole
@@ -149,7 +149,9 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!(target: "modules",
             "[{section}] is configured but module \"{module}\" is disabled — those settings are inert");
     }
-    warn_on_unenforced_licence(&config);
+    // Identity first: the licence may lower max_players, and every listener
+    // below advertises that number.
+    let cfx_identity = baston_gateway::cfx::authenticate(&mut config).await?;
     tracing::info!(name = %config.server.name, port = config.server.port,
         "BASTON online — speaking the FiveM protocol, zero FXServer C++");
 
@@ -681,6 +683,7 @@ async fn main() -> anyhow::Result<()> {
 
     let auth = AuthService::new(&config.auth)?;
     let state = Arc::new(AppState {
+        cfx: cfx_identity.map(std::sync::Arc::new),
         downloads: baston_gateway::http::DownloadPolicy::new(&config.resources),
         builtins: baston_gateway::http::BuiltinResources::from_config(&config),
         config,
@@ -730,27 +733,10 @@ async fn main() -> anyhow::Result<()> {
         .await
         .map_err(|_| anyhow::anyhow!("HTTP gateway stopped before its accept loop was ready"))?;
 
+    // Advertise only now: the listeners are up, so the first heartbeat
+    // describes a server that can actually be joined.
+    baston_gateway::cfx::spawn_listing(&state)?;
+
     http_server.await??;
     Ok(())
-}
-
-/// Say out loud that no CFX licence is enforced.
-///
-/// `gate` has already checked the key's shape by the time we get here, and
-/// that is all BASTON can check: there is no authenticated path to CFX (see
-/// `docs/adr/003-remove-the-fxserver-sidecar.md`). An operator who reads
-/// "licence" in their config and assumes their entitlements are being applied
-/// has the wrong model of what this server does, so both modes say so.
-fn warn_on_unenforced_licence(config: &BastonConfig) {
-    match config.license.mode {
-        LicenseMode::Off => tracing::warn!(
-            target: "license",
-            "[license] mode = \"off\" — no CFX licence key is configured and none is checked"
-        ),
-        LicenseMode::Gate => tracing::warn!(
-            target: "license",
-            "[license] mode = \"gate\" — the key's shape is valid, but BASTON does not \
-             validate it against CFX and enforces no entitlement from it"
-        ),
-    }
 }

@@ -333,6 +333,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "baston-cfx"
+version = "0.1.0-alpha"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "baston-config"
 version = "0.1.0-alpha"
 dependencies = [
@@ -375,6 +387,7 @@ dependencies = [
  "axum 0.8.9",
  "axum-server",
  "base64",
+ "baston-cfx",
  "baston-config",
  "baston-core",
  "baston-db",

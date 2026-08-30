@@ -49,8 +49,6 @@ Honest answer, so you do not find out the hard way.
 
 **It does not do**
 
-- **The public CFX server list.** BASTON never contacts CFX. Players join by
-  direct connect. See [going public](going-public.md).
 - **Escrowed (`.fxap`) resources.** A resource with CFX-encrypted scripts is
   refused at load. See [ADR-003](../adr/003-remove-the-fxserver-sidecar.md).
 - HTTPS on the game port. See [the `[tls]` note](../reference/configuration.md#tls--deliberately-absent).

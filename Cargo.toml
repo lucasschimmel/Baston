@@ -70,6 +70,7 @@ baston-db = { path = "crates/baston-db" }
 baston-modules = { path = "crates/baston-modules" }
 baston-config = { path = "crates/baston-config" }
 baston-core = { path = "crates/baston-core" }
+baston-cfx = { path = "crates/baston-cfx" }
 baston-protocol = { path = "crates/baston-protocol" }
 baston-scripting = { path = "crates/baston-scripting", default-features = false }
 baston-zone = { path = "crates/baston-zone", default-features = false }
