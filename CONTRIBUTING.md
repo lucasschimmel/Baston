@@ -34,8 +34,9 @@ sit in a shared top-level directory.
 
 ## Branching workflow
 
-This repo uses a lightweight Gitflow. No remote is configured yet — this
-document holds regardless of where it's eventually pushed.
+This repo uses a lightweight Gitflow against
+[`lucasschimmel/Baston`](https://github.com/lucasschimmel/Baston), whose default
+branch is `develop`.
 
 ## Branches
 
@@ -47,6 +48,23 @@ document holds regardless of where it's eventually pushed.
   short-lived branches cut from it.
 - **`feature/<name>`**, **`fix/<name>`**, **`chore/<name>`** — cut from
   `develop`, merged back into `develop` when done. Delete after merge.
+
+## Opening a pull request
+
+```sh
+git push -u origin <your-branch>
+gh pr create --base develop
+```
+
+CI runs six jobs on every push: `docs` (which also fails on a broken
+documentation link), `check` (test, clippy, fmt), and one per
+[bundle](docs/server/modules.md) — `lite`, `js`, `lua`, `full`. Run the bundle
+you touched locally first; the matrix exists because a capability behind a
+Cargo feature can rot without the default build noticing.
+
+**Push `develop` before opening the PR if your local `develop` is ahead of the
+remote.** GitHub diffs against `origin/develop`, so a stale remote makes your
+PR claim commits that are not yours.
 
 ## Cutting a release
 
