@@ -1,0 +1,180 @@
+---
+title: "The crates"
+description: "What each crate owns, what it depends on, and where its interesting code lives."
+---
+
+Twelve crates. The dependency direction is strict: `baston-protocol` and
+`baston-modules` sit at the bottom and depend on almost nothing; the binaries
+sit at the top.
+
+```
+baston-gateway ──┬─▶ baston-zone ──┬─▶ baston-scripting ──┬─▶ baston-protocol
+                 │                 │                      └─▶ baston-core
+                 ├─▶ baston-voice  ├─▶ baston-core
+                 ├─▶ baston-db     └─▶ baston-config ──▶ baston-modules
+                 └─▶ baston-cfx-platform ──▶ baston-escrow-plugin
+```
+
+| Crate | Lines | Owns |
+| --- | --- | --- |
+| [`baston-gateway`](#baston-gateway) | ~10 400 | The FiveM-facing process |
+| [`baston-scripting`](#baston-scripting) | ~11 000 | Script host, natives, both runtimes |
+| [`baston-protocol`](#baston-protocol) | ~8 500 | The wire protocol |
+| [`baston-zone`](#baston-zone) | ~7 000 | Entities, state sync, resource loading |
+| [`baston-voice`](#baston-voice) | ~3 000 | Mumble-compatible voice |
+| [`baston-config`](#baston-config) | ~2 300 | `baston.toml` and its validation |
+| [`baston-cfx-platform`](#baston-cfx-platform) | ~1 300 | CFX identity and licensing |
+| [`baston-loadtest`](#baston-loadtest) | ~900 | The benchmark client |
+| [`baston-db`](#baston-db) | ~750 | Pooled SQL for scripts |
+| [`baston-modules`](#baston-modules) | ~500 | The module registry |
+| [`baston-core`](#baston-core) | ~430 | Shared primitives |
+| [`baston-escrow-plugin`](#baston-escrow-plugin) | ~190 | Escrow decryption |
+
+---
+
+## `baston-gateway`
+
+The only process a FiveM client talks to. Also the binary you run for a
+single-process server.
+
+| Module | Owns |
+| --- | --- |
+| `http/` | `/info.json`, `/client`, `/files`, resource endpoints, packfile and stream caches |
+| `udp/` | ENet loop, ingress, OneSync outbound, adaptive tick, debug feed |
+| `api/` | `/api/v1` monitoring and control, the keyring, the audit log |
+| `auth/` | Offline CFX ticket verification |
+| `mesh.rs`, `zone_registry.rs`, `connection_router.rs` | Zone federation and handoffs |
+| `mesh_forward.rs` | Client updates → the owning zone, with the handoff hold |
+| `state_aggregator.rs` | NATS → per-client snapshots |
+| `cfx.rs` | Licence bootstrap, ordered so listeners open after authentication |
+| `db.rs`, `voice.rs` | Adapters implementing scripting traits over real services |
+
+The adapters are worth noting as a pattern: `baston-scripting` defines
+`DbAccess` and `VoiceControl` traits, and the gateway implements them over the
+real pool and the real voice handle. That is what keeps `baston-scripting` free
+of sqlx and of the voice crate.
+
+## `baston-scripting`
+
+The largest crate, and the one with the most interesting internal boundary.
+
+| Module | Owns |
+| --- | --- |
+| `natives/` | **Engine-neutral** CFX native implementations |
+| `native_state.rs` | The type-map every native reads from |
+| `extensions/` | The V8 bridge (deno ops) — `js` feature |
+| `lua.rs` | The mlua bridge — `lua` feature |
+| `runtime.rs` | One V8 isolate per resource, plus the watchdog |
+| `host.rs` | Orchestrates every resource runtime; one thread each |
+| `engine.rs` | Picks the runtime from script extensions |
+| `observability.rs` | resmon, the profiler, dispatch metrics |
+| `kvp.rs`, `state_bag.rs`, `http_bridge.rs`, `http_handler.rs` | Resource-scoped services |
+| `assets/bootstrap.js`, `assets/prelude.lua` | The script-side halves |
+
+**The rule:** logic belongs in `natives/`. Anything in `extensions/` or `lua.rs`
+serves one engine only.
+
+## `baston-protocol`
+
+The reverse-engineered wire format. Almost dependency-free and heavily
+unit-tested, because everything here is a fact about someone else's software.
+
+| Module | Owns |
+| --- | --- |
+| `udp/` | Message framing, `hash_rage_string`, handshake, time sync, object ids |
+| `connection.rs` | `initConnect` and `getConfiguration` shapes |
+| `events.rs` | Net-event framing, JSON ↔ msgpack |
+| `rage/` | The OneSync clone stream |
+| `rage/buffer.rs` | MSB-first bit buffer, C++ quirks preserved |
+| `rage/sync_trees.rs` | 13 sync trees, preorder — the order *is* the format |
+| `rage/sync_parse.rs` | Traversal, `shouldRead`, build gates |
+| `rage/lz4dict.rs` | The 64 KiB inbound dictionary |
+| `native.rs` | The native registry and the client round-trip protocol |
+
+Read [The wire protocol](../internals/protocol.md) before changing anything
+here. The fuzz targets in `fuzz/` cover the parsers; add one for any new parser
+that touches attacker-controlled bytes.
+
+## `baston-zone`
+
+Entities, their synchronisation, and resource loading.
+
+| Module | Owns |
+| --- | --- |
+| `entity_manager.rs` | The authoritative entity store and dirty tracking |
+| `state_ingest.rs` | Client updates in, with ownership and plausibility checks |
+| `state_sync.rs` | The dirty flush onto NATS JetStream |
+| `onesync/` | The OneSync-NG game state and ingest |
+| `interest_ng.rs` | Priority-and-budget interest management |
+| `adaptive_tick.rs` | The tick-rate controller |
+| `boundary_detector.rs`, `boundary_loop.rs`, `handoff_manager.rs` | Zone handoffs |
+| `resource_loader/` | Discovery, manifests, topological start order, hot reload |
+| `packfile.rs` | RPF2 generation |
+
+## `baston-config`
+
+Every setting, its default, and its validation. Also the module resolution that
+reconciles `[modules]` with the legacy per-section flags.
+
+The house rule lives here most visibly: **every error names the fix.** When you
+add a setting, add a validation with an actionable message.
+
+## `baston-modules`
+
+The registry from [ADR-002](../adr/002-module-tiers.md): module ids, tiers,
+defaults, which are compiled in, and the `--modules` report. A leaf crate with
+one dependency (serde), so anything may depend on it.
+
+## `baston-db`
+
+Pooled SQL behind the `db` capability. Drivers are features: `sqlite` (the
+default), `postgres`, `mysql`.
+
+`pool.rs` is an enum over the three sqlx pools rather than a trait object —
+there are exactly three, chosen at build time. `value.rs` handles JSON ↔ SQL,
+which is where the drivers genuinely differ.
+
+## `baston-voice`
+
+A Mumble-compatible server: "Mumble at the wire, custom brain". Speaks the
+Mumble control and voice protocol to the stock FiveM client, with its own
+routing core. A leaf crate with no V8, so its tests compile fast.
+
+Currently emits **no metrics**, and proximity culling is not implemented.
+
+## `baston-cfx-platform`
+
+CFX identity, licensing and the FXServer sidecar. BASTON never talks to CFX
+itself — it drives an operator-supplied, unmodified FXServer over a file-drop
+IPC channel. See [ADR-001](../adr/001-use-official-fxserver-as-cfx-trust-broker.md).
+
+Also owns `assets/baston-cfx-shim/`, the Lua shim compiled into the binary.
+
+## `baston-escrow-plugin`
+
+CFX Asset Escrow decryption through the sidecar. Behind the `escrow` feature;
+the core never depends on it.
+
+## `baston-core`
+
+Shared primitives: licence types with redacted `Debug`, the script decryptor
+trait, CFX-encryption detection. Small on purpose.
+
+## `baston-loadtest`
+
+A headless client that speaks the binary `msgBastonState` protocol rather than
+the full FiveM one. Used for the published benchmarks. Not shipped.
+
+## Adding a crate
+
+Rare, and usually the wrong answer. A new crate earns its place when it has a
+dependency the rest of the workspace should not carry — that is why `baston-db`
+(sqlx) and `baston-voice` (rustls, prost) exist.
+
+If it is just organisation, use a module.
+
+## Next
+
+- [Adding a native](adding-a-native.md)
+- [Adding a module](adding-a-module.md)
+- [The wire protocol](../internals/protocol.md)

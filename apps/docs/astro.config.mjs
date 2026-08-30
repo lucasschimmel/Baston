@@ -41,20 +41,62 @@ export default defineConfig({
       sidebar: [
         { label: "Overview", link: "/" },
         {
-          label: "Guides",
+          label: "Run a server",
           items: [
-            { label: "Getting started", link: "/guides/getting-started/" },
-            { label: "Modules and bundles", link: "/guides/modules/" },
-            { label: "Zone configuration", link: "/guides/zone-config/" },
-            { label: "Streaming assets", link: "/guides/streaming/" },
-            { label: "displayinfo overlay", link: "/guides/displayinfo/" },
+            { label: "Start here", link: "/server/" },
+            { label: "Quickstart", link: "/server/quickstart/" },
+            { label: "Installing resources", link: "/server/resources/" },
+            { label: "Modules and bundles", link: "/server/modules/" },
+            { label: "Voice", link: "/server/voice/" },
+            { label: "Streaming assets", link: "/server/streaming/" },
+            { label: "Multi-zone", link: "/server/multi-zone/" },
+            { label: "Zone configuration", link: "/server/zone-config/" },
+            { label: "displayinfo overlay", link: "/server/displayinfo/" },
+            { label: "Monitoring", link: "/server/monitoring/" },
+            { label: "Going public", link: "/server/going-public/" },
+            { label: "Troubleshooting", link: "/server/troubleshooting/" },
+          ],
+        },
+        {
+          label: "Write resources",
+          items: [
+            { label: "Start here", link: "/scripting/" },
+            { label: "Your first resource", link: "/scripting/your-first-resource/" },
+            { label: "Events", link: "/scripting/events/" },
+            { label: "Natives", link: "/scripting/natives/" },
+            { label: "State bags and KVP", link: "/scripting/state-bags/" },
+            { label: "Using a database", link: "/scripting/database/" },
+            { label: "HTTP", link: "/scripting/http/" },
+            { label: "Coming from FXServer", link: "/scripting/from-fivem/" },
+          ],
+        },
+        {
+          label: "Develop BASTON",
+          items: [
+            { label: "Architecture", link: "/develop/" },
+            { label: "The crates", link: "/develop/crates/" },
+            { label: "Adding a native", link: "/develop/adding-a-native/" },
+            { label: "Adding a module", link: "/develop/adding-a-module/" },
+            { label: "Testing", link: "/develop/testing/" },
           ],
         },
         {
           label: "Reference",
           items: [
+            { label: "Configuration", link: "/reference/configuration/" },
+            { label: "Metrics", link: "/reference/metrics/" },
             { label: "Monitoring & control API", link: "/reference/api/" },
             { label: "Native coverage", link: "/reference/natives-gap/" },
+          ],
+        },
+        {
+          label: "Internals",
+          items: [
+            { label: "The wire protocol", link: "/internals/protocol/" },
+            { label: "State synchronisation", link: "/internals/state-sync/" },
+            { label: "CFX platform handshake", link: "/internals/cfx-platform-handshake/" },
+            { label: "Code quality audit", link: "/internals/code-quality-audit-2026-07-05/" },
+            { label: "Getting started (FR, original)", link: "/internals/getting-started-fr/" },
           ],
         },
         {
@@ -66,29 +108,10 @@ export default defineConfig({
             {
               label: "Runbooks",
               items: [
-                {
-                  label: "Local live test",
-                  link: "/operations/runbooks/local-live-test/",
-                },
+                { label: "Local live test", link: "/operations/runbooks/local-live-test/" },
                 { label: "Phase C", link: "/operations/runbooks/phase-c/" },
-                {
-                  label: "Phase C testing",
-                  link: "/operations/runbooks/phase-c-testing/",
-                },
+                { label: "Phase C testing", link: "/operations/runbooks/phase-c-testing/" },
               ],
-            },
-          ],
-        },
-        {
-          label: "Internals",
-          items: [
-            {
-              label: "CFX platform handshake",
-              link: "/internals/cfx-platform-handshake/",
-            },
-            {
-              label: "Code quality audit",
-              link: "/internals/code-quality-audit-2026-07-05/",
             },
           ],
         },

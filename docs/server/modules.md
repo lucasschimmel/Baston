@@ -169,26 +169,34 @@ values to and from JSON.
 A resource with no server scripts (client-only, or streaming assets) does not
 get a runtime at all.
 
-### What Lua supports
+### The two runtimes are not equivalent
 
-The same surface as JavaScript: events and net events (`RegisterNetEvent` gates
-client → server traffic on both), commands, `Citizen.CreateThread` / `Wait` /
-`SetTimeout`, `print`, `exports`, state-bag change handlers,
-`playerConnecting` deferrals, zone transfer state, client-native dispatch, the
-`Db` surface, and every native — including as globals, where `GetPlayerName(1)`
-resolves on first use rather than from thousands of generated stubs.
+Both run resources, share one implementation of the CFX natives, and terminate
+a runaway script. But **each is missing things the other has**, and the gaps
+decide which language a given resource can be written in.
 
-A runaway Lua script is terminated the same way a runaway JS one is. The
-mechanism differs: V8 needs a separate thread holding an isolate handle, while
-Lua interrupts itself from a debug hook.
+Full detail in [Choosing a language](../scripting/index.md#choosing-a-language).
+The short version:
 
-Two differences worth knowing before you migrate:
+| | JavaScript | Lua |
+| --- | --- | --- |
+| Threads and timers | **none** — `setInterval` never fires, `setTimeout` ignores its delay | `Citizen.CreateThread`, `Wait`, `SetTimeout` |
+| `GetPlayerName`, `GetPlayers`, `GetConvar`, `GetResourceState`, `LoadResourceFile` | yes | **no** |
+| `SetHttpHandler`, `PerformHttpRequest` | yes | **no** |
+| Net events | every handler receives client traffic | opt-in via `RegisterNetEvent` |
+| Hot reload | yes | **no** — restart manually |
+| Memory in resmon | reported | not reported |
 
-- **Awaited calls need a thread.** Anything that waits on a reply — a client
-  native with a return value, any `Db` call — must run inside
-  `Citizen.CreateThread`. The reply arrives on a later tick, and blocking would
-  stop the loop that delivers it. Calling one outside a thread raises an error
-  that says so; it does not hang.
+Neither is "the complete one". A resource needing a periodic loop must be Lua;
+a resource needing player lookups or HTTP must be JavaScript. The `full` bundle
+runs both, and resources talk to each other over events.
+
+Other Lua notes:
+
+- **Awaited calls need a thread.** A client native with a return value, or any
+  `Db` call, must run inside `Citizen.CreateThread` — the reply arrives on a
+  later tick. Calling one outside a coroutine raises an error saying so; it
+  does not hang.
 - **Lua 5.4, not LuaJIT.** CFX supports both (`lua54`). The interpreter is
   swappable later without touching resource code.
 
