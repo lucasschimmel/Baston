@@ -47,9 +47,51 @@ impl GatewayWorldControl {
             rx,
         )
     }
+
+    /// Carve a block of ids out of this same descending allocator.
+    ///
+    /// A zone cannot round-trip to the gateway inside `CreateVehicle` — the
+    /// native returns its handle on the spot — so it leases ahead and picks
+    /// from its block with no I/O.
+    ///
+    /// Taking the block from *this* counter, rather than partitioning the id
+    /// space up front, is what makes the blocks exclusive without any
+    /// coordination: one allocator is the single authority, gateway-local
+    /// reservations and every zone's block come out of the same descending
+    /// sequence, and client leases walk up from the other end. Two zones
+    /// cannot mint the same id, so "spawn refused: id already in use" is not a
+    /// failure mode a zone can reach.
+    ///
+    /// Returns `(highest, granted)`: the block is `highest` down to
+    /// `highest - granted + 1`. `granted` can be smaller than `count` when the
+    /// space is nearly gone, and `None` means nothing is left.
+    pub fn reserve_block(&self, count: u32) -> Option<(u32, u32)> {
+        if count == 0 {
+            return None;
+        }
+        let mut granted = 0;
+        // The closure re-runs on CAS contention; the last run is the one that
+        // stuck, so `granted` always matches the value `fetch_update` returns.
+        let highest = self
+            .next_id
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                if current == 0 {
+                    return None;
+                }
+                // Never hand out 0 — it is the invalid handle.
+                granted = count.min(current);
+                Some(current - granted)
+            })
+            .ok()?;
+        (granted > 0).then_some((highest, granted))
+    }
 }
 
 impl WorldControl for GatewayWorldControl {
+    fn is_authoritative(&self) -> bool {
+        true
+    }
+
     fn reserve_network_id(&self) -> Option<u32> {
         // `fetch_update` so an exhausted space stays exhausted instead of
         // wrapping around and colliding with live ids.
@@ -113,6 +155,40 @@ mod tests {
         assert_eq!(control.reserve_network_id(), Some(1));
         assert_eq!(control.reserve_network_id(), None);
         assert_eq!(control.reserve_network_id(), None);
+    }
+
+    /// Blocks and single reservations share one counter, so a zone's ids can
+    /// never collide with the gateway's own.
+    #[test]
+    fn blocks_come_out_of_the_same_descending_sequence() {
+        let (control, _rx) = GatewayWorldControl::new();
+        let top = u32::from(MAX_OBJECT_ID_NATIVE);
+
+        let (highest, granted) = control.reserve_block(4).unwrap();
+        assert_eq!((highest, granted), (top, 4));
+        // The block owns top..=top-3, so the next single id is below it.
+        assert_eq!(control.reserve_network_id(), Some(top - 4));
+
+        let (next_highest, _) = control.reserve_block(4).unwrap();
+        assert_eq!(next_highest, top - 5);
+    }
+
+    /// A block that would run past the end is truncated, never wrapped, and
+    /// never includes 0.
+    #[test]
+    fn a_block_is_truncated_at_the_end_of_the_space() {
+        let (control, _rx) = GatewayWorldControl::new();
+        control.next_id.store(3, Ordering::Release);
+
+        assert_eq!(control.reserve_block(10), Some((3, 3)));
+        assert_eq!(control.reserve_block(1), None);
+        assert_eq!(control.reserve_network_id(), None);
+    }
+
+    #[test]
+    fn a_zero_length_block_is_refused() {
+        let (control, _rx) = GatewayWorldControl::new();
+        assert_eq!(control.reserve_block(0), None);
     }
 
     #[test]

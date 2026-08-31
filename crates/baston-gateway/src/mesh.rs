@@ -6,11 +6,13 @@ use std::time::Duration;
 
 use baston_protocol::mesh::gateway_service_server::{GatewayService, GatewayServiceServer};
 use baston_protocol::mesh::{
-    ActivatePlayerRequest, ConfirmHandoffRequest, ConfirmHandoffResponse, HeartbeatRequest,
-    HeartbeatResponse, PlayerStateRequest, PrepareHandoffRequest, PrepareHandoffResponse,
-    RegisterZoneRequest, RegisterZoneResponse,
+    ActivatePlayerRequest, ConfirmHandoffRequest, ConfirmHandoffResponse, EntityClass,
+    HeartbeatRequest, HeartbeatResponse, LeaseNetworkIdsRequest, LeaseNetworkIdsResponse,
+    PlayerStateRequest, PrepareHandoffRequest, PrepareHandoffResponse, RegisterZoneRequest,
+    RegisterZoneResponse, WorldCommandAck, WorldCommandBatch,
 };
 use baston_protocol::{Aabb, PlayerDirectory, PlayerStateSnapshot};
+use baston_scripting::WorldControl;
 use futures::StreamExt;
 use tonic::{Request, Response, Status};
 
@@ -37,6 +39,11 @@ pub struct GatewayMesh {
     /// Wired by the composition root. Zone-failure recovery needs it to tell
     /// the surviving zone who the players it just inherited actually are.
     players: std::sync::RwLock<Option<Arc<PlayerDirectory>>>,
+    /// Wired by the composition root, and only when OneSync is on — without an
+    /// authoritative world there is nothing for a zone to create entities in.
+    /// `None` makes the two world RPCs answer "unavailable" instead of
+    /// pretending.
+    world_control: std::sync::RwLock<Option<Arc<crate::world_control::GatewayWorldControl>>>,
 }
 
 impl GatewayMesh {
@@ -46,7 +53,26 @@ impl GatewayMesh {
             router,
             on_handoff_committed: std::sync::RwLock::new(None),
             players: std::sync::RwLock::new(None),
+            world_control: std::sync::RwLock::new(None),
         })
+    }
+
+    /// Let zones lease network ids and submit entity mutations.
+    ///
+    /// Call only when OneSync is on: with the msgRoute relay there is no
+    /// server-authoritative world, so a spawn would be accepted and dropped.
+    pub fn set_world_control(&self, control: Arc<crate::world_control::GatewayWorldControl>) {
+        *self
+            .world_control
+            .write()
+            .expect("world control lock poisoned") = Some(control);
+    }
+
+    fn world_control(&self) -> Option<Arc<crate::world_control::GatewayWorldControl>> {
+        self.world_control
+            .read()
+            .expect("world control lock poisoned")
+            .clone()
     }
 
     /// Give recovery access to player identities.
@@ -460,6 +486,140 @@ impl GatewayService for GatewayGrpc {
             ok: true,
             message: String::new(),
         }))
+    }
+
+    /// Hand a zone a block of network ids to mint entities from.
+    ///
+    /// Blocks come out of the gateway's own descending allocator, so they are
+    /// exclusive by construction — see `GatewayWorldControl::reserve_block`.
+    async fn lease_network_ids(
+        &self,
+        request: Request<LeaseNetworkIdsRequest>,
+    ) -> Result<Response<LeaseNetworkIdsResponse>, Status> {
+        let req = request.into_inner();
+        let refuse = |message: String| LeaseNetworkIdsResponse {
+            ok: false,
+            message,
+            first_id: 0,
+            granted: 0,
+        };
+        // An evicted zone must re-register before it can mint anything: its
+        // entities would otherwise outlive the gateway's knowledge of it.
+        if !self.mesh.registry.contains(&req.zone_id).await {
+            return Ok(Response::new(refuse(format!(
+                "zone {} is not registered",
+                req.zone_id
+            ))));
+        }
+        let Some(control) = self.mesh.world_control() else {
+            return Ok(Response::new(refuse(
+                "this gateway has no authoritative world (onesync is off), so server-created \
+                 entities are not available"
+                    .to_owned(),
+            )));
+        };
+        let Some((first_id, granted)) = control.reserve_block(req.count) else {
+            tracing::error!(target: "gateway", zone = %req.zone_id,
+                "network id space exhausted — zone cannot create entities");
+            metrics::counter!("network_id_lease_failures_total").increment(1);
+            return Ok(Response::new(refuse(
+                "the network id space is exhausted".to_owned(),
+            )));
+        };
+        tracing::info!(target: "gateway", zone = %req.zone_id,
+            "leased {granted} network ids ({}..={first_id})", first_id - granted + 1);
+        metrics::counter!("network_ids_leased_total", "zone" => req.zone_id.clone())
+            .increment(u64::from(granted));
+        Ok(Response::new(LeaseNetworkIdsResponse {
+            ok: true,
+            message: String::new(),
+            first_id,
+            granted,
+        }))
+    }
+
+    /// Apply entity mutations authored by a zone's scripts.
+    ///
+    /// The commands are queued on the same channel the gateway's own scripts
+    /// use, so they land on the next sync tick through one code path. Order
+    /// within a batch is preserved.
+    async fn submit_world_commands(
+        &self,
+        request: Request<WorldCommandBatch>,
+    ) -> Result<Response<WorldCommandAck>, Status> {
+        use baston_protocol::mesh::world_command::Command;
+
+        let req = request.into_inner();
+        let refuse = |message: String| WorldCommandAck {
+            ok: false,
+            message,
+            applied: 0,
+        };
+        if !self.mesh.registry.contains(&req.zone_id).await {
+            return Ok(Response::new(refuse(format!(
+                "zone {} is not registered",
+                req.zone_id
+            ))));
+        }
+        let Some(control) = self.mesh.world_control() else {
+            return Ok(Response::new(refuse(
+                "this gateway has no authoritative world (onesync is off)".to_owned(),
+            )));
+        };
+
+        let mut applied = 0u32;
+        for wire in req.commands {
+            match wire.command {
+                Some(Command::Spawn(spawn)) => {
+                    let Some(entity_type) = script_entity_type(spawn.entity_class) else {
+                        tracing::warn!(target: "gateway", zone = %req.zone_id,
+                            class = spawn.entity_class,
+                            "world spawn dropped: unknown entity class");
+                        continue;
+                    };
+                    control.submit(baston_scripting::WorldCommand::Spawn {
+                        network_id: spawn.network_id,
+                        entity_type,
+                        model: spawn.model,
+                        position: [spawn.x, spawn.y, spawn.z],
+                        heading: spawn.heading,
+                        dynamic: spawn.dynamic,
+                    });
+                    applied += 1;
+                }
+                Some(Command::Despawn(despawn)) => {
+                    control.submit(baston_scripting::WorldCommand::Despawn {
+                        network_id: despawn.network_id,
+                    });
+                    applied += 1;
+                }
+                // A newer zone speaking a command this gateway does not know:
+                // count nothing and keep the rest of the batch.
+                None => {
+                    tracing::warn!(target: "gateway", zone = %req.zone_id,
+                        "world command dropped: empty command in batch");
+                }
+            }
+        }
+        metrics::counter!("zone_world_commands_total", "zone" => req.zone_id.clone())
+            .increment(u64::from(applied));
+        Ok(Response::new(WorldCommandAck {
+            ok: true,
+            message: String::new(),
+            applied,
+        }))
+    }
+}
+
+/// Wire entity class to the scripting one. `None` for a value this build does
+/// not know, including the proto3 zero default a caller left unset.
+fn script_entity_type(class: i32) -> Option<baston_scripting::ScriptEntityType> {
+    use baston_scripting::ScriptEntityType;
+    match EntityClass::try_from(class).ok()? {
+        EntityClass::Ped => Some(ScriptEntityType::Ped),
+        EntityClass::Vehicle => Some(ScriptEntityType::Vehicle),
+        EntityClass::Object => Some(ScriptEntityType::Object),
+        EntityClass::Unspecified => None,
     }
 }
 

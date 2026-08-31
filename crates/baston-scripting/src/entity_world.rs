@@ -275,6 +275,18 @@ pub trait WorldControl: Send + Sync {
 
     /// Queue a mutation for the authoritative world.
     fn submit(&self, command: WorldCommand);
+
+    /// Whether an authoritative world is wired at all.
+    ///
+    /// Without this, `reserve_network_id` returning `None` is ambiguous: it
+    /// means both "there is no world to create in" (OneSync off, where a
+    /// server-local record is the deliberate behaviour) and "there is one and
+    /// it just refused" (the id space ran out). The create natives would hand
+    /// back a plausible synthetic handle for both — and in the second case
+    /// that is a script operating on an entity no player will ever see.
+    fn is_authoritative(&self) -> bool {
+        false
+    }
 }
 
 /// No authoritative world wired (OneSync off): entity creation is refused

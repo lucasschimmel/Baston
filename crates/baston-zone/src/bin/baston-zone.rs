@@ -385,6 +385,28 @@ async fn main() -> anyhow::Result<()> {
     mesh.register_with_gateway().await?;
     mesh.spawn_heartbeat_loop(config.meshing.heartbeat_interval_secs);
 
+    // Server-authored entities. This zone runs the resources, but the world
+    // clients talk to lives in the gateway, so ids are leased from it and
+    // spawns are shipped to it. After registration on purpose: the gateway
+    // refuses to lease to a zone it does not know.
+    match baston_zone::world_control::ZoneWorldControl::connect(
+        zone_id.clone(),
+        mesh.gateway_client(),
+    )
+    .await
+    {
+        Ok(control) => script_host.set_world_control(control),
+        Err(baston_zone::world_control::WorldUnavailable::Refused(message)) => {
+            // Leave NoWorldControl: the create natives then return a
+            // server-local record, the same as a single-process server with
+            // onesync off, instead of minting ids nothing will ever apply.
+            tracing::warn!(
+                target: "zone",
+                "server-side entity creation unavailable: {message}"
+            );
+        }
+    }
+
     // ── Boundary detection + handoff orchestration (D3/D4) ──
     let handoff_manager = baston_zone::handoff_manager::HandoffManager::new(
         zone_id.clone(),

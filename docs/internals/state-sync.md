@@ -232,9 +232,6 @@ routing, not state.
 
 ## Known gaps
 
-- **Scripts in a zone process cannot create networked entities.** Only the
-  gateway wires a `WorldControl`, so `CreateVehicle` in a zone returns a
-  plausible handle and spawns nothing, for anyone. Single-process is fine.
 - **`find_zones_in_aabb` is dead code.** It was built for a cross-zone AoI that
   the architecture made unnecessary — client visibility never passes through the
   zones (see [multi-zone](../server/multi-zone.md)). It has no callers outside

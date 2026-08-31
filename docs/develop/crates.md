@@ -159,6 +159,20 @@ FiveM client acts on them and BASTON must be the only thing that states them:
 `sv_licenseKeyToken`, `sv_maxClients`, `sv_enforceGameBuild`, `onesync`,
 `onesync_enabled`. See `RESERVED_VARS` in `http/info.rs`.
 
+### Server-created entities across the mesh
+
+The world clients talk to lives in the gateway, so a zone's `CreateVehicle`
+leases network ids from it (`GatewayService::LeaseNetworkIds`) and ships the
+spawn to it (`SubmitWorldCommands`). `ZoneWorldControl` holds the leased block
+and mints from it synchronously, because the native returns its handle with no
+room for a round trip; a single drain task batches and sends, which is what
+keeps a `Despawn` behind the `Spawn` it undoes.
+
+Blocks come out of `GatewayWorldControl`'s own descending allocator rather than
+from a partition agreed up front. One allocator is then the single authority, so
+two zones cannot mint the same id and "spawn refused: id already in use" is not
+a state a zone can reach.
+
 ## `baston-cfx`
 
 CFX platform identity, without FXServer: key validation, the entitlement

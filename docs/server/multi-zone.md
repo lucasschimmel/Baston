@@ -7,8 +7,8 @@ A single BASTON process runs a whole map. Multi-zone splits it across several
 processes, each owning a rectangle, with one gateway in front.
 
 **Read the limitations before you build on this.** Federation works, and the
-handoff protocol is careful, but two things are missing that change what you can
-build.
+handoff protocol is careful, but what happens when a zone dies changes what you
+can build.
 
 ## Should you?
 
@@ -19,29 +19,48 @@ room to spare, and single-process has none of the caveats below.
 `onesync_tick_utilization` before assuming it. Multi-zone splits work by
 *geography*, so it only helps when your load is geographically spread.
 
-**Not yet, if** your resources create networked entities server-side
-(`CreateVehicle` and friends). See the first limitation.
+**Not yet, if** you cannot afford to lose player state when a zone process
+dies. See the first limitation.
+
+## Server-created entities
+
+`CreateVehicle`, `CreatePed` and `CreateObject` work in a zone process, and the
+entity is a real networked one. There is nothing to configure.
+
+It is worth knowing how, because the constraint shapes the failure modes. The
+world clients talk to lives in the **gateway**, not in the zones, so a zone has
+to cross a process boundary to create anything — while `CreateVehicle` still has
+to return its handle on the same line, with no room for a round trip.
+
+So the two halves are split:
+
+- **Ids are leased ahead.** At startup, and again whenever it runs low, a zone
+  asks the gateway for a block of network ids. It then mints from that block
+  locally, with no I/O, so the native answers immediately. Blocks are carved
+  from the gateway's own allocator, which makes them exclusive by construction:
+  two zones cannot mint the same id, and a zone cannot collide with a client.
+- **Spawns are shipped asynchronously.** A single task per zone batches and
+  sends them, so a `Despawn` can never overtake the `Spawn` it undoes.
+
+What follows from that:
+
+- **A spawn can be lost if the gateway is unreachable.** The batch is retried
+  three times, then dropped with an error naming how many entities the world is
+  missing. Watch `zone_world_commands_dropped_total`.
+- **Entities outlive the zone that made them.** They live in the gateway's
+  world, so a zone restart does not remove them — but the script state that
+  referenced them is gone with the zone.
+- **The id space is 8192 wide and shared with client leases.** Each zone holds a
+  256-id block at a time. With many zones this is worth watching:
+  `network_ids_leased_total` and `network_id_lease_failures_total`.
+- **With `onesync off` there is no authoritative world at all**, so the natives
+  return a server-local record instead — the same as a single-process server in
+  that mode. The zone logs it once at boot.
+
+When a zone genuinely cannot get an id, the native returns **0**, the invalid
+handle, rather than a plausible number for an entity that will never exist.
 
 ## Known limitations
-
-### Scripts in a zone cannot create networked entities
-
-`CreateVehicle`, `CreatePed` and `CreateObject` return a handle from a zone
-process and **create nothing**. No player sees the entity — not players in
-another zone, not players in the same one. The script can read back what it
-created, and that is the whole extent of it.
-
-The returned handle is a plausible non-zero number, so the usual `if veh == 0`
-guard does not catch it either.
-
-Entity creation goes through a world-control surface that reserves a network id
-synchronously and queues the spawn for the process that owns the world. Only the
-gateway wires one (`GatewayWorldControl`); `baston-zone` never does, so the
-native falls back to a server-local record.
-
-Single-process is unaffected: there the gateway *is* the process running the
-resources, and creation works normally. This is specific to `[meshing]` — which
-is also why the test suite does not catch it.
 
 ### Zone failure loses player state
 
@@ -208,6 +227,8 @@ signals that matter:
 | `zone_failures_total{zone}` | A zone was declared dead. |
 | `mesh_forward_dropped_total` | Updates dropped under backpressure. |
 | `state_batches_lost_total` | The gateway missed state from a zone — see below. |
+| `zone_world_commands_dropped_total` | Server-created entities that never reached the world. |
+| `network_id_lease_failures_total` | The id space is running out; zones cannot create entities. |
 
 ### A JetStream trap worth knowing
 

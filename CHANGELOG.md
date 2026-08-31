@@ -99,6 +99,27 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   configuration now cannot forge one, or advertise a slot count the licence
   never granted.
 
+- Server-created entities now work in a zone process. `CreateVehicle`,
+  `CreatePed` and `CreateObject` under `[meshing]` used to return a plausible
+  non-zero handle and create nothing, for anyone, in any zone — only the gateway
+  wired a `WorldControl`, so the native fell through to a server-local record
+  and the usual `if veh == 0` guard did not catch it.
+
+  The world clients talk to lives in the gateway, so the two halves of a
+  creation are split. Ids are leased ahead in blocks (`LeaseNetworkIds`) and
+  minted locally, because the native returns its handle with no room for a round
+  trip; spawns are shipped asynchronously (`SubmitWorldCommands`) by a single
+  drain task per zone, so a `Despawn` cannot overtake its `Spawn`. Blocks come
+  out of the gateway's own descending allocator, which makes them exclusive
+  without coordination — two zones cannot mint the same id.
+
+  A world that exists and refuses is no longer confused with no world at all:
+  `WorldControl::is_authoritative` separates them, so an exhausted id space
+  returns 0, the invalid handle, instead of a synthetic one. The gateway also
+  stops wiring a world control when OneSync is off, where a spawn was accepted
+  and dropped at the tick; scripts there get the server-local record that path
+  was designed around, which is what its own comment always claimed.
+
 ### Removed
 
 - Removed the FXServer sidecar and everything that existed only to serve it:

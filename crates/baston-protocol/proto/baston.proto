@@ -9,6 +9,11 @@ service GatewayService {
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
   rpc PrepareHandoff(PrepareHandoffRequest) returns (PrepareHandoffResponse);
   rpc ConfirmHandoff(ConfirmHandoffRequest) returns (ConfirmHandoffResponse);
+  // Server-authored entities. Zones run the resources but the Gateway owns
+  // the world clients talk to, so `CreateVehicle` in a zone leases ids here
+  // and ships the spawn here.
+  rpc LeaseNetworkIds(LeaseNetworkIdsRequest) returns (LeaseNetworkIdsResponse);
+  rpc SubmitWorldCommands(WorldCommandBatch) returns (WorldCommandAck);
 }
 
 // Implemented by each Zone Server; called by the Gateway (and Zone A during
@@ -22,6 +27,15 @@ service ZoneService {
   rpc ListResources(ListResourcesRequest) returns (ListResourcesResponse);
   rpc ControlResource(ControlResourceRequest) returns (ControlResourceResponse);
   rpc GetResmonSnapshot(ResmonSnapshotRequest) returns (ResmonSnapshotResponse);
+}
+
+// Entity classes as `GET_ENTITY_TYPE` numbers them, so the wire value and the
+// native value are the same thing.
+enum EntityClass {
+  ENTITY_CLASS_UNSPECIFIED = 0;
+  ENTITY_CLASS_PED = 1;
+  ENTITY_CLASS_VEHICLE = 2;
+  ENTITY_CLASS_OBJECT = 3;
 }
 
 message BoundingBox {
@@ -83,6 +97,70 @@ message ConfirmHandoffRequest {
 message ConfirmHandoffResponse {
   bool ok = 1;
   string message = 2;
+}
+
+// A zone leases a block of network ids up front.
+//
+// `CreateVehicle` returns its handle synchronously — there is no room for a
+// round trip inside the native — so the zone must be able to pick an id with
+// no I/O. Blocks are carved from the Gateway's own downward allocator, which
+// makes them exclusive by construction: two zones can never mint the same id,
+// and a zone never collides with a client lease.
+message LeaseNetworkIdsRequest {
+  string zone_id = 1;
+  uint32 count = 2;
+}
+
+message LeaseNetworkIdsResponse {
+  bool ok = 1;
+  string message = 2;
+  // Highest id of the block. The zone walks downward from here, `granted`
+  // times. Zero when `ok` is false.
+  uint32 first_id = 3;
+  // May be smaller than requested when the id space is running out.
+  uint32 granted = 4;
+}
+
+// Entity mutations authored by a zone's scripts, applied by the Gateway on its
+// next sync tick.
+//
+// Ordered: a Spawn and the Despawn that follows it must not swap. The zone
+// drains its queue from a single task and sends batches sequentially, so the
+// order a script wrote is the order the world sees.
+message WorldCommandBatch {
+  string zone_id = 1;
+  repeated WorldCommand commands = 2;
+}
+
+message WorldCommand {
+  oneof command {
+    SpawnEntity spawn = 1;
+    DespawnEntity despawn = 2;
+  }
+}
+
+message SpawnEntity {
+  // Must come from a block this zone leased.
+  uint32 network_id = 1;
+  EntityClass entity_class = 2;
+  uint32 model = 3;
+  float x = 4;
+  float y = 5;
+  float z = 6;
+  // Degrees.
+  float heading = 7;
+  // Objects only: whether the object simulates physics.
+  bool dynamic = 8;
+}
+
+message DespawnEntity {
+  uint32 network_id = 1;
+}
+
+message WorldCommandAck {
+  bool ok = 1;
+  string message = 2;
+  uint32 applied = 3;
 }
 
 message PlayerStateRequest {

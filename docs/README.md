@@ -100,9 +100,8 @@ What was decided, and what it cost.
 ## A note on honesty
 
 BASTON is `0.1.0-alpha`. These pages state what does **not** work as plainly as
-what does — unimplemented natives, state bags that do not reach clients, entity
-creation that silently does nothing in a zone process, JavaScript without
-timers. That is deliberate: a gap you
+what does — unimplemented natives, state bags that do not reach clients, JavaScript
+without timers. That is deliberate: a gap you
 know about costs an afternoon, and a gap you discover in production costs a
 weekend.
 

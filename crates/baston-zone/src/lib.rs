@@ -15,6 +15,7 @@ pub mod resource_loader;
 pub mod routing_bucket;
 pub mod state_ingest;
 pub mod state_sync;
+pub mod world_control;
 
 pub use entity_manager::EntityManager;
 pub use ownership::OwnershipMonitor;

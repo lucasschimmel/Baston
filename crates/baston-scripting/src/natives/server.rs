@@ -922,6 +922,12 @@ fn spawn_networked(
 /// With an authoritative world, the entity is networked and its handle is its
 /// network id. Without one, the entity stays a server-local record so scripts
 /// that only read back what they created keep working.
+///
+/// The third case is a world that exists and refused — the id space ran out.
+/// That must not fall back to a synthetic handle: the script would get a
+/// plausible non-zero number for an entity no player will ever see, and the
+/// usual `if veh == 0` guard would not catch it. Return the invalid handle and
+/// say why.
 fn create_entity_handle(
     state: &NativeState,
     entity_type: ScriptEntityType,
@@ -930,8 +936,21 @@ fn create_entity_handle(
     heading: f32,
     dynamic: bool,
 ) -> u32 {
-    spawn_networked(state, entity_type, model, position, heading, dynamic)
-        .unwrap_or_else(next_synthetic_entity)
+    if let Some(network_id) = spawn_networked(state, entity_type, model, position, heading, dynamic)
+    {
+        return network_id;
+    }
+    if state.borrow::<SharedWorldControl>().0.is_authoritative() {
+        tracing::error!(
+            target: "scripting",
+            ?entity_type,
+            model,
+            "entity creation refused: no network id available"
+        );
+        metrics::counter!("script_entity_creation_refused_total").increment(1);
+        return 0;
+    }
+    next_synthetic_entity()
 }
 
 fn json_arg_position(args: &[serde_json::Value], first: usize) -> [f32; 3] {
@@ -1058,4 +1077,96 @@ fn hash_rage_string(input: &str) -> u32 {
     hash = hash.wrapping_add(hash << 3);
     hash ^= hash >> 11;
     hash.wrapping_add(hash << 15)
+}
+
+#[cfg(test)]
+mod create_handle_tests {
+    use super::*;
+    use crate::native_state::SharedWorldControl;
+    use crate::{NoWorldControl, WorldCommand, WorldControl};
+    use std::sync::Mutex;
+
+    /// A world that exists and either grants an id or has run out.
+    struct FakeWorld {
+        id: Option<u32>,
+        submitted: Mutex<Vec<WorldCommand>>,
+    }
+
+    impl WorldControl for FakeWorld {
+        fn is_authoritative(&self) -> bool {
+            true
+        }
+        fn reserve_network_id(&self) -> Option<u32> {
+            self.id
+        }
+        fn submit(&self, command: WorldCommand) {
+            self.submitted.lock().unwrap().push(command);
+        }
+    }
+
+    fn state_with(control: Arc<dyn WorldControl>) -> NativeState {
+        let mut state = NativeState::new();
+        state.put(SharedWorldControl(control));
+        state
+    }
+
+    fn create(state: &NativeState) -> u32 {
+        create_entity_handle(
+            state,
+            ScriptEntityType::Vehicle,
+            0xABCD,
+            [1.0, 2.0, 3.0],
+            90.0,
+            false,
+        )
+    }
+
+    #[test]
+    fn an_authoritative_world_returns_the_network_id_and_queues_the_spawn() {
+        let world = Arc::new(FakeWorld {
+            id: Some(4242),
+            submitted: Mutex::new(Vec::new()),
+        });
+        let state = state_with(world.clone());
+
+        assert_eq!(create(&state), 4242);
+        assert_eq!(
+            world.submitted.lock().unwrap().as_slice(),
+            [WorldCommand::Spawn {
+                network_id: 4242,
+                entity_type: ScriptEntityType::Vehicle,
+                model: 0xABCD,
+                position: [1.0, 2.0, 3.0],
+                heading: 90.0,
+                dynamic: false,
+            }]
+        );
+    }
+
+    /// The case this distinction exists for: a real world that refused must not
+    /// produce a plausible handle. A script checking `if veh == 0` has to be
+    /// able to catch it.
+    #[test]
+    fn a_world_that_refuses_returns_the_invalid_handle() {
+        let state = state_with(Arc::new(FakeWorld {
+            id: None,
+            submitted: Mutex::new(Vec::new()),
+        }));
+
+        assert_eq!(create(&state), 0);
+    }
+
+    /// No world at all is a different thing: OneSync off keeps the server-local
+    /// record so scripts that only read back what they created still work.
+    #[test]
+    fn no_world_at_all_still_gives_a_server_local_record() {
+        let state = state_with(Arc::new(NoWorldControl));
+
+        let handle = create(&state);
+        assert_ne!(handle, 0);
+        assert!(
+            handle >= 10_000,
+            "synthetic handles start above the id space"
+        );
+    }
 }

@@ -357,6 +357,25 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(Arc::new(ownership).run());
     }
 
+    // Entity creation from scripts: the control surface reserves network ids
+    // synchronously (a script needs its handle back immediately) and queues the
+    // creation for the UDP task's next sync tick, which owns the world.
+    //
+    // Built here, before the mesh gRPC server starts accepting: a zone can
+    // register the instant that socket is up, and leasing ids from a slot that
+    // is not filled yet would answer "this gateway has no world" — which the
+    // zone is right to treat as permanent.
+    //
+    // Only with OneSync. The msgRoute relay has no server-authoritative world,
+    // so a spawn there is accepted and dropped at the tick; leaving
+    // `NoWorldControl` in place instead gives scripts the server-local record
+    // that path is designed around.
+    let world = config
+        .state_sync
+        .onesync
+        .is_enabled()
+        .then(baston_gateway::GatewayWorldControl::new);
+
     // Phase D: zone federation (gRPC registry + routing). Disabled by default;
     // Docker Compose enables it via [meshing] in baston.toml or env.
     let (mesh, mut recovery_kick_rx) = if config.meshing.enabled {
@@ -366,6 +385,12 @@ async fn main() -> anyhow::Result<()> {
         let router = Arc::new(baston_gateway::ConnectionRouter::new());
         let mesh = baston_gateway::GatewayMesh::new(Arc::clone(&registry), Arc::clone(&router));
         mesh.set_player_directory(Arc::clone(&players));
+        // Lets zones lease ids and ship spawns. Absent with onesync off, which
+        // makes both world RPCs answer "unavailable" rather than accept work
+        // nothing will apply.
+        if let Some((control, _)) = &world {
+            mesh.set_world_control(Arc::clone(control));
+        }
         let grpc_addr: std::net::SocketAddr = config.meshing.gateway_grpc_addr.parse()?;
         mesh.spawn_grpc_server(grpc_addr);
         // Zone failure recovery (D6): reroute orphans to surviving zones.
@@ -503,6 +528,23 @@ async fn main() -> anyhow::Result<()> {
     let addr = std::net::SocketAddr::new(bind_address, port);
     let tcp_listener = std::net::TcpListener::bind(addr)?;
     tcp_listener.set_nonblocking(true)?;
+
+    // Clients are forced onto this build, so it is the one whose sync-tree node
+    // layouts the server must decode against. The string was parsed and bounded
+    // at config load; enforcing nothing is still a decode against *some* build,
+    // so say which one rather than let it be discovered from a desync.
+    let sync_build = match config.server.game_build()? {
+        Some(build) => baston_protocol::rage::sync_parse::GameBuild(build),
+        None => {
+            let fallback = baston_protocol::rage::sync_parse::GameBuild::default();
+            tracing::warn!(target: "baston", build = fallback.0,
+                "[server] enforce_game_build is empty — clients keep their own build, and \
+                 sync trees are decoded against {} regardless; set it to the build your \
+                 resources need", fallback.0);
+            fallback
+        }
+    };
+
     let udp = baston_gateway::udp::spawn_with_mesh_on(
         bind_address,
         udp_port,
@@ -514,15 +556,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Arc::clone(&state_ingest)),
         mesh_forward,
         config.state_sync.clone(),
-        // Clients are forced onto this build, so it is the one whose sync-tree
-        // node layouts the server must decode against.
-        baston_protocol::rage::sync_parse::GameBuild(
-            config
-                .server
-                .enforce_game_build
-                .parse()
-                .unwrap_or_else(|_| baston_protocol::rage::sync_parse::GameBuild::default().0),
-        ),
+        sync_build,
         baston_gateway::debug_info::DebugFeedSetup {
             // Gated here rather than inside the feed: with the module off the
             // UDP task must not even learn the overlay's access list.
@@ -540,13 +574,15 @@ async fn main() -> anyhow::Result<()> {
             }),
         },
     )?;
-    // Entity creation from scripts: the control surface reserves network ids
-    // synchronously (a script needs its handle back immediately) and queues the
-    // creation for the UDP task's next sync tick, which owns the world.
-    {
-        let (world_control, world_commands) = baston_gateway::GatewayWorldControl::new();
+    if let Some((world_control, world_commands)) = world {
         script_host.set_world_control(world_control);
         udp.set_world_commands(world_commands);
+    } else {
+        tracing::info!(
+            target: "onesync",
+            "onesync is off: entity-creation natives return a server-local record, \
+             not a networked entity"
+        );
     }
     // Voice teardown follows the game connection; clients learn the voice
     // endpoint through the replicated voice_external* convars.
