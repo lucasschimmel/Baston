@@ -68,9 +68,18 @@ In rough order of likelihood.
 
 ### 1. Wrong game build
 
-If `enforce_game_build` does not match what your client runs, the client
-switches build before connecting — and if it cannot, the join fails or the world
-desyncs oddly. Pick one build and keep it.
+The client is told which build to run by `/info.json` and switches before
+connecting. If it cannot — the build is not installed, or a launcher argument
+pins another one — the connection is refused with:
+
+```
+Client/server game build mismatch: 2802/3258. Restart your game client so it
+switches to build 3258.
+```
+
+That message is the good case. Pick one build in `[server] enforce_game_build`
+and keep it; a build the server does not recognise is refused at boot, with the
+value you typed in the error.
 
 ### 2. The port is not reachable
 

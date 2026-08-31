@@ -424,3 +424,71 @@ fn refresh_hz_is_bounded() {
         );
     }
 }
+
+#[test]
+fn game_build_defaults_to_the_build_the_decoder_uses() {
+    let config: BastonConfig = toml::from_str("[server]\nport = 30120\n").unwrap();
+    assert_eq!(
+        config.server.enforce_game_build,
+        DEFAULT_GAME_BUILD.to_string(),
+        "a config that states no build must still enforce one, or the server decodes a \
+         build it never asked its clients to run"
+    );
+    assert_eq!(
+        config.server.game_build().unwrap(),
+        Some(DEFAULT_GAME_BUILD)
+    );
+    config.validate().expect("the default is valid");
+}
+
+#[test]
+fn game_build_accepts_a_build_it_has_never_heard_of() {
+    // The bound is a typo catcher, not an allowlist: next year's build has to
+    // work without a code change.
+    let config: BastonConfig = toml::from_str("[server]\nenforce_game_build = \"4210\"\n").unwrap();
+    assert_eq!(config.server.game_build().unwrap(), Some(4210));
+    config
+        .validate()
+        .expect("an unknown but plausible build is valid");
+}
+
+#[test]
+fn empty_game_build_means_no_enforcement_and_is_valid() {
+    let config: BastonConfig = toml::from_str("[server]\nenforce_game_build = \"\"\n").unwrap();
+    assert_eq!(config.server.game_build().unwrap(), None);
+    config
+        .validate()
+        .expect("enforcing nothing is a choice, not an error");
+}
+
+#[test]
+fn a_game_build_that_is_not_a_build_stops_the_boot() {
+    // Every one of these used to reach `/info.json` verbatim and fail later, in
+    // the client, as a build switch that never happened.
+    for raw in ["latest", "32258", "1603", "3258_1", "+3258", "3258 ", "0"] {
+        let config: BastonConfig =
+            toml::from_str(&format!("[server]\nenforce_game_build = \"{raw}\"\n")).unwrap();
+        assert!(
+            matches!(
+                config.validate(),
+                Err(ConfigError::Invalid {
+                    section: "server",
+                    ..
+                })
+            ),
+            "enforce_game_build = {raw:?} should be refused at load"
+        );
+    }
+}
+
+#[test]
+fn the_game_build_error_names_the_value_and_a_way_out() {
+    let config: BastonConfig =
+        toml::from_str("[server]\nenforce_game_build = \"latest\"\n").unwrap();
+    let message = config.validate().unwrap_err().to_string();
+    assert!(message.contains("latest"), "{message}");
+    assert!(
+        message.contains(&DEFAULT_GAME_BUILD.to_string()),
+        "{message}"
+    );
+}

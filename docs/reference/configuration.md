@@ -41,11 +41,25 @@ port = 30120
 | `bind_address` | `0.0.0.0` | Interface to listen on. Must be one concrete address if you enable public listing. |
 | `max_players` | `32` | Slot count. A CFX licence can *lower* this (see `[license]`); it never raises it. |
 | `icon` | *(unset)* | Path to a **96×96 PNG**, published as `info.json` `icon`. Any other size or format is refused at boot — the FiveM browser will not display it, so a silent drop would leave you guessing. |
-| `enforce_game_build` | `""` | GTA build all clients must run, e.g. `"3258"`. Empty means no enforcement. |
+| `enforce_game_build` | `"3258"` | GTA build all clients must run. A decimal build number between `1604` and `4999`; `""` means no enforcement. Anything else is refused at boot. |
 
-`enforce_game_build` matters more than it looks: the client switches build
-before connecting, and BASTON decodes entity sync trees against that build. Mixed
-builds without OneSync produce desyncs that look like random rubber-banding.
+`enforce_game_build` matters more than it looks. It decides three things at
+once:
+
+- **What content your players have.** The client reads it from `/info.json`
+  *before* connecting and switches to that build, so the weapons, vehicles and
+  DLC props available in-game are the ones that build ships — a resource using
+  a recent weapon needs a build that has it.
+- **What the server decodes.** Entity sync-tree node layouts changed between
+  builds, and BASTON decodes against this one. There is no second setting for
+  it, on purpose.
+- **Who may connect.** A client reporting a different build is refused at
+  `initConnect` with the mismatch named, rather than let in to desync quietly.
+
+The bound is a typo catcher, not an allowlist: a build Rockstar ships next
+works without a code change. `""` is a legitimate choice for a LAN server where
+every client already runs the same build — the server then still decodes
+against `3258` and says so at boot.
 
 ## `[auth]` — CFX ticket verification
 

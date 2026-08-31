@@ -24,8 +24,11 @@ name = "BASTON Dev"
 port = 30120
 bind_address = "0.0.0.0"
 max_players = 32
-# All clients must run the same GTA build for non-OneSync P2P sync; the
-# client auto-switches builds pre-connect when this is advertised.
+# The GTA build every client runs. The client reads this pre-connect and
+# switches to it, so it decides the weapons, vehicles and DLC props your
+# players have; the server decodes entity sync trees against the same value,
+# and refuses a client that reports another build. A decimal build number, or
+# "" to enforce nothing. This is also the default.
 enforce_game_build = "3258"
 
 [auth]

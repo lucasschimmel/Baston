@@ -551,3 +551,79 @@ async fn client_connect_times_out_when_deferral_never_resolves() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
 }
+
+/// The config default and the decoder's fallback are one build in two crates.
+///
+/// They are not linked by a type — `baston-config` does not depend on
+/// `baston-protocol` for one integer — so this is what keeps them from drifting
+/// into a server that advertises one build and decodes another.
+#[test]
+fn the_default_build_is_the_build_the_decoder_falls_back_to() {
+    assert_eq!(
+        baston_config::DEFAULT_GAME_BUILD,
+        baston_protocol::rage::sync_parse::GameBuild::default().0
+    );
+}
+
+#[tokio::test]
+async fn info_json_advertises_the_enforced_build() {
+    // The client reads this pre-connect and build-switches to it, which is what
+    // decides the weapons, vehicles and DLC props a player actually has.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_config(
+        dir.path(),
+        AXIOM_CORE_JS,
+        OneSyncMode::Off,
+        "enforce_game_build = \"3407\"\n",
+    )
+    .await;
+    let json = body_json(
+        app.oneshot(Request::get("/info.json").body(Body::empty()).unwrap())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(json["vars"]["sv_enforceGameBuild"], "3407");
+}
+
+#[tokio::test]
+async fn init_connect_refuses_a_client_that_did_not_switch_build() {
+    // A client on another build used to be accepted and then desynchronise:
+    // the sync-tree decoder is built once, from the enforced build, and never
+    // consults what the client reported.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(dir.path(), AXIOM_CORE_JS).await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/client")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "method=initConnect&name=Stale&protocol=12&gameName=gta5&gameBuild=2802&guid=4",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let json = body_json(response).await;
+    assert!(
+        json["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("2802/3258")),
+        "{json}"
+    );
+
+    // The enforced build, and a revision within it, still connect.
+    let accepted = app
+        .oneshot(
+            Request::post("/client")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "method=initConnect&name=Fresh&protocol=12&gameName=gta5&gameBuild=3258_1&guid=5",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(body_json(accepted).await["status"], "ok");
+}

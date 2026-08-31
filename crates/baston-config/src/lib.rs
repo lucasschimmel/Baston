@@ -705,6 +705,26 @@ pub struct UdpConfig {
     pub poll_interval_ms: u64,
 }
 
+/// Game build enforced when the operator states none.
+///
+/// It must stay equal to `baston_protocol::rage::sync_parse::GameBuild::default()`
+/// — the build the sync-tree decoder falls back to. A test in `baston-gateway`,
+/// which depends on both crates, holds the two together; this crate does not
+/// depend on `baston-protocol` for one integer.
+pub const DEFAULT_GAME_BUILD: u32 = 3258;
+
+/// Oldest build FiveM still lets a client run.
+const MIN_GAME_BUILD: u32 = 1604;
+
+/// Upper bound on a game build.
+///
+/// A typo catcher, not an allowlist: a build Rockstar ships next has to work
+/// without a code change, the same way `[server.vars]` passes through fields
+/// BASTON has never heard of. It exists so `"32258"` fails at boot with its own
+/// name in the error instead of at connect time, in the client, as a build
+/// switch that never happens.
+const MAX_GAME_BUILD: u32 = 4999;
+
 /// `[server]` section.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
@@ -718,10 +738,19 @@ pub struct ServerConfig {
     #[serde(default = "default_max_players")]
     pub max_players: u32,
     /// Game build advertised as `sv_enforceGameBuild` in `info.json` vars.
-    /// The client build-switches to it pre-connect (NetLibrary.cpp); with
-    /// no enforcement, mixed-build clients end up in the same non-OneSync
-    /// session and the GTA P2P join fails ("Could not connect to session
-    /// provider"). Empty string = no enforcement.
+    ///
+    /// The client reads it *before* connecting and build-switches to it
+    /// (NetLibrary.cpp), which is what decides the game content a player has:
+    /// the weapons, vehicles and DLC props of that build, and no others. It is
+    /// also the build whose sync-tree node layouts the server decodes against,
+    /// so the two are one setting on purpose — see [`ServerConfig::game_build`].
+    ///
+    /// Empty string = no enforcement: every client keeps whatever build it
+    /// launched, mixed-build clients end up in the same non-OneSync session and
+    /// the GTA P2P join fails ("Could not connect to session provider"). The
+    /// default is [`DEFAULT_GAME_BUILD`] rather than empty, because a server
+    /// that enforces nothing still has to decode *some* build's layouts, and an
+    /// unstated one is the same choice made silently.
     #[serde(default = "default_enforce_game_build")]
     pub enforce_game_build: String,
     /// A 96×96 PNG published as `info.json` `icon`, base64-encoded — the
@@ -748,6 +777,53 @@ pub struct ServerConfig {
     /// key order would make the document's hash change for no reason.
     #[serde(default)]
     pub vars: BTreeMap<String, String>,
+}
+
+impl ServerConfig {
+    /// The enforced game build, as a number.
+    ///
+    /// `None` means `enforce_game_build` is empty: nothing is advertised and
+    /// the server cannot know which build a connecting client runs.
+    ///
+    /// This is the **only** place the string becomes a number. [`Self::validate`]
+    /// and the caller that feeds the sync-tree decoder both come through here,
+    /// so a value that boots is a value the decoder agrees with — the failure
+    /// this closes is a config typo that used to be swallowed by a parse
+    /// fallback, leaving the server decoding one build's node layouts while its
+    /// clients ran another.
+    pub fn game_build(&self) -> Result<Option<u32>, ConfigError> {
+        let raw = self.enforce_game_build.as_str();
+        if raw.is_empty() {
+            return Ok(None);
+        }
+        let invalid = |reason: String| ConfigError::Invalid {
+            section: "server",
+            reason: format!(
+                "enforce_game_build = \"{raw}\" is not a game build ({reason})\n  \
+                 → use the build number your resources need, e.g. \"{DEFAULT_GAME_BUILD}\"\n  \
+                 → use \"\" to enforce nothing and let every client keep its own build"
+            ),
+        };
+        // Not `parse` alone: it accepts "+3258" and "03258", and the
+        // `<build>_<revision>` form is what the *client* reports, never what an
+        // operator enforces.
+        if !raw.chars().all(|c| c.is_ascii_digit()) {
+            return Err(invalid("expected decimal digits only".to_owned()));
+        }
+        let build: u32 = raw
+            .parse()
+            .map_err(|_| invalid("out of range".to_owned()))?;
+        if !(MIN_GAME_BUILD..=MAX_GAME_BUILD).contains(&build) {
+            return Err(invalid(format!(
+                "expected {MIN_GAME_BUILD}..={MAX_GAME_BUILD}"
+            )));
+        }
+        Ok(Some(build))
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        self.game_build().map(|_| ())
+    }
 }
 
 /// `[auth]` section — CFX ticket validation (Phase B).
@@ -1009,7 +1085,7 @@ fn default_max_players() -> u32 {
     32
 }
 fn default_enforce_game_build() -> String {
-    String::new()
+    DEFAULT_GAME_BUILD.to_string()
 }
 fn default_resources_path() -> PathBuf {
     PathBuf::from("resources")
@@ -1328,6 +1404,7 @@ impl BastonConfig {
     /// actionable error messages — callers must not have to remember to call
     /// the per-section validators themselves.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.server.validate()?;
         self.license.validate()?;
         self.api.validate()?;
         self.state_sync.validate()?;

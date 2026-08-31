@@ -38,6 +38,34 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- `[server] enforce_game_build` is now one setting with one meaning, instead of
+  two halves that could disagree. It is validated at load — a decimal build
+  between 1604 and 4999, or `""` — so `"latest"` or a mistyped `"32258"` stops
+  the boot with the value named, rather than reaching `/info.json` verbatim and
+  failing later inside the client as a build switch that never happens. The
+  bound is a typo catcher, not an allowlist: a build Rockstar ships next still
+  works without a code change.
+
+  Three consequences that were previously reachable are now not.
+
+  The value no longer has a **silent parse fallback**. The sync-tree decoder
+  used to take `parse().unwrap_or(3258)`, so a config the server accepted could
+  leave it decoding one build's node layouts while its clients ran another —
+  the desync that looks like random rubber-banding. Config and decoder now go
+  through one parser, and a server that enforces nothing says at boot which
+  build it decodes against instead of leaving it to be discovered.
+
+  The **default is `"3258"` rather than empty**, matching the build the decoder
+  already fell back to. A server that stated no build was never unenforced in
+  effect — only unstated. Operators who want no enforcement set `""`
+  explicitly.
+
+  And a client that did not switch build is **refused at `initConnect`**,
+  naming both builds, instead of being accepted and desynchronising. The
+  `gameBuild` the client reports was parsed and then dropped; the
+  `<build>_<revision>` form is honoured, and a client that reports no build at
+  all is still allowed, since absence is not evidence of a mismatch.
+
 - The repository is now a monorepo with one directory per kind of thing:
   `crates/` (the server), `docs/` (Markdown), `apps/` (the documentation
   website), `config/`, `deploy/`, `examples/`, `tools/`. Nothing that belongs
