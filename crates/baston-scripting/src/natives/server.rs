@@ -188,6 +188,33 @@ fn shared_native_value(
         | "GET_RESOURCE_COMMANDS" => serde_json::json!([]),
         // mapmanager reads this to walk the resource list at startup.
         "GET_NUM_RESOURCES" => serde_json::json!(state.borrow::<SharedResources>().0.count()),
+        // The registry could already answer all of these; nothing reached it.
+        // mapmanager walks every resource asking for `resource_type` metadata,
+        // and playernames `load()`s a template file — both got nil and died.
+        "GET_NUM_RESOURCE_METADATA" => serde_json::json!(state
+            .borrow::<SharedResources>()
+            .0
+            .metadata_count(&json_arg_string(&args, 0), &json_arg_string(&args, 1))),
+        "GET_RESOURCE_METADATA" => {
+            serde_json::json!(state.borrow::<SharedResources>().0.metadata_value(
+                &json_arg_string(&args, 0),
+                &json_arg_string(&args, 1),
+                json_arg_i64(&args, 2).max(0) as usize,
+            ))
+        }
+        // Absent reads as nil, which is what a script testing the result wants;
+        // an empty string would look like an empty file.
+        "LOAD_RESOURCE_FILE" => state
+            .borrow::<SharedResources>()
+            .0
+            .load_file(&json_arg_string(&args, 0), &json_arg_string(&args, 1))
+            .map_or(serde_json::Value::Null, |text| serde_json::json!(text)),
+        "SAVE_RESOURCE_FILE" => serde_json::json!(state.borrow::<SharedResources>().0.save_file(
+            &json_arg_string(&args, 0),
+            &json_arg_string(&args, 1),
+            &json_arg_string(&args, 2),
+            json_arg_i64(&args, 3) as i32,
+        )),
         "GET_RESOURCE_BY_FIND_INDEX" => serde_json::json!(state
             .borrow::<SharedResources>()
             .0
