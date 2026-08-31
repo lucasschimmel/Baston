@@ -30,6 +30,22 @@ use crate::observability::Observability;
 
 const PRELUDE_LUA: &str = include_str!("../assets/prelude.lua");
 
+/// How JSON crosses into Lua.
+///
+/// mlua's default turns a JSON `null` into its own light-userdata sentinel, so
+/// that null and absent stay distinguishable. Lua scripts do not know that
+/// sentinel: they write `if x then`, and a userdata is truthy. A native that
+/// answers "nothing" has to answer `nil`.
+///
+/// Found on a real boot: with the sentinel, mapmanager compared a number with
+/// userdata and playernames handed one to `load`, both of which read as
+/// nonsense errors far from the native that produced them.
+fn json_to_lua() -> mlua::SerializeOptions {
+    mlua::SerializeOptions::new()
+        .serialize_none_to_null(false)
+        .serialize_unit_to_null(false)
+}
+
 /// Wall-clock budget for a single dispatch, matching the V8 path's
 /// `DISPATCH_BUDGET`. Generous on purpose: legitimate handlers finish in
 /// milliseconds, so this only fires on a genuinely runaway script.
@@ -237,7 +253,7 @@ impl LuaRuntime {
             .create_function(|lua, text: String| {
                 let json: serde_json::Value =
                     serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
-                lua.to_value(&json)
+                lua.to_value_with(&json, json_to_lua())
             })
             .map_err(|e| self.init_error(&e))?;
         table
@@ -1079,6 +1095,29 @@ mod tests {
 
     /// The shape `cfx-server-data`'s money resource is written in. Before the
     /// translation this did not even parse, and the whole server died with it.
+    /// An unimplemented native answers "nothing", and a Lua script tests that
+    /// with `if x then`. mlua's default would hand it a light-userdata
+    /// sentinel, which is truthy — mapmanager compared it with a number and
+    /// died a long way from the native that produced it.
+    #[test]
+    fn a_native_answering_nothing_reaches_lua_as_nil() {
+        let mut rt = runtime("test");
+        rt.execute_script(
+            "main.lua",
+            r#"
+            local value = Citizen.InvokeNative(0, "A_NATIVE_THAT_DOES_NOT_EXIST")
+            result = { is_nil = value == nil, truthy = value and true or false }
+            "#,
+        )
+        .unwrap();
+        let result: mlua::Table = rt.lua.globals().get("result").unwrap();
+        assert!(
+            result.get::<bool>("is_nil").unwrap(),
+            "must be nil, not a sentinel"
+        );
+        assert!(!result.get::<bool>("truthy").unwrap());
+    }
+
     #[test]
     fn a_script_written_in_cfx_lua_runs() {
         let mut rt = runtime("test");
