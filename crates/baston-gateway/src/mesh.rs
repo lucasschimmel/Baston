@@ -323,16 +323,16 @@ impl GatewayService for GatewayGrpc {
         request: Request<RegisterZoneRequest>,
     ) -> Result<Response<RegisterZoneResponse>, Status> {
         let req = request.into_inner();
-        let bounds: Aabb = req
-            .bounds
-            .ok_or_else(|| Status::invalid_argument("bounds required"))?
-            .into();
+        // A zone may decline to declare bounds; the map then decides. Only a
+        // Gateway without a map needs them, and it says so rather than
+        // rejecting the argument as malformed.
+        let declared: Option<Aabb> = req.bounds.map(Into::into);
         match self
             .mesh
             .registry
             .register_zone(
                 &req.zone_id,
-                bounds,
+                declared,
                 &req.grpc_addr,
                 req.max_players.max(0) as u32,
             )

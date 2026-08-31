@@ -116,7 +116,7 @@ async fn fixture(audit: AuditLog, with_mesh: bool) -> Fixture {
         registry
             .register_zone(
                 "zone-a",
-                Aabb::new(-4000.0, -4000.0, 0.0, 4000.0),
+                Some(Aabb::new(-4000.0, -4000.0, 0.0, 4000.0)),
                 "127.0.0.1:50051",
                 1500,
             )

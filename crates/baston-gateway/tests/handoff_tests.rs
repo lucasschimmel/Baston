@@ -75,7 +75,7 @@ async fn start_zone(cluster: &Cluster, zone_id: &str, bounds: Aabb) -> ZoneHarne
     let port = free_port();
     let mesh = ZoneMesh::connect(
         zone_id.to_string(),
-        bounds,
+        Some(bounds),
         &cluster.gateway_addr,
         format!("127.0.0.1:{port}"),
         1500,

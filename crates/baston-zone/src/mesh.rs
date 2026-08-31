@@ -49,10 +49,10 @@ pub struct ZoneMeshHooks {
 
 pub struct ZoneMesh {
     pub zone_id: String,
-    /// Bounds this zone declares for itself. Only its actual territory when
-    /// the Gateway has no map file; otherwise the map overrules it and the
-    /// answer to `RegisterZone` replaces [`Self::coverage`].
-    pub bounds: Aabb,
+    /// Bounds this zone declares for itself, if any. Only its actual
+    /// territory when the Gateway has no map file; otherwise the map overrules
+    /// it and the answer to `RegisterZone` replaces [`Self::coverage`].
+    pub bounds: Option<Aabb>,
     /// What this zone owns, as the Gateway sees it. Behind an `Arc` so the
     /// boundary scan can take it once per pass rather than clone a polygon
     /// per player.
@@ -78,7 +78,7 @@ pub struct ZoneMesh {
 impl ZoneMesh {
     pub async fn connect(
         zone_id: String,
-        bounds: Aabb,
+        bounds: Option<Aabb>,
         gateway_grpc: &str,
         public_grpc_addr: String,
         max_players: u32,
@@ -91,7 +91,9 @@ impl ZoneMesh {
         Ok(Arc::new(Self {
             zone_id,
             bounds,
-            coverage: std::sync::RwLock::new(Arc::new(ZoneCoverage::from_bounds(bounds))),
+            coverage: std::sync::RwLock::new(Arc::new(
+                bounds.map(ZoneCoverage::from_bounds).unwrap_or_default(),
+            )),
             public_grpc_addr,
             max_players,
             gateway,
@@ -144,7 +146,7 @@ impl ZoneMesh {
             attempt += 1;
             let req = RegisterZoneRequest {
                 zone_id: self.zone_id.clone(),
-                bounds: Some(self.bounds.into()),
+                bounds: self.bounds.map(Into::into),
                 grpc_addr: self.public_grpc_addr.clone(),
                 max_players: self.max_players as i32,
             };

@@ -40,16 +40,23 @@ async fn main() -> anyhow::Result<()> {
     let config = BastonConfig::load(&config_path)?;
     let zone_id = config.nats.zone_id.clone();
 
-    let bounds_str = config
-        .meshing
-        .zone_bounds
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("ZONE_BOUNDS (or [meshing].zone_bounds) is required"))?;
-    let bounds = Aabb::parse(&bounds_str).map_err(|e| anyhow::anyhow!("ZONE_BOUNDS: {e}"))?;
+    // Optional: a Gateway holding a map file decides every zone's territory
+    // and hands it back at registration, which makes a rectangle declared here
+    // a value that is read, ignored, and confusing. Without a map the Gateway
+    // has nothing else to go on and refuses the registration by name.
+    let bounds = match config.meshing.zone_bounds.as_deref() {
+        Some(raw) => Some(Aabb::parse(raw).map_err(|e| anyhow::anyhow!("ZONE_BOUNDS: {e}"))?),
+        None => None,
+    };
 
-    tracing::info!(target: "zone", zone = %zone_id,
-        "baston-zone starting — bounds=({},{},{},{}) gateway={}",
-        bounds.x_min, bounds.y_min, bounds.x_max, bounds.y_max, config.meshing.gateway_grpc);
+    match bounds {
+        Some(b) => tracing::info!(target: "zone", zone = %zone_id,
+            "baston-zone starting — declared bounds=({},{},{},{}) gateway={}",
+            b.x_min, b.y_min, b.x_max, b.y_max, config.meshing.gateway_grpc),
+        None => tracing::info!(target: "zone", zone = %zone_id,
+            "baston-zone starting — no declared bounds, expecting a territory from the \
+             gateway's map gateway={}", config.meshing.gateway_grpc),
+    }
 
     // A zone runs the same module set as the gateway it federates with; only
     // the modules a zone process actually owns are consulted here.

@@ -444,7 +444,7 @@ mod tests {
         registry
             .register_zone(
                 "west",
-                Aabb::new(-1000.0, -1000.0, 0.0, 1000.0),
+                Some(Aabb::new(-1000.0, -1000.0, 0.0, 1000.0)),
                 "127.0.0.1:1",
                 64,
             )
@@ -453,7 +453,7 @@ mod tests {
         registry
             .register_zone(
                 "east",
-                Aabb::new(0.0, -1000.0, 1000.0, 1000.0),
+                Some(Aabb::new(0.0, -1000.0, 1000.0, 1000.0)),
                 "127.0.0.1:2",
                 64,
             )

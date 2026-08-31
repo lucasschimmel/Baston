@@ -783,9 +783,15 @@ impl LuaRuntime {
         // A runaway top-level load is covered from the first script, not only
         // once handlers start running.
         let guard = self.watchdog.arm(self.host_started_at);
+        // CitizenFX's Lua accepts compound assignment; the reference Lua mlua
+        // embeds does not. Translating before the load is what lets a resource
+        // written for FiveM run here unchanged — see `crate::cfx_lua`. Rewrites
+        // stay on their own line, so `@path:line` still points where the author
+        // wrote it.
+        let code = crate::cfx_lua::expand_compound_assignment(code);
         let result = self
             .lua
-            .load(code)
+            .load(&code)
             .set_name(format!("@{path}"))
             .exec()
             .map_err(|e| ScriptError::Execute {
@@ -1069,6 +1075,75 @@ mod tests {
             let value: Value = rt.lua.globals().get(global).unwrap();
             assert!(!matches!(value, Value::Nil), "{global} is missing");
         }
+    }
+
+    /// The shape `cfx-server-data`'s money resource is written in. Before the
+    /// translation this did not even parse, and the whole server died with it.
+    #[test]
+    fn a_script_written_in_cfx_lua_runs() {
+        let mut rt = runtime("test");
+        rt.execute_script(
+            "money.lua",
+            r#"
+            local total = 0
+            local wallet = { cash = 10 }
+            local log = "start"
+
+            local function add(amount)
+                total += amount
+                wallet.cash += amount
+                log ..= "|" .. tostring(amount)
+            end
+
+            add(5)
+            add(7)
+            result = { total = total, cash = wallet.cash, log = log }
+            "#,
+        )
+        .expect("CfxLua compound assignment must load");
+
+        let result: mlua::Table = rt.lua.globals().get("result").unwrap();
+        assert_eq!(result.get::<i64>("total").unwrap(), 12);
+        assert_eq!(result.get::<i64>("cash").unwrap(), 22);
+        assert_eq!(result.get::<String>("log").unwrap(), "start|5|7");
+    }
+
+    /// The translation must not reach into strings, or a resource printing the
+    /// syntax would have its own output rewritten.
+    #[test]
+    fn compound_assignment_inside_a_string_is_left_as_text() {
+        let mut rt = runtime("test");
+        rt.execute_script("s.lua", r#"literal = "a += b""#).unwrap();
+        assert_eq!(rt.lua.globals().get::<String>("literal").unwrap(), "a += b");
+    }
+
+    /// RegisterServerEvent is the older name for RegisterNetEvent. Without the
+    /// alias it fell through to the native dispatcher and did nothing, so the
+    /// resource never opted in and its client events were dropped in silence.
+    #[test]
+    fn register_server_event_opts_in_the_same_way_register_net_event_does() {
+        let mut rt = runtime("test");
+        rt.execute_script(
+            "main.lua",
+            r#"
+            got = nil
+            RegisterServerEvent("legacy:ping")
+            AddEventHandler("legacy:ping", function(value) got = value end)
+            "#,
+        )
+        .unwrap();
+        rt.dispatch_event(
+            "legacy:ping",
+            r#"["from-client"]"#,
+            Some(7),
+            crate::observability::DispatchKind::Event,
+        )
+        .unwrap();
+        assert_eq!(
+            rt.lua.globals().get::<String>("got").unwrap(),
+            "from-client",
+            "an event registered through the legacy name must still arrive"
+        );
     }
 
     #[test]

@@ -10,8 +10,8 @@ use dashmap::DashMap;
 
 use super::{
     console_buffer_text, RuntimeContext, SharedConvars, SharedEntityWorld, SharedHttp, SharedKvp,
-    SharedPlayers, SharedResourceControl, SharedRouting, SharedStateBags, SharedVoice,
-    SharedWorldControl, VoiceControl,
+    SharedPlayers, SharedResourceControl, SharedResources, SharedRouting, SharedStateBags,
+    SharedVoice, SharedWorldControl, VoiceControl,
 };
 use super::{rpc, world, NativeState};
 use crate::ScriptEntityType;
@@ -186,6 +186,12 @@ fn shared_native_value(
         | "GET_GAME_POOL"
         | "GET_REGISTERED_COMMANDS"
         | "GET_RESOURCE_COMMANDS" => serde_json::json!([]),
+        // mapmanager reads this to walk the resource list at startup.
+        "GET_NUM_RESOURCES" => serde_json::json!(state.borrow::<SharedResources>().0.count()),
+        "GET_RESOURCE_BY_FIND_INDEX" => serde_json::json!(state
+            .borrow::<SharedResources>()
+            .0
+            .name_at(json_arg_i64(&args, 0).max(0) as usize)),
         "GET_STATE_BAG_KEYS" => {
             serde_json::json!(state
                 .borrow::<SharedStateBags>()
@@ -520,6 +526,15 @@ pub(crate) fn cfx_server_native(
         "GET_NUM_PLAYER_INDICES" => {
             serde_json::json!(state.borrow::<SharedPlayers>().0.count() as u32)
         }
+        // FiveM answers with an array of source ids as strings; scripts do
+        // `for _, id in ipairs(GetPlayers())` and then `tonumber(id)`.
+        "GET_PLAYERS" => serde_json::json!(state
+            .borrow::<SharedPlayers>()
+            .0
+            .sources()
+            .into_iter()
+            .map(|source| source.to_string())
+            .collect::<Vec<_>>()),
         "GET_PLAYER_INVINCIBLE" => serde_json::json!(false),
         "GET_PLAYER_ROUTING_BUCKET" => {
             serde_json::json!(shared_routing(state).player_bucket(json_arg_netid(&args, 0)))
@@ -1063,7 +1078,13 @@ fn default_native_value(result_kind: &str) -> serde_json::Value {
         "vector3" => serde_json::json!([0.0, 0.0, 0.0]),
         "vector2" => serde_json::json!([0.0, 0.0]),
         "vector4" => serde_json::json!([0.0, 0.0, 0.0, 0.0]),
-        _ => serde_json::json!(0),
+        // `any` means the natives table does not say, and a number is the
+        // worst available guess: it is truthy in Lua and indexable in neither
+        // language, so a script reading it the way the real native's contract
+        // allows crashes on a value we invented. `nil`/`null` is the honest
+        // "there is nothing here", and it is what a defensive script tests
+        // for. Found by GET_PLAYERS answering 0 and player-data indexing it.
+        _ => serde_json::Value::Null,
     }
 }
 

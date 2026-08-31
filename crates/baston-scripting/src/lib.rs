@@ -6,6 +6,7 @@
 //! - [`DeferralRegistry`]: `playerConnecting` deferral state shared with the
 //!   HTTP gateway.
 
+pub mod cfx_lua;
 mod deferrals;
 mod engine;
 mod entity_world;

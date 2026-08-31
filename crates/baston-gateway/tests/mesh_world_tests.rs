@@ -68,7 +68,7 @@ async fn register(cluster: &Cluster, zone_id: &str) {
         .registry
         .register_zone(
             zone_id,
-            Aabb::new(-4000.0, -4000.0, 0.0, 4000.0),
+            Some(Aabb::new(-4000.0, -4000.0, 0.0, 4000.0)),
             "127.0.0.1:1",
             1500,
         )

@@ -40,9 +40,9 @@ pub struct ZoneEntry {
     pub zone_id: String,
     /// What this zone owns, and what has been carved out of it.
     pub coverage: ZoneCoverage,
-    /// Bounds the zone declared for itself. Only meaningful without a
-    /// configured map, where it is the zone's whole territory.
-    pub declared_bounds: Aabb,
+    /// Bounds the zone declared for itself, if it declared any. Only
+    /// meaningful without a configured map, where it is the whole territory.
+    pub declared_bounds: Option<Aabb>,
     pub grpc_addr: String,
     pub grpc_client: ZoneServiceClient<Channel>,
     pub max_players: u32,
@@ -110,12 +110,12 @@ impl ZoneRegistry {
     pub async fn register_zone(
         &self,
         zone_id: &str,
-        declared_bounds: Aabb,
+        declared_bounds: Option<Aabb>,
         grpc_addr: &str,
         max_players: u32,
     ) -> Result<ZoneCoverage, String> {
-        let coverage = match &self.configured_map {
-            Some(map) => {
+        let coverage = match (&self.configured_map, declared_bounds) {
+            (Some(map), _) => {
                 let coverage = map.coverage_for(zone_id);
                 if coverage.is_empty() {
                     return Err(format!(
@@ -126,7 +126,16 @@ impl ZoneRegistry {
                 }
                 coverage
             }
-            None => ZoneCoverage::from_bounds(declared_bounds),
+            (None, Some(bounds)) => ZoneCoverage::from_bounds(bounds),
+            // Neither side knows what this zone owns. Saying so beats letting
+            // it run owning nothing, which looks like a working server that
+            // hands every player away.
+            (None, None) => {
+                return Err(format!(
+                    "zone {zone_id:?} declared no bounds and this gateway has no \
+                     map_file — set one or the other"
+                ))
+            }
         };
 
         let endpoint = Channel::from_shared(normalize_grpc_uri(grpc_addr))
@@ -160,9 +169,7 @@ impl ZoneRegistry {
                  carved out, grpc={grpc_addr}",
                 coverage.shapes().len(), coverage.overlays().len()),
             None => tracing::info!(target: "gateway",
-                "Zone {zone_id} registered: bounds=({},{},{},{}) grpc={grpc_addr}",
-                declared_bounds.x_min, declared_bounds.y_min,
-                declared_bounds.x_max, declared_bounds.y_max),
+                "Zone {zone_id} registered: declared bounds, grpc={grpc_addr}"),
         }
         Ok(coverage)
     }
@@ -182,7 +189,7 @@ impl ZoneRegistry {
             .read()
             .await
             .values()
-            .map(|z| (z.zone_id.clone(), z.declared_bounds))
+            .filter_map(|z| z.declared_bounds.map(|b| (z.zone_id.clone(), b)))
             .collect();
         declared.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         *self.declared_map.write().await = ZoneMap::from_declared_bounds(declared);
@@ -403,7 +410,7 @@ mod tests {
     }
 
     async fn register(reg: &ZoneRegistry, id: &str, bounds: Aabb, port: u16) -> ZoneCoverage {
-        reg.register_zone(id, bounds, &format!("127.0.0.1:{port}"), 1500)
+        reg.register_zone(id, Some(bounds), &format!("127.0.0.1:{port}"), 1500)
             .await
             .unwrap()
     }
@@ -519,11 +526,41 @@ shape = "everywhere"
         assert!(!city.contains(0.0, 0.0), "the arena owns the middle");
     }
 
+    /// Without a map, a zone that declares nothing is a zone nobody can place.
+    /// Letting it run would look like a working server that hands every player
+    /// straight back out.
+    #[tokio::test]
+    async fn no_bounds_and_no_map_is_refused_with_both_ways_out() {
+        let reg = registry();
+        let err = reg
+            .register_zone("zone-a", None, "127.0.0.1:50051", 1500)
+            .await
+            .unwrap_err();
+        assert!(err.contains("declared no bounds"), "{err}");
+        assert!(err.contains("map_file"), "{err}");
+        assert!(!reg.contains("zone-a").await);
+    }
+
+    /// With a map, declaring nothing is the normal case: the map decides.
+    #[tokio::test]
+    async fn a_mapped_gateway_needs_no_declared_bounds_at_all() {
+        let reg = mapped_registry();
+        let coverage = reg
+            .register_zone("zone-arena", None, "127.0.0.1:50051", 1500)
+            .await
+            .expect("the map places it");
+        assert!(coverage.contains(0.0, 0.0));
+        assert_eq!(
+            reg.find_zone_for_coords(0.0, 0.0).await.as_deref(),
+            Some("zone-arena")
+        );
+    }
+
     #[tokio::test]
     async fn a_zone_the_map_does_not_mention_is_refused() {
         let reg = mapped_registry();
         let err = reg
-            .register_zone("zone-nowhere", WEST, "127.0.0.1:50051", 1500)
+            .register_zone("zone-nowhere", Some(WEST), "127.0.0.1:50051", 1500)
             .await
             .unwrap_err();
         assert!(err.contains("claims no region"), "{err}");
