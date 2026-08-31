@@ -13,7 +13,7 @@ use baston_protocol::mesh::{
     PrepareForPlayerResponse, RegisterZoneRequest, ReleasePlayerRequest, ReleasePlayerResponse,
     ResmonSnapshotRequest, ResmonSnapshotResponse, ResourceStatus,
 };
-use baston_protocol::{Aabb, PlayerStateSnapshot};
+use baston_protocol::{Aabb, PlayerStateSnapshot, ZoneCoverage};
 use dashmap::DashMap;
 use tonic::transport::Channel;
 use tonic::{Request, Response, Status};
@@ -49,7 +49,14 @@ pub struct ZoneMeshHooks {
 
 pub struct ZoneMesh {
     pub zone_id: String,
+    /// Bounds this zone declares for itself. Only its actual territory when
+    /// the Gateway has no map file; otherwise the map overrules it and the
+    /// answer to `RegisterZone` replaces [`Self::coverage`].
     pub bounds: Aabb,
+    /// What this zone owns, as the Gateway sees it. Behind an `Arc` so the
+    /// boundary scan can take it once per pass rather than clone a polygon
+    /// per player.
+    coverage: std::sync::RwLock<Arc<ZoneCoverage>>,
     /// Address the Gateway can call us back on (registered value).
     pub public_grpc_addr: String,
     pub max_players: u32,
@@ -84,6 +91,7 @@ impl ZoneMesh {
         Ok(Arc::new(Self {
             zone_id,
             bounds,
+            coverage: std::sync::RwLock::new(Arc::new(ZoneCoverage::from_bounds(bounds))),
             public_grpc_addr,
             max_players,
             gateway,
@@ -93,6 +101,11 @@ impl ZoneMesh {
             resource_manager: std::sync::RwLock::new(None),
             handoff_manager: std::sync::RwLock::new(None),
         }))
+    }
+
+    /// What this zone owns right now.
+    pub fn coverage(&self) -> Arc<ZoneCoverage> {
+        Arc::clone(&self.coverage.read().expect("coverage lock poisoned"))
     }
 
     /// Give the mesh access to the zone's ResourceManager (resource-control
@@ -137,6 +150,7 @@ impl ZoneMesh {
             };
             match self.gateway.clone().register_zone(req).await {
                 Ok(resp) if resp.get_ref().accepted => {
+                    self.adopt_coverage(resp.into_inner().coverage);
                     tracing::info!(target: "zone", zone = %self.zone_id,
                         "registered with gateway (attempt {attempt})");
                     return Ok(());
@@ -152,6 +166,28 @@ impl ZoneMesh {
                         "gateway not ready — retrying registration in 2s (attempt {attempt})");
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 }
+            }
+        }
+    }
+
+    /// Take the territory the Gateway assigned us.
+    ///
+    /// A malformed or absent coverage keeps the declared rectangle rather than
+    /// leaving the zone owning nothing: a zone that thinks it owns no ground
+    /// hands every player away and accepts none back.
+    fn adopt_coverage(&self, wire: Option<baston_protocol::mesh::Coverage>) {
+        let Some(wire) = wire else { return };
+        match ZoneCoverage::try_from(wire) {
+            Ok(coverage) if !coverage.is_empty() => {
+                tracing::info!(target: "zone", zone = %self.zone_id,
+                    "territory from the gateway map: {} region(s), {} carved out",
+                    coverage.shapes().len(), coverage.overlays().len());
+                *self.coverage.write().expect("coverage lock poisoned") = Arc::new(coverage);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!(target: "zone", zone = %self.zone_id,
+                    "gateway sent an unusable territory ({e}) — keeping declared bounds");
             }
         }
     }

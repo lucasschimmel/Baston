@@ -1,0 +1,61 @@
+# BASTON zone map — copy to map.toml and point [meshing] map_file at it.
+#
+# The owner of a point is the FIRST region below that contains it. The order of
+# this file is the priority: a region can sit inside another and still win, as
+# long as it comes first. That is what lets an arena be carved out of the city
+# around it without cutting a hole in the city's outline by hand.
+#
+# The last region must be `shape = "everywhere"`. It is what makes a gap in the
+# map impossible rather than merely unlikely — the Gateway refuses to start
+# without it.
+#
+# Coordinates below are a starting point, not survey data. Fly the outline in
+# game and replace them.
+
+# --- An event venue that takes over the arena ---------------------------------
+# Inside the Los Santos outline further down, and wins because it comes first.
+# Comment this region out and the ground goes straight back to zone-city.
+
+[[region]]
+name = "maze-bank-arena"
+zone = "zone-arena"
+shape = "circle"
+center = [-250.0, -2000.0]
+radius = 240.0
+
+# --- Los Santos ---------------------------------------------------------------
+# Traced rather than boxed: a rectangle around the city would swallow half the
+# countryside with it. One vertex per line so a diff shows which one moved.
+
+[[region]]
+name = "los-santos"
+zone = "zone-city"
+shape = "poly"
+points = [
+  [-1600.0, -1000.0],
+  [-1350.0, -1900.0],
+  [ -800.0, -2700.0],
+  [  200.0, -3300.0],
+  [ 1300.0, -2400.0],
+  [ 1100.0,  -300.0],
+  [  100.0,   200.0],
+  [ -900.0,     0.0],
+]
+
+# A zone may claim several areas: they are simply listed under the same `zone`,
+# and their union is that zone's territory.
+
+[[region]]
+name = "los-santos-docks"
+zone = "zone-city"
+shape = "rect"
+bounds = [-500.0, -3300.0, 1300.0, -2400.0]
+
+# --- Everything else ----------------------------------------------------------
+# Sandy Shores, Paleto Bay, Mount Chiliad, the sea. No outline to draw: whatever
+# nobody above claimed is the countryside, by definition.
+
+[[region]]
+name = "the-countryside"
+zone = "zone-country"
+shape = "everywhere"

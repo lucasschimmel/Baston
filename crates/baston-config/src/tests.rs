@@ -492,3 +492,36 @@ fn the_game_build_error_names_the_value_and_a_way_out() {
         "{message}"
     );
 }
+
+#[test]
+fn a_map_file_resolves_against_the_config_it_was_named_in() {
+    // Relative to the config file, not the working directory: a mounted
+    // `config/` has to work without knowing where the process was launched.
+    let mut config: BastonConfig =
+        toml::from_str("[server]\nport = 30120\n[meshing]\nmap_file = \"map.toml\"\n").unwrap();
+    config.config_dir = Some(PathBuf::from("/srv/baston/config"));
+    assert_eq!(
+        config.map_file_path(),
+        Some(PathBuf::from("/srv/baston/config").join("map.toml"))
+    );
+}
+
+#[test]
+fn an_absolute_map_file_is_left_alone() {
+    let mut config: BastonConfig = toml::from_str(
+        "[server]\nport = 30120\n[meshing]\nmap_file = \"/opt/baston/world.toml\"\n",
+    )
+    .unwrap();
+    config.config_dir = Some(PathBuf::from("/srv/baston/config"));
+    assert_eq!(
+        config.map_file_path(),
+        Some(PathBuf::from("/opt/baston/world.toml"))
+    );
+}
+
+#[test]
+fn no_map_file_means_zones_keep_declaring_their_own_bounds() {
+    let config: BastonConfig =
+        toml::from_str("[server]\nport = 30120\n[meshing]\nenabled = true\n").unwrap();
+    assert_eq!(config.map_file_path(), None);
+}

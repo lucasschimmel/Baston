@@ -60,6 +60,18 @@ What follows from that:
 When a zone genuinely cannot get an id, the native returns **0**, the invalid
 handle, rather than a plausible number for an entity that will never exist.
 
+## Drawing the split
+
+By default each zone declares one rectangle and the Gateway takes its word for
+it. Nothing checks that the rectangles cover the plane, and a gap leaves any
+player standing in it without an owner.
+
+A [zone map](zone-map.md) replaces that: one ordered file of regions on the
+Gateway, with rectangles, circles and traced outlines, handed to each zone at
+registration. Regions may overlap — the first one wins — which is what lets an
+arena be carved out of the city around it, and a mandatory catch-all makes a
+gap impossible.
+
 ## Known limitations
 
 ### Zone failure loses player state

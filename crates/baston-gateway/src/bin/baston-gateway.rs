@@ -379,9 +379,25 @@ async fn main() -> anyhow::Result<()> {
     // Phase D: zone federation (gRPC registry + routing). Disabled by default;
     // Docker Compose enables it via [meshing] in baston.toml or env.
     let (mesh, mut recovery_kick_rx) = if config.meshing.enabled {
-        let registry = Arc::new(baston_gateway::ZoneRegistry::new(
-            std::time::Duration::from_secs(config.meshing.zone_timeout_secs),
-        ));
+        let zone_timeout = std::time::Duration::from_secs(config.meshing.zone_timeout_secs);
+        // A map file is refused rather than skipped: booting without the map
+        // the operator wrote would silently fall back to letting each zone
+        // claim whatever rectangle it likes, which is a different server.
+        let registry = Arc::new(match config.map_file_path() {
+            Some(path) => {
+                let (map, warnings) = baston_protocol::ZoneMap::load(&path).map_err(|e| {
+                    anyhow::anyhow!("{e}\n\nSee docs/server/zone-map.md for the format.")
+                })?;
+                for warning in warnings {
+                    tracing::warn!(target: "gateway", "zone map: {warning}");
+                }
+                tracing::info!(target: "gateway",
+                    "zone map loaded from {}: {} region(s) across {} zone(s)",
+                    path.display(), map.regions().len(), map.zone_ids().len());
+                baston_gateway::ZoneRegistry::with_map(zone_timeout, map)
+            }
+            None => baston_gateway::ZoneRegistry::new(zone_timeout),
+        });
         let router = Arc::new(baston_gateway::ConnectionRouter::new());
         let mesh = baston_gateway::GatewayMesh::new(Arc::clone(&registry), Arc::clone(&router));
         mesh.set_player_directory(Arc::clone(&players));

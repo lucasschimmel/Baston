@@ -9,7 +9,7 @@
 //!   and sends it over the game channel.
 //!
 //! The AoI filter is a brute-force O(n) scan — fine up to ~500 entities per
-//! zone. Phase D+ replaces it with a quadtree spatial index.
+//! zone. Zone ownership itself is resolved by the zone map, not here.
 
 use std::collections::HashMap;
 use std::sync::Arc;

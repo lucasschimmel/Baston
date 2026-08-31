@@ -71,7 +71,7 @@ state, but remove it promptly.
 ## Zone crash
 
 Detection: 3 missed heartbeats (15s) → the gateway evicts the zone from the
-registry/quadtree, increments `zone_failures_total{zone}`, and reroutes every
+registry, increments `zone_failures_total{zone}`, and reroutes every
 orphaned player to the least-loaded surviving zone (kick with "Server zone
 unavailable" if none). Recovery target: < 5s after eviction.
 

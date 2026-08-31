@@ -159,6 +159,24 @@ FiveM client acts on them and BASTON must be the only thing that states them:
 `sv_licenseKeyToken`, `sv_maxClients`, `sv_enforceGameBuild`, `onesync`,
 `onesync_enabled`. See `RESERVED_VARS` in `http/info.rs`.
 
+### Where a zone's territory is decided
+
+`baston-protocol::spatial` holds the geometry (`ZoneShape`, `Polygon`,
+`ZoneCoverage`) and `baston-protocol::zone_map` the ordered region list read
+from `meshing.map_file`. The Gateway is the only process that reads the file:
+`ZoneRegistry` resolves ownership through it and hands each zone its
+`ZoneCoverage` in the `RegisterZone` reply.
+
+A coverage is two lists, not one — the zone's own regions, and the
+higher-priority regions carved out of them. The second is what lets a zone
+notice a player *entering* an area taken from the middle of its own, which
+leaving-my-outline cannot see. `BoundaryDetector` then asks the only question
+that has an answer for every shape: extrapolate the position, and is that
+ground still ours?
+
+There is no spatial tree. Ordered regions must be walked in order, which is
+what a tree cannot do without collecting every candidate and re-sorting them.
+
 ### Server-created entities across the mesh
 
 The world clients talk to lives in the gateway, so a zone's `CreateVehicle`

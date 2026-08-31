@@ -52,6 +52,7 @@ export default defineConfig({
             { label: "Streaming assets", link: "/server/streaming/" },
             { label: "Multi-zone", link: "/server/multi-zone/" },
             { label: "Zone configuration", link: "/server/zone-config/" },
+            { label: "The zone map", link: "/server/zone-map/" },
             { label: "displayinfo overlay", link: "/server/displayinfo/" },
             { label: "Monitoring", link: "/server/monitoring/" },
             { label: "Going public", link: "/server/going-public/" },

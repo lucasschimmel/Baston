@@ -23,6 +23,9 @@ auth_bypass = true
 
 [meshing]
 enabled = true
+# Zone map, relative to this file. Unset = each zone declares its own rectangle
+# through ZONE_BOUNDS. See docs/server/zone-map.md and config/map.example.toml.
+# map_file = "map.toml"
 gateway_grpc_addr = "0.0.0.0:50050"
 heartbeat_interval_secs = 5
 zone_timeout_secs = 15

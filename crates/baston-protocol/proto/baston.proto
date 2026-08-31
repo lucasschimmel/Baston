@@ -56,6 +56,40 @@ message RegisterZoneRequest {
 message RegisterZoneResponse {
   bool accepted = 1;
   string message = 2;
+  // What this zone owns, when the Gateway holds a zone map. Absent means no
+  // map is configured and the zone keeps the bounds it declared itself.
+  Coverage coverage = 3;
+}
+
+message Point2 {
+  float x = 1;
+  float y = 2;
+}
+
+// One claimed area. Which fields carry meaning depends on `kind`; the others
+// are left at their defaults.
+message Shape {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_RECT = 1;
+    KIND_CIRCLE = 2;
+    KIND_POLY = 3;
+    KIND_EVERYWHERE = 4;
+  }
+  Kind kind = 1;
+  BoundingBox rect = 2;
+  Point2 center = 3;
+  float radius = 4;
+  repeated Point2 points = 5;
+}
+
+// A zone's territory: the regions it claims, minus the regions of every
+// higher-priority zone that cuts into them.
+message Coverage {
+  repeated Shape shapes = 1;
+  // Higher-priority regions overlapping `shapes`. A zone needs these to notice
+  // a player *entering* an area carved out of its own.
+  repeated Shape overlays = 2;
 }
 
 message HeartbeatRequest {

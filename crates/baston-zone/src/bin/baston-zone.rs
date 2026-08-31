@@ -420,7 +420,6 @@ async fn main() -> anyhow::Result<()> {
     let cleanup_host = script_host.clone();
     baston_zone::boundary_loop::BoundaryLoop {
         detector: baston_zone::boundary_detector::BoundaryDetector::new(
-            bounds,
             config.meshing.boundary_margin,
         ),
         manager: Arc::clone(&handoff_manager),

@@ -117,7 +117,7 @@ fn boundary_loop(
     released_local: Arc<AtomicU32>,
 ) -> BoundaryLoop {
     BoundaryLoop {
-        detector: BoundaryDetector::new(zone.mesh.bounds, 300.0),
+        detector: BoundaryDetector::new(300.0),
         manager: Arc::clone(manager),
         mesh: Arc::clone(&zone.mesh),
         ingest: Arc::clone(ingest),

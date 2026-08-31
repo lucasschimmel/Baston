@@ -1,4 +1,15 @@
-//! 2D axis-aligned bounding boxes for zone bounds (GTA V map plane).
+//! Zone geometry on the GTA V map plane.
+//!
+//! A zone map is an ordered list of regions and the owner of a point is the
+//! first region containing it, so shapes are allowed to overlap and the order
+//! resolves them. That is what lets an arena be carved out of the city that
+//! surrounds it without the city's outline having a hole cut in it by hand.
+
+mod polygon;
+mod shape;
+
+pub use polygon::{Polygon, PolygonError};
+pub use shape::{ShapeError, ZoneCoverage, ZoneShape};
 
 use serde::{Deserialize, Serialize};
 

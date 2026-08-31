@@ -10,6 +10,7 @@ pub mod players;
 pub mod rage;
 pub mod spatial;
 pub mod udp;
+pub mod zone_map;
 
 /// gRPC types + client/server stubs generated from `proto/baston.proto`
 /// by `tonic-build` (never hand-written).
@@ -27,7 +28,8 @@ pub mod mesh {
 
 pub use player_snapshot::PlayerStateSnapshot;
 pub use players::PlayerDirectory;
-pub use spatial::Aabb;
+pub use spatial::{Aabb, ZoneCoverage, ZoneShape};
+pub use zone_map::{MapError, Region, ZoneMap};
 
 impl From<Aabb> for mesh::BoundingBox {
     fn from(a: Aabb) -> Self {
@@ -43,6 +45,84 @@ impl From<Aabb> for mesh::BoundingBox {
 impl From<mesh::BoundingBox> for Aabb {
     fn from(b: mesh::BoundingBox) -> Self {
         Aabb::new(b.x_min, b.y_min, b.x_max, b.y_max)
+    }
+}
+
+impl From<&ZoneShape> for mesh::Shape {
+    fn from(shape: &ZoneShape) -> Self {
+        use mesh::shape::Kind;
+        let mut wire = mesh::Shape::default();
+        match shape {
+            ZoneShape::Rect(bounds) => {
+                wire.kind = Kind::Rect as i32;
+                wire.rect = Some((*bounds).into());
+            }
+            ZoneShape::Circle { center, radius } => {
+                wire.kind = Kind::Circle as i32;
+                wire.center = Some(mesh::Point2 {
+                    x: center.0,
+                    y: center.1,
+                });
+                wire.radius = *radius;
+            }
+            ZoneShape::Poly(poly) => {
+                wire.kind = Kind::Poly as i32;
+                wire.points = poly
+                    .points()
+                    .iter()
+                    .map(|&(x, y)| mesh::Point2 { x, y })
+                    .collect();
+            }
+            ZoneShape::Everywhere => wire.kind = Kind::Everywhere as i32,
+        }
+        wire
+    }
+}
+
+impl TryFrom<mesh::Shape> for ZoneShape {
+    type Error = String;
+
+    fn try_from(wire: mesh::Shape) -> Result<Self, Self::Error> {
+        use mesh::shape::Kind;
+        let kind =
+            Kind::try_from(wire.kind).map_err(|_| format!("unknown shape kind {}", wire.kind))?;
+        let shape = match kind {
+            Kind::Rect => ZoneShape::rect(wire.rect.ok_or("rect shape without bounds")?.into()),
+            Kind::Circle => {
+                let c = wire.center.ok_or("circle shape without a centre")?;
+                ZoneShape::circle((c.x, c.y), wire.radius)
+            }
+            Kind::Poly => ZoneShape::poly(wire.points.into_iter().map(|p| (p.x, p.y)).collect()),
+            Kind::Everywhere => Ok(ZoneShape::Everywhere),
+            Kind::Unspecified => return Err("shape kind is unset".to_owned()),
+        };
+        shape.map_err(|e| e.to_string())
+    }
+}
+
+impl From<&ZoneCoverage> for mesh::Coverage {
+    fn from(coverage: &ZoneCoverage) -> Self {
+        Self {
+            shapes: coverage.shapes().iter().map(Into::into).collect(),
+            overlays: coverage.overlays().iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl TryFrom<mesh::Coverage> for ZoneCoverage {
+    type Error = String;
+
+    fn try_from(wire: mesh::Coverage) -> Result<Self, Self::Error> {
+        let convert = |shapes: Vec<mesh::Shape>| {
+            shapes
+                .into_iter()
+                .map(ZoneShape::try_from)
+                .collect::<Result<Vec<_>, _>>()
+        };
+        Ok(ZoneCoverage::new(
+            convert(wire.shapes)?,
+            convert(wire.overlays)?,
+        ))
     }
 }
 

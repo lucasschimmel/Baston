@@ -97,7 +97,7 @@ impl GatewayMesh {
             .expect("hook lock poisoned") = Some(hook);
     }
 
-    /// Route a newly connected player: quadtree lookup on spawn coords, else
+    /// Route a newly connected player: map lookup on spawn coords, else
     /// least-loaded fallback. Returns the assigned zone (None = no zone up).
     pub async fn route_new_player(&self, source: u32, spawn: Option<(f32, f32)>) -> Option<String> {
         let zone = match spawn {
@@ -338,13 +338,17 @@ impl GatewayService for GatewayGrpc {
             )
             .await
         {
-            Ok(()) => Ok(Response::new(RegisterZoneResponse {
+            // Without a configured map the coverage is just the bounds the
+            // zone declared, and sending it back is a no-op it can ignore.
+            Ok(coverage) => Ok(Response::new(RegisterZoneResponse {
                 accepted: true,
                 message: String::new(),
+                coverage: Some((&coverage).into()),
             })),
             Err(e) => Ok(Response::new(RegisterZoneResponse {
                 accepted: false,
                 message: e,
+                coverage: None,
             })),
         }
     }

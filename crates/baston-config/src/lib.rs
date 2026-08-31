@@ -166,6 +166,10 @@ pub struct BastonConfig {
     /// that those settings are inert instead of leaving the operator guessing.
     #[serde(skip)]
     pub inert_sections: Vec<(&'static str, &'static str)>,
+    /// Directory the configuration was read from. Paths named inside the file
+    /// resolve against it rather than against the working directory.
+    #[serde(skip)]
+    pub config_dir: Option<PathBuf>,
 }
 
 /// `[voice]` section — the embedded Mumble-compatible voice server.
@@ -437,8 +441,19 @@ pub struct MeshingConfig {
     #[serde(default)]
     pub zone_public_grpc_addr: Option<String>,
     /// Zone bounds `x_min,y_min,x_max,y_max` (env `ZONE_BOUNDS` overrides).
+    ///
+    /// What a zone declares about itself. A Gateway holding a `map_file`
+    /// overrules it: the map is then the single source of truth and the zone
+    /// is told its territory in the registration reply.
     #[serde(default)]
     pub zone_bounds: Option<String>,
+    /// Zone map, relative to the directory holding this file (env
+    /// `BASTON_MAP_FILE` overrides). Gateway only.
+    ///
+    /// Unset means zones declare their own rectangles, which is how meshing
+    /// worked before maps existed and stays the default.
+    #[serde(default)]
+    pub map_file: Option<String>,
     #[serde(default = "default_heartbeat_interval")]
     pub heartbeat_interval_secs: u64,
     /// Silence window before the Gateway evicts a zone (3 missed heartbeats).
@@ -1223,6 +1238,7 @@ impl Default for MeshingConfig {
             zone_grpc_addr: default_zone_grpc_addr(),
             zone_public_grpc_addr: None,
             zone_bounds: None,
+            map_file: None,
             heartbeat_interval_secs: default_heartbeat_interval(),
             zone_timeout_secs: default_zone_timeout(),
             boundary_margin: default_boundary_margin(),
@@ -1327,6 +1343,24 @@ impl Default for DevConfig {
 }
 
 impl BastonConfig {
+    /// Absolute path of `meshing.map_file`, resolved against the directory of
+    /// the configuration file it was read from.
+    ///
+    /// Relative to the config rather than to the working directory: a mounted
+    /// `config/` then works without anyone having to know where the process
+    /// was launched from.
+    pub fn map_file_path(&self) -> Option<PathBuf> {
+        let map = self.meshing.map_file.as_ref()?;
+        let path = PathBuf::from(map);
+        if path.is_absolute() {
+            return Some(path);
+        }
+        Some(match self.config_dir.as_ref() {
+            Some(dir) => dir.join(path),
+            None => path,
+        })
+    }
+
     /// Load configuration from a TOML file, then apply environment overrides.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let raw = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
@@ -1337,6 +1371,7 @@ impl BastonConfig {
             path: path.to_owned(),
             source,
         })?;
+        config.config_dir = path.parent().map(Path::to_path_buf);
         config.apply_env_overrides()?;
         config.resolve_modules(&raw)?;
         config.validate()?;
@@ -1475,6 +1510,9 @@ impl BastonConfig {
         // Phase D federation overrides (Docker Compose contract).
         if let Ok(zone_id) = std::env::var("ZONE_ID") {
             self.nats.zone_id = zone_id;
+        }
+        if let Ok(map) = std::env::var("BASTON_MAP_FILE") {
+            self.meshing.map_file = Some(map);
         }
         if let Ok(bounds) = std::env::var("ZONE_BOUNDS") {
             self.meshing.zone_bounds = Some(bounds);

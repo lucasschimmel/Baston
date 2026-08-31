@@ -1,4 +1,17 @@
-//! Registry of live zone servers: bounds, gRPC callbacks, heartbeat liveness.
+//! Registry of live zone servers: territory, gRPC callbacks, heartbeat liveness.
+//!
+//! Ownership is resolved through a [`ZoneMap`] — an ordered list of regions
+//! where the first one containing a point wins. Two sources are possible:
+//!
+//! - a **configured** map, read from `meshing.map_file`, which the Gateway
+//!   holds and hands to each zone at registration;
+//! - a **declared** map, rebuilt from the bounds each zone announces about
+//!   itself, which is what a deployment without a map file has always had.
+//!
+//! There is deliberately no spatial tree. Ordered regions have to be walked in
+//! order, which is exactly what a tree cannot do without collecting every
+//! candidate and re-sorting them — and at map sizes anyone writes by hand, a
+//! bounding-box-filtered scan is the faster of the two anyway.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -6,18 +19,30 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use baston_protocol::mesh::zone_service_client::ZoneServiceClient;
-use baston_protocol::Aabb;
+use baston_protocol::{Aabb, ZoneCoverage, ZoneMap};
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
 
-use crate::quadtree::QuadTree;
+/// Bounds reported for a zone whose territory has no finite box — one that
+/// owns the map's catch-all region. Display only: ownership always goes
+/// through the coverage, never through this.
+const WORLD_PLANE: Aabb = Aabb {
+    x_min: -4000.0,
+    y_min: -4000.0,
+    x_max: 4000.0,
+    y_max: 4000.0,
+};
 
 /// One registered zone. The gRPC client is a persistent lazy channel — tonic
 /// reconnects on demand, so a zone restart doesn't need re-registration logic
 /// here (the zone re-registers itself anyway).
 pub struct ZoneEntry {
     pub zone_id: String,
-    pub bounds: Aabb,
+    /// What this zone owns, and what has been carved out of it.
+    pub coverage: ZoneCoverage,
+    /// Bounds the zone declared for itself. Only meaningful without a
+    /// configured map, where it is the zone's whole territory.
+    pub declared_bounds: Aabb,
     pub grpc_addr: String,
     pub grpc_client: ZoneServiceClient<Channel>,
     pub max_players: u32,
@@ -29,7 +54,11 @@ pub struct ZoneEntry {
 
 pub struct ZoneRegistry {
     zones: Arc<RwLock<HashMap<String, ZoneEntry>>>,
-    quadtree: Arc<RwLock<QuadTree>>,
+    /// Static map from `meshing.map_file`. Never changes once loaded.
+    configured_map: Option<Arc<ZoneMap>>,
+    /// Rebuilt from declared bounds whenever the zone set changes. Unused
+    /// when `configured_map` is set.
+    declared_map: Arc<RwLock<ZoneMap>>,
     /// Missed-heartbeat window before eviction (3 × 5s heartbeats).
     zone_timeout: Duration,
 }
@@ -38,6 +67,8 @@ pub struct ZoneRegistry {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ZoneStats {
     pub zone_id: String,
+    /// Box enclosing the zone's territory. A zone owning the catch-all region
+    /// reports the world plane, since its territory has no finite box.
     pub bounds: Aabb,
     pub grpc_addr: String,
     pub max_players: u32,
@@ -51,20 +82,53 @@ impl ZoneRegistry {
     pub fn new(zone_timeout: Duration) -> Self {
         Self {
             zones: Arc::new(RwLock::new(HashMap::new())),
-            quadtree: Arc::new(RwLock::new(QuadTree::gta_v())),
+            configured_map: None,
+            declared_map: Arc::new(RwLock::new(ZoneMap::default())),
             zone_timeout,
         }
     }
 
-    /// Register (or re-register) a zone: connect a lazy gRPC channel, add it
-    /// to the registry, and index its bounds in the quadtree.
+    /// Registry backed by a map file: zones are told what they own instead of
+    /// announcing it, and a zone the map does not mention is refused.
+    pub fn with_map(zone_timeout: Duration, map: ZoneMap) -> Self {
+        Self {
+            configured_map: Some(Arc::new(map)),
+            ..Self::new(zone_timeout)
+        }
+    }
+
+    pub fn configured_map(&self) -> Option<&ZoneMap> {
+        self.configured_map.as_deref()
+    }
+
+    /// Register (or re-register) a zone: connect a lazy gRPC channel, work out
+    /// what the zone owns, and index it.
+    ///
+    /// Returns the zone's coverage, which the caller sends back so the zone
+    /// knows its own territory — including the higher-priority regions carved
+    /// out of it, which it cannot derive on its own.
     pub async fn register_zone(
         &self,
         zone_id: &str,
-        bounds: Aabb,
+        declared_bounds: Aabb,
         grpc_addr: &str,
         max_players: u32,
-    ) -> Result<(), String> {
+    ) -> Result<ZoneCoverage, String> {
+        let coverage = match &self.configured_map {
+            Some(map) => {
+                let coverage = map.coverage_for(zone_id);
+                if coverage.is_empty() {
+                    return Err(format!(
+                        "zone {zone_id:?} claims no region in the configured map; \
+                         it lists: {}",
+                        map.zone_ids().join(", ")
+                    ));
+                }
+                coverage
+            }
+            None => ZoneCoverage::from_bounds(declared_bounds),
+        };
+
         let endpoint = Channel::from_shared(normalize_grpc_uri(grpc_addr))
             .map_err(|e| format!("invalid zone gRPC addr {grpc_addr:?}: {e}"))?
             .connect_timeout(Duration::from_secs(2))
@@ -76,7 +140,8 @@ impl ZoneRegistry {
         let now = Instant::now();
         let entry = ZoneEntry {
             zone_id: zone_id.to_owned(),
-            bounds,
+            coverage: coverage.clone(),
+            declared_bounds,
             grpc_addr: grpc_addr.to_owned(),
             grpc_client: client,
             max_players,
@@ -86,18 +151,49 @@ impl ZoneRegistry {
             registered_at: now,
         };
 
-        {
-            let mut zones = self.zones.write().await;
-            zones.insert(zone_id.to_owned(), entry);
+        self.zones.write().await.insert(zone_id.to_owned(), entry);
+        self.rebuild_declared_map().await;
+
+        match &self.configured_map {
+            Some(_) => tracing::info!(target: "gateway",
+                "Zone {zone_id} registered: {} region(s) from the map, {} overlay(s) \
+                 carved out, grpc={grpc_addr}",
+                coverage.shapes().len(), coverage.overlays().len()),
+            None => tracing::info!(target: "gateway",
+                "Zone {zone_id} registered: bounds=({},{},{},{}) grpc={grpc_addr}",
+                declared_bounds.x_min, declared_bounds.y_min,
+                declared_bounds.x_max, declared_bounds.y_max),
         }
-        {
-            let mut qt = self.quadtree.write().await;
-            qt.insert(zone_id, bounds);
+        Ok(coverage)
+    }
+
+    /// Rebuild the declared-bounds index. No-op when a map is configured,
+    /// where the map is the authority and declared bounds are ignored.
+    ///
+    /// Regions are ordered by zone id rather than by registration: with a
+    /// correctly tiled map the order cannot matter, and if two zones do
+    /// overlap, an order that survives a restart beats one that does not.
+    async fn rebuild_declared_map(&self) {
+        if self.configured_map.is_some() {
+            return;
         }
-        tracing::info!(target: "gateway",
-            "Zone {zone_id} registered: bounds=({},{},{},{}) grpc={grpc_addr}",
-            bounds.x_min, bounds.y_min, bounds.x_max, bounds.y_max);
-        Ok(())
+        let mut declared: Vec<(String, Aabb)> = self
+            .zones
+            .read()
+            .await
+            .values()
+            .map(|z| (z.zone_id.clone(), z.declared_bounds))
+            .collect();
+        declared.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        *self.declared_map.write().await = ZoneMap::from_declared_bounds(declared);
+    }
+
+    /// Run `f` against whichever map is in force.
+    async fn read_map<R>(&self, f: impl FnOnce(&ZoneMap) -> R) -> R {
+        match &self.configured_map {
+            Some(map) => f(map),
+            None => f(&*self.declared_map.read().await),
+        }
     }
 
     /// Record a heartbeat. Returns false if the zone is unknown (evicted) —
@@ -132,14 +228,13 @@ impl ZoneRegistry {
             dead
         };
         if !evicted.is_empty() {
-            let mut qt = self.quadtree.write().await;
             for id in &evicted {
-                qt.remove(id);
                 tracing::warn!(target: "gateway", zone = %id,
                     "zone failed ({}s without heartbeat) — removed from registry",
                     self.zone_timeout.as_secs());
                 metrics::counter!("zone_failures_total", "zone" => id.clone()).increment(1);
             }
+            self.rebuild_declared_map().await;
         }
         evicted
     }
@@ -148,19 +243,23 @@ impl ZoneRegistry {
     pub async fn remove_zone(&self, zone_id: &str) -> bool {
         let removed = self.zones.write().await.remove(zone_id).is_some();
         if removed {
-            self.quadtree.write().await.remove(zone_id);
+            self.rebuild_declared_map().await;
         }
         removed
     }
 
-    /// O(log n) quadtree lookup: which zone covers these coordinates?
+    /// Which zone owns these coordinates?
+    ///
+    /// A region whose zone is not currently registered is skipped, so ground
+    /// belonging to a dead zone falls through to whatever is underneath it
+    /// rather than routing players into a process that is not answering.
     pub async fn find_zone_for_coords(&self, x: f32, y: f32) -> Option<String> {
-        self.quadtree.read().await.query_point(x, y)
-    }
-
-    /// All zones intersecting a rectangle (cross-zone AoI, D5).
-    pub async fn find_zones_in_aabb(&self, area: &Aabb) -> Vec<String> {
-        self.quadtree.read().await.query_aabb(area)
+        let zones = self.zones.read().await;
+        self.read_map(|map| {
+            map.zone_at(x, y, |zone| zones.contains_key(zone))
+                .map(str::to_owned)
+        })
+        .await
     }
 
     /// Zone with the fewest active players (fallback routing / recovery).
@@ -214,8 +313,21 @@ impl ZoneRegistry {
             .map(|z| z.grpc_addr.clone())
     }
 
+    /// Box enclosing a zone's territory — see [`ZoneStats::bounds`].
     pub async fn zone_bounds(&self, zone_id: &str) -> Option<Aabb> {
-        self.zones.read().await.get(zone_id).map(|z| z.bounds)
+        self.zones
+            .read()
+            .await
+            .get(zone_id)
+            .map(|z| z.coverage.bbox().unwrap_or(WORLD_PLANE))
+    }
+
+    pub async fn zone_coverage(&self, zone_id: &str) -> Option<ZoneCoverage> {
+        self.zones
+            .read()
+            .await
+            .get(zone_id)
+            .map(|z| z.coverage.clone())
     }
 
     pub async fn contains(&self, zone_id: &str) -> bool {
@@ -229,7 +341,7 @@ impl ZoneRegistry {
             .values()
             .map(|z| ZoneStats {
                 zone_id: z.zone_id.clone(),
-                bounds: z.bounds,
+                bounds: z.coverage.bbox().unwrap_or(WORLD_PLANE),
                 grpc_addr: z.grpc_addr.clone(),
                 max_players: z.max_players,
                 player_count: z.player_count.load(Ordering::Relaxed),
@@ -273,29 +385,60 @@ fn normalize_grpc_uri(addr: &str) -> String {
 mod tests {
     use super::*;
 
+    const WEST: Aabb = Aabb {
+        x_min: -4000.0,
+        y_min: -4000.0,
+        x_max: 0.0,
+        y_max: 4000.0,
+    };
+    const EAST: Aabb = Aabb {
+        x_min: 0.0,
+        y_min: -4000.0,
+        x_max: 4000.0,
+        y_max: 4000.0,
+    };
+
     fn registry() -> Arc<ZoneRegistry> {
         Arc::new(ZoneRegistry::new(Duration::from_millis(100)))
+    }
+
+    async fn register(reg: &ZoneRegistry, id: &str, bounds: Aabb, port: u16) -> ZoneCoverage {
+        reg.register_zone(id, bounds, &format!("127.0.0.1:{port}"), 1500)
+            .await
+            .unwrap()
+    }
+
+    const ARENA_MAP: &str = r#"
+[[region]]
+name = "arena"
+zone = "zone-arena"
+shape = "circle"
+center = [0.0, 0.0]
+radius = 100.0
+
+[[region]]
+name = "los-santos"
+zone = "zone-city"
+shape = "rect"
+bounds = [-1000.0, -1000.0, 1000.0, 1000.0]
+
+[[region]]
+name = "everything-else"
+zone = "zone-country"
+shape = "everywhere"
+"#;
+
+    fn mapped_registry() -> Arc<ZoneRegistry> {
+        let (map, warnings) = ZoneMap::parse(ARENA_MAP).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        Arc::new(ZoneRegistry::with_map(Duration::from_millis(100), map))
     }
 
     #[tokio::test]
     async fn register_appears_in_registry_and_routes() {
         let reg = registry();
-        reg.register_zone(
-            "zone-a",
-            Aabb::new(-4000.0, -4000.0, 0.0, 4000.0),
-            "127.0.0.1:50051",
-            1500,
-        )
-        .await
-        .unwrap();
-        reg.register_zone(
-            "zone-b",
-            Aabb::new(0.0, -4000.0, 4000.0, 4000.0),
-            "127.0.0.1:50052",
-            1500,
-        )
-        .await
-        .unwrap();
+        register(&reg, "zone-a", WEST, 50051).await;
+        register(&reg, "zone-b", EAST, 50052).await;
         assert!(reg.contains("zone-a").await);
         assert_eq!(
             reg.find_zone_for_coords(-500.0, 200.0).await.as_deref(),
@@ -305,19 +448,14 @@ mod tests {
             reg.find_zone_for_coords(1500.0, -300.0).await.as_deref(),
             Some("zone-b")
         );
+        // Off-map belongs to nobody when zones declare their own bounds.
+        assert_eq!(reg.find_zone_for_coords(5000.0, 5000.0).await, None);
     }
 
     #[tokio::test]
     async fn silent_zone_is_evicted() {
         let reg = registry();
-        reg.register_zone(
-            "zone-a",
-            Aabb::new(-4000.0, -4000.0, 0.0, 4000.0),
-            "127.0.0.1:50051",
-            1500,
-        )
-        .await
-        .unwrap();
+        register(&reg, "zone-a", WEST, 50051).await;
         tokio::time::sleep(Duration::from_millis(150)).await;
         let evicted = reg.evict_silent_zones().await;
         assert_eq!(evicted, vec!["zone-a".to_string()]);
@@ -330,22 +468,8 @@ mod tests {
     #[tokio::test]
     async fn heartbeat_keeps_zone_alive_and_updates_load() {
         let reg = registry();
-        reg.register_zone(
-            "zone-a",
-            Aabb::new(-4000.0, -4000.0, 0.0, 4000.0),
-            "127.0.0.1:50051",
-            1500,
-        )
-        .await
-        .unwrap();
-        reg.register_zone(
-            "zone-b",
-            Aabb::new(0.0, -4000.0, 4000.0, 4000.0),
-            "127.0.0.1:50052",
-            1500,
-        )
-        .await
-        .unwrap();
+        register(&reg, "zone-a", WEST, 50051).await;
+        register(&reg, "zone-b", EAST, 50052).await;
         assert!(reg.heartbeat("zone-a", 40, 100).await);
         assert!(reg.heartbeat("zone-b", 10, 30).await);
         assert_eq!(
@@ -358,5 +482,81 @@ mod tests {
         // zone-a heartbeated 60ms ago (alive), zone-b 120ms ago (dead).
         let evicted = reg.evict_silent_zones().await;
         assert_eq!(evicted, vec!["zone-b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_configured_map_overrules_the_bounds_a_zone_declares() {
+        let reg = mapped_registry();
+        // The zone claims the whole west half; the map gives it a 100m circle.
+        let coverage = register(&reg, "zone-arena", WEST, 50051).await;
+        register(&reg, "zone-city", WEST, 50052).await;
+        register(&reg, "zone-country", WEST, 50053).await;
+
+        assert!(coverage.contains(0.0, 0.0));
+        assert!(!coverage.contains(-500.0, 0.0), "the declared bounds lost");
+        assert_eq!(
+            reg.find_zone_for_coords(0.0, 0.0).await.as_deref(),
+            Some("zone-arena")
+        );
+        assert_eq!(
+            reg.find_zone_for_coords(500.0, 500.0).await.as_deref(),
+            Some("zone-city")
+        );
+        assert_eq!(
+            reg.find_zone_for_coords(3000.0, 3000.0).await.as_deref(),
+            Some("zone-country")
+        );
+    }
+
+    /// The city has to be told what was carved out of it, or a player walking
+    /// into the arena is never handed over.
+    #[tokio::test]
+    async fn a_zone_is_told_which_regions_outrank_it() {
+        let reg = mapped_registry();
+        let city = register(&reg, "zone-city", WEST, 50052).await;
+        assert_eq!(city.overlays().len(), 1);
+        assert!(city.contains(500.0, 500.0));
+        assert!(!city.contains(0.0, 0.0), "the arena owns the middle");
+    }
+
+    #[tokio::test]
+    async fn a_zone_the_map_does_not_mention_is_refused() {
+        let reg = mapped_registry();
+        let err = reg
+            .register_zone("zone-nowhere", WEST, "127.0.0.1:50051", 1500)
+            .await
+            .unwrap_err();
+        assert!(err.contains("claims no region"), "{err}");
+        assert!(err.contains("zone-arena"), "{err}");
+        assert!(!reg.contains("zone-nowhere").await);
+    }
+
+    /// With the arena process down, the ground under it goes back to the city
+    /// rather than becoming unroutable.
+    #[tokio::test]
+    async fn ground_under_a_dead_zone_falls_through_to_the_next_region() {
+        let reg = mapped_registry();
+        register(&reg, "zone-arena", WEST, 50051).await;
+        register(&reg, "zone-city", WEST, 50052).await;
+        assert_eq!(
+            reg.find_zone_for_coords(0.0, 0.0).await.as_deref(),
+            Some("zone-arena")
+        );
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(reg.evict_silent_zones().await.len(), 2);
+        register(&reg, "zone-city", WEST, 50052).await;
+
+        assert_eq!(
+            reg.find_zone_for_coords(0.0, 0.0).await.as_deref(),
+            Some("zone-city")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_catch_all_zone_reports_the_world_plane_as_its_box() {
+        let reg = mapped_registry();
+        register(&reg, "zone-country", WEST, 50053).await;
+        assert_eq!(reg.zone_bounds("zone-country").await, Some(WORLD_PLANE));
     }
 }

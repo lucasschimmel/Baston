@@ -232,10 +232,6 @@ routing, not state.
 
 ## Known gaps
 
-- **`find_zones_in_aabb` is dead code.** It was built for a cross-zone AoI that
-  the architecture made unnecessary — client visibility never passes through the
-  zones (see [multi-zone](../server/multi-zone.md)). It has no callers outside
-  its own tests and should be removed rather than wired.
 - **Zone failure and drain lose player state**, as above.
 - **Multi-gateway HA is unsupported** — the shared durable fragments the world.
 - **`ack_frame` is a deliberate no-op**; NG relies on NAK.

@@ -126,15 +126,21 @@ impl BoundaryLoop {
         // last player's handoff starts seconds after the first crossed.
         let mut to_prepare = Vec::new();
         let mut to_complete = Vec::new();
+        // Taken once per pass: the territory only changes on re-registration,
+        // and a polygon is not worth cloning per player.
+        let coverage = self.mesh.coverage();
         for (source, coords, velocity) in self.ingest.player_kinematics() {
-            let candidate = self.detector.check_player(source, coords, velocity);
-            let crossed = !self.mesh.bounds.contains(coords[0], coords[1]);
+            let candidate = self
+                .detector
+                .check_player(&coverage, source, coords, velocity);
+            let crossed = !coverage.contains(coords[0], coords[1]);
             match self.manager.state_of(source) {
                 None => {
                     if let Some(c) = candidate {
                         tracing::info!(target: "zone", zone = %self.mesh.zone_id,
-                            "player={source} approaching {:?} boundary ({:.0}m, ETA {:.1}s)",
-                            c.target_direction, c.distance_to_edge,
+                            "player={source} leaving our ground toward ({:.0}, {:.0}) \
+                             ({:.0}m, ETA {:.1}s)",
+                            c.predicted_coords.0, c.predicted_coords.1, c.distance_to_edge,
                             c.estimated_crossing_ms as f64 / 1000.0);
                         to_prepare.push((source, coords, velocity, c.predicted_coords));
                     }
@@ -188,13 +194,13 @@ impl BoundaryLoop {
             .iter()
             .map(|(s, _, _)| *s)
             .collect();
-        // Only entities that actually left our bounds are candidates, so the
-        // world is filtered before it is cloned rather than after.
-        let bounds = self.mesh.bounds;
+        // Only entities that actually left our territory are candidates, so
+        // the world is filtered before it is cloned rather than after.
+        let coverage = self.mesh.coverage();
         let departed = self.ingest.entity_manager().snapshot_filtered(|entity| {
             // Players ride the gRPC handoff path.
             entity.entity_type != EntityType::Player
-                && !bounds.contains(entity.coords[0], entity.coords[1])
+                && !coverage.contains(entity.coords[0], entity.coords[1])
                 // Entities owned by a connected local player travel inside
                 // that player's snapshot instead.
                 && !entity

@@ -307,7 +307,8 @@ See [Multi-zone servers](../server/multi-zone.md) and
 | `gateway_grpc` | `127.0.0.1:50050` | Where a zone finds the gateway. |
 | `zone_grpc_addr` | `0.0.0.0:50051` | Where a zone's ZoneService listens. |
 | `zone_public_grpc_addr` | *(derived)* | The address a zone registers with the gateway. |
-| `zone_bounds` | *(unset)* | `x_min,y_min,x_max,y_max`. Required for a zone process. |
+| `zone_bounds` | *(unset)* | `x_min,y_min,x_max,y_max`. Required for a zone process, and overruled when the Gateway holds a `map_file`. |
+| `map_file` | *(unset)* | Zone map, relative to the directory holding `baston.toml`. Gateway only. See [The zone map](../server/zone-map.md). |
 | `heartbeat_interval_secs` | `5` | Zone → gateway heartbeat. |
 | `zone_timeout_secs` | `15` | Missed heartbeats before a zone is declared dead. |
 | `boundary_margin` | `300.0` | Metres before a boundary at which a handoff is prepared. |
@@ -377,6 +378,7 @@ setting without rewriting a mounted file.
 | `ZONE_PUBLIC_GRPC_ADDR` | `meshing.zone_public_grpc_addr` |
 | `ZONE_ID` | `nats.zone_id` |
 | `ZONE_BOUNDS` | `meshing.zone_bounds` |
+| `BASTON_MAP_FILE` | `meshing.map_file` |
 | `NATS_URL` | `nats.url` |
 | `BASTON_MODULE_<SLUG>` | any module |
 

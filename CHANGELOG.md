@@ -36,7 +36,42 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   advertised straight into `getConfiguration` and served from memory, with no
   presence on disk and no way for a resources directory to replace it.
 
+- Added the zone map: an ordered list of regions in its own TOML file
+  (`[meshing] map_file`), where the owner of a point is the first region that
+  contains it. Regions are rectangles, circles or traced outlines, and they may
+  overlap — so an event venue can be carved out of the city around it without
+  cutting a hole in the city's outline, and one zone can own several separate
+  areas by being listed more than once.
+
+  Order is the priority, deliberately rather than a `priority` number: a number
+  invites ties, and a tie has to be broken by something that does not survive a
+  restart. The last region must match everything, which is what turns a gap in
+  the map from unlikely into impossible — a player standing in one had no
+  owning zone and was reassigned to the least-loaded one on every scan.
+
+  The Gateway holds the map and hands each zone its territory in the
+  `RegisterZone` reply, so `zone_bounds` / `ZONE_BOUNDS` stop being N separate
+  claims taken on faith. It refuses a map with no catch-all, a self-intersecting
+  outline, or a key belonging to another shape, and warns about a region an
+  earlier one has made unreachable — the likeliest authoring mistake, which
+  otherwise looks like a zone silently refusing to open. A zone claiming no
+  region is refused by name.
+
+  Without a `map_file` nothing changes: zones declare their own rectangles as
+  before.
+
 ### Changed
+
+- A zone's boundary scan now asks whether the ground it is about to stand on is
+  still its own, instead of measuring the distance to the nearest rectangle
+  edge and checking the outward speed. The old question only has an answer for
+  a rectangle; the new one is the same for a circle, a coastline, or a
+  territory with a hole in the middle.
+
+  This closes a case the old test could not see at all: a player walking from a
+  zone *into* an area carved out of it never leaves that zone's outline, so
+  nothing fired and they stayed on a zone that no longer owned the ground under
+  them. A zone is now told which higher-priority regions cut into its own.
 
 - `[server] enforce_game_build` is now one setting with one meaning, instead of
   two halves that could disagree. It is validated at load — a decimal build
@@ -149,6 +184,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   was designed around, which is what its own comment always claimed.
 
 ### Removed
+
+- Removed the Gateway's quadtree. Ordered regions have to be walked in order,
+  which is what a tree cannot do without collecting every candidate and
+  re-sorting them; `find_zones_in_aabb`, its only other caller, was documented
+  dead code from a cross-zone AoI the architecture made unnecessary.
 
 - Removed the FXServer sidecar and everything that existed only to serve it:
   the `baston-cfx-platform` and `baston-escrow-plugin` crates, the `escrow`
