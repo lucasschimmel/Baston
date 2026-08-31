@@ -289,3 +289,36 @@ async fn a_dependency_nobody_installed_costs_only_its_dependents() {
     assert_eq!(report.failed[0].0, "orphan");
     assert!(report.failed[0].1.contains("never-installed"), "{report:?}");
 }
+
+/// Caught on the VPS: money failed, money-fountain was skipped for depending on
+/// it — and money-fountain-example-map started anyway, because a *skip* did not
+/// carry forward the way a *failure* did. Absent is absent either way.
+#[tokio::test]
+async fn a_skip_carries_down_the_chain_the_way_a_failure_does() {
+    let dir = tempfile::tempdir().unwrap();
+    write_resource(dir.path(), "money", &[], "syntax ( error");
+    write_resource(dir.path(), "fountain", &["money"], "console.log('up');");
+    write_resource(
+        dir.path(),
+        "fountain-map",
+        &["fountain"],
+        "console.log('up');",
+    );
+    write_resource(dir.path(), "unrelated", &[], "console.log('up');");
+
+    let manager = manager(dir.path());
+    manager.discover().await.expect("discover");
+    let report = manager.start_all().await;
+
+    assert_eq!(report.started, vec!["unrelated".to_string()]);
+    assert_eq!(report.failed.len(), 1);
+    assert_eq!(report.failed[0].0, "money");
+
+    let mut skipped: Vec<&str> = report.skipped.iter().map(|(n, _)| n.as_str()).collect();
+    skipped.sort_unstable();
+    assert_eq!(
+        skipped,
+        vec!["fountain", "fountain-map"],
+        "the grandchild must not start either: {report:?}"
+    );
+}

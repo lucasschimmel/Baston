@@ -180,12 +180,24 @@ impl ResourceManager {
             }
         }
         let mut blocked: HashMap<String, String> = HashMap::new();
+        // A resource that is skipped is just as absent as one that failed, so
+        // whatever waited on *it* has to be blocked too. `plan.order` is
+        // dependency-first, so recording the block as we pass each resource
+        // reaches the whole chain in one sweep.
+        let block_dependents = |blocked: &mut HashMap<String, String>, name: &str| {
+            for &dependent in dependents.get(name).map(Vec::as_slice).unwrap_or(&[]) {
+                blocked
+                    .entry(dependent.to_owned())
+                    .or_insert_with(|| format!("{name} is not running"));
+            }
+        };
 
         for name in plan.order {
-            if let Some(why) = blocked.get(&name) {
+            if let Some(why) = blocked.get(&name).cloned() {
                 tracing::warn!(target: "resources", resource = %name, "not started: {why}");
                 self.mark_failed(&name).await;
-                report.skipped.push((name.clone(), why.clone()));
+                block_dependents(&mut blocked, &name);
+                report.skipped.push((name, why));
                 continue;
             }
             match self.start(&name).await {
@@ -195,15 +207,7 @@ impl ResourceManager {
                         "resource failed to start — skipping it, the server stays up");
                     metrics::counter!("resource_start_failures_total").increment(1);
                     self.mark_failed(&name).await;
-                    for &dependent in dependents
-                        .get(name.as_str())
-                        .map(Vec::as_slice)
-                        .unwrap_or(&[])
-                    {
-                        blocked
-                            .entry(dependent.to_owned())
-                            .or_insert_with(|| format!("{name} failed to start"));
-                    }
+                    block_dependents(&mut blocked, &name);
                     report.failed.push((name, e.to_string()));
                 }
             }
