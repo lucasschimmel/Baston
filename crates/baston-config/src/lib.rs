@@ -1,6 +1,7 @@
 //! Runtime configuration for BASTON, loaded from `baston.toml` with
 //! environment-variable overrides (`BASTON_PORT`, `BASTON_RESOURCES_PATH`).
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
@@ -723,6 +724,30 @@ pub struct ServerConfig {
     /// provider"). Empty string = no enforcement.
     #[serde(default = "default_enforce_game_build")]
     pub enforce_game_build: String,
+    /// A 96×96 PNG published as `info.json` `icon`, base64-encoded — the
+    /// picture the FiveM server browser shows next to the name. Both the size
+    /// and the format are the client's requirement, not BASTON's, and a file
+    /// that is neither is refused at load rather than silently dropped.
+    #[serde(default)]
+    pub icon: Option<PathBuf>,
+    /// Replicated server variables, published in `info.json` `vars` and
+    /// advertised to the server list.
+    ///
+    /// This is CFX's `sets` mechanism. FXServer does not know the name of any
+    /// individual field either — `InfoHttpHandler.cpp` iterates every convar
+    /// carrying `ConVar_ServerInfo` and publishes what it finds. So this map
+    /// is a passthrough, and the fields the server browser reads today
+    /// (`sv_projectName`, `sv_projectDesc`, `tags`, `locale`, `banner_detail`,
+    /// `banner_connecting`) work without BASTON knowing them, as will whatever
+    /// CFX adds next.
+    ///
+    /// **Everything here is public.** It is served to anyone who asks for
+    /// `/info.json`, before authentication. Do not put a secret in it.
+    ///
+    /// A `BTreeMap` so `/info.json` is byte-stable across boots: an unstable
+    /// key order would make the document's hash change for no reason.
+    #[serde(default)]
+    pub vars: BTreeMap<String, String>,
 }
 
 /// `[auth]` section — CFX ticket validation (Phase B).

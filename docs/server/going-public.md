@@ -81,6 +81,38 @@ are off by default; leave them off unless you need them.
 
 ---
 
+## How you look in the server browser
+
+```toml
+[server]
+name = "Le Baston"
+icon = "myLogo.png"             # 96x96 PNG, nothing else
+
+[server.vars]
+sv_projectName = "Chez Lucas"
+sv_projectDesc = "Serveur roleplay entre potes"
+tags = "roleplay, francais"
+locale = "fr-FR"
+banner_detail = "https://example.com/banner-1920x384.png"
+banner_connecting = "https://example.com/connecting.png"
+```
+
+`[server.vars]` is a passthrough. BASTON does not know these names and does not
+validate them — FXServer doesn't either, it publishes every variable carrying
+the `ConVar_ServerInfo` flag and lets the browser recognise what it wants. So
+these work, and so will whatever CFX adds next.
+
+Scripts write to the same store (`SetConvarServerInfo`, `SetGameType`,
+`SetMapName`) and win over the file, which is FXServer's behaviour for `sets`.
+
+**Everything in `[server.vars]` is public** — `/info.json` is served before
+authentication. Never put a secret there.
+
+The icon is checked at boot: a file that is not a 96×96 PNG stops the server
+with its actual dimensions in the message. The FiveM browser will not display
+any other size, so accepting it and dropping it silently would leave you
+staring at an empty square with nothing to go on.
+
 ## The CFX licence and the server list
 
 There is one choice here, and it decides the shape of your server.

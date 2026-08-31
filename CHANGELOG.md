@@ -76,6 +76,29 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   branch above 2048, so a server declaring more is checked against plain
   `onesync`. BASTON caps at 2048 instead of using the gap.
 
+- Added `[server.vars]` and `[server] icon`: the server browser's name,
+  description, tags, locale, banners and logo. `[server.vars]` is CFX's `sets`
+  mechanism — BASTON publishes every entry verbatim in `/info.json` `vars` and
+  does not know or validate the names, exactly as FXServer iterates the
+  `ConVar_ServerInfo` flag rather than looking fields up, so fields CFX adds
+  later work without a code change. The icon is validated as a 96×96 PNG at
+  boot, with its real dimensions in the error.
+
+  This also fixes four natives that looked like they worked and did not.
+  `SetGameType`, `SetMapName`, `FlagServerAsPrivate` and
+  `EnableEnhancedHostSupport` wrote to a convar store the gateway had no
+  accessor for, so nothing ever read it — a script calling `SetGameType` got no
+  error and no effect. `SetConvar` / `SetConvarServerInfo` are now named
+  natives rather than a JS-only op, so Lua reaches them too instead of falling
+  through to the neutral-value path.
+
+  Five names are reserved from both sources — `sv_licenseKeyToken`,
+  `sv_maxClients`, `sv_enforceGameBuild`, `onesync`, `onesync_enabled` — because
+  the client acts on them. That closes the other door on the ADR-004 invariant:
+  the heartbeat already refused to list a server hiding its token, and
+  configuration now cannot forge one, or advertise a slot count the licence
+  never granted.
+
 ### Removed
 
 - Removed the FXServer sidecar and everything that existed only to serve it:

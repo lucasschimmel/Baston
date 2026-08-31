@@ -65,6 +65,29 @@ allow = []
 # Snapshots per second, per subscriber (1-30).
 refresh_hz = 5
 
+# How the server presents itself in the FiveM server browser.
+#
+# This is CFX's `sets` mechanism. BASTON does not know the name of any field
+# here and does not validate them — FXServer doesn't either: it publishes every
+# variable carrying the ConVar_ServerInfo flag and lets the browser decide what
+# it recognises. So the fields below work, and so will whatever CFX adds next.
+#
+# Scripts write to the same store with SetConvarServerInfo / SetGameType /
+# SetMapName, and win over what is written here.
+#
+# EVERYTHING HERE IS PUBLIC: it is served on /info.json before authentication.
+# Never put a secret in it.
+[server.vars]
+# sv_projectName = "Chez Lucas"
+# sv_projectDesc = "Serveur roleplay entre potes"
+# tags = "roleplay, francais, serious"
+# locale = "fr-FR"
+# banner_detail = "https://example.com/banner-1920x384.png"
+# banner_connecting = "https://example.com/connecting.png"
+# sv_hostname and sv_gametype/sv_mapname also drive the top-level fields of
+# /info.json; sv_hostname overrides [server] name.
+# sv_hostname = "Le Baston"
+
 # Your CFX server identity. See docs/operations/licensing.md.
 [license]
 # "off"  : no check at all (dev/LAN). Warns every boot.

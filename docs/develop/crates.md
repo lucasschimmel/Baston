@@ -142,6 +142,23 @@ routing core. A leaf crate with no V8, so its tests compile fast.
 
 Currently emits **no metrics**, and proximity culling is not implemented.
 
+### Replicated server variables
+
+`/info.json` publishes `[server.vars]` merged with whatever the running scripts
+have set, and the server-list heartbeat advertises the same document. Both read
+`ScriptHost::server_vars()`.
+
+**Known limitation:** that store lives in the process running the resources. In
+single-process mode that is the gateway, so a script's `SetConvarServerInfo`
+shows up immediately. Under `[meshing]`, resources run in zone processes and
+the gateway publishes only what `[server.vars]` configured — a script-set
+variable does not cross the process boundary yet.
+
+Five names are reserved and cannot be written from either source, because the
+FiveM client acts on them and BASTON must be the only thing that states them:
+`sv_licenseKeyToken`, `sv_maxClients`, `sv_enforceGameBuild`, `onesync`,
+`onesync_enabled`. See `RESERVED_VARS` in `http/info.rs`.
+
 ## `baston-cfx`
 
 CFX platform identity, without FXServer: key validation, the entitlement

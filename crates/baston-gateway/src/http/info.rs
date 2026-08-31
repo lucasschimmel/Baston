@@ -13,19 +13,75 @@ use serde_json::json;
 
 use super::AppState;
 
+/// Replicated variables BASTON owns, which an operator must not be able to
+/// overwrite from `[server.vars]` or a script.
+///
+/// Three of these describe the server's *capacity and identity*, and the
+/// client acts on them: `sv_licenseKeyToken` decides whether it looks up an
+/// entitlement policy at all, and `sv_maxClients` with the `onesync` pair
+/// decide which entitlement that lookup has to find. Letting a config file
+/// win here would reopen the hole ADR-004 closes from the other side — a
+/// server could publish a token it does not hold, or hide the one it does.
+///
+/// `sv_enforceGameBuild` is here for a duller reason: it comes from
+/// `[server] enforce_game_build`, and two spellings of one setting is how an
+/// operator ends up debugging the one that lost.
+const RESERVED_VARS: &[&str] = &[
+    "sv_licenseKeyToken",
+    "sv_maxClients",
+    "sv_enforceGameBuild",
+    "onesync",
+    "onesync_enabled",
+];
+
+/// Well-known variables that also drive a top-level field.
+///
+/// `/info.json` carries both `vars.sv_hostname`-style entries *and* a handful
+/// of promoted fields the browser reads directly. FXServer keeps them in sync
+/// because both come from the same convar; so does this.
+fn promoted(vars: &serde_json::Map<String, serde_json::Value>, name: &str) -> Option<String> {
+    vars.get(name)
+        .and_then(serde_json::Value::as_str)
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned)
+}
+
 /// Build the `/info.json` document.
 ///
-/// **`sv_licenseKeyToken` is what arms the client's entitlement check.** The
-/// client reads it here, fetches the policy it names, and refuses to connect
-/// when the slot count exceeds what that policy grants. Publishing it is
-/// therefore not optional for a server that also advertises itself: the
-/// heartbeat refuses to send a snapshot that omits it.
+/// # Precedence
+///
+/// Operator `[server.vars]` and script `SetConvarServerInfo` share one store,
+/// last write wins — which is FXServer's behaviour for `sets` and the native.
+/// BASTON's own variables are written **last** and are not overridable; see
+/// [`RESERVED_VARS`].
+///
+/// # `sv_licenseKeyToken`
+///
+/// This is what arms the client's entitlement check. The client reads it here,
+/// fetches the policy it names, and refuses to connect when the slot count
+/// exceeds what that policy grants. Publishing it is therefore not optional
+/// for a server that also advertises itself: the heartbeat refuses to send a
+/// snapshot that omits it.
 pub fn payload(state: &AppState, resources: Vec<String>) -> serde_json::Value {
     let onesync_enabled = state.config.state_sync.onesync.is_enabled();
+    let mut vars = serde_json::Map::new();
+
+    // 1. Whatever the operator and the running scripts have set. BASTON does
+    //    not know or validate these names: `sv_projectName`, `sv_projectDesc`,
+    //    `tags`, `locale`, `banner_detail` and the rest are read by the server
+    //    browser, not by the server, exactly as in FXServer.
+    for entry in state.server_vars().iter() {
+        if RESERVED_VARS.contains(&entry.key().as_str()) {
+            continue;
+        }
+        vars.insert(entry.key().clone(), json!(entry.value()));
+    }
+
+    // 2. BASTON's own, written last so nothing above can spoof them.
+    //
     // NetLibrary.cpp reads `vars.sv_enforceGameBuild` pre-connect and
     // build-switches the client; without it every client keeps its local
     // build and mixed-build non-OneSync sessions can't join each other.
-    let mut vars = serde_json::Map::new();
     if !state.config.server.enforce_game_build.is_empty() {
         vars.insert(
             "sv_enforceGameBuild".to_owned(),
@@ -47,30 +103,50 @@ pub fn payload(state: &AppState, resources: Vec<String>) -> serde_json::Value {
         "onesync".to_owned(),
         json!(state.config.state_sync.onesync.convar_value()),
     );
-    json!({
-        "name": state.config.server.name,
+
+    // Promoted fields. `sv_hostname` / `sv_gametype` / `sv_mapname` are the
+    // convars FXServer promotes, so a resource calling SetGameType now
+    // actually changes what the browser shows.
+    let name = promoted(&vars, "sv_hostname").unwrap_or_else(|| state.config.server.name.clone());
+    let game_type = promoted(&vars, "sv_gametype").unwrap_or_else(|| "Roleplay".to_owned());
+    let map_name = promoted(&vars, "sv_mapname").unwrap_or_else(|| "Los Santos".to_owned());
+
+    let mut info = json!({
+        "name": name,
         "players": state.players.count(),
         "maxPlayers": state.config.server.max_players,
-        "gameType": "Roleplay",
-        "mapName": "Los Santos",
+        "gameType": game_type,
+        "mapName": map_name,
         "enhancedHostSupport": !onesync_enabled,
         "onesync": { "enabled": onesync_enabled },
         "vars": vars,
         "version": 1,
         "resources": resources,
         "server": format!("BASTON/{} (Rust)", env!("CARGO_PKG_VERSION")),
-    })
+    });
+
+    if let Some(icon) = &state.icon {
+        info["icon"] = json!(icon);
+    }
+    info
 }
 
 /// The `dynamic.json` half of a server-list heartbeat (`GameServer.cpp` builds
 /// info, dynamic and players together). Nothing serves this over HTTP today;
 /// it exists because the ingress contract asks for it.
 pub fn dynamic_payload(state: &AppState) -> serde_json::Value {
+    let vars = state.server_vars();
+    let read = |name: &str, fallback: &str| {
+        vars.get(name)
+            .map(|v| v.value().clone())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| fallback.to_owned())
+    };
     json!({
         "clients": state.players.count(),
-        "gametype": "Roleplay",
-        "hostname": state.config.server.name,
-        "mapname": "Los Santos",
+        "gametype": read("sv_gametype", "Roleplay"),
+        "hostname": read("sv_hostname", &state.config.server.name),
+        "mapname": read("sv_mapname", "Los Santos"),
         "sv_maxclients": state.config.server.max_players.to_string(),
     })
 }

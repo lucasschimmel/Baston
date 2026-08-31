@@ -682,8 +682,21 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let auth = AuthService::new(&config.auth)?;
+    // Seed the replicated variables before any resource starts, so a script
+    // reading GetConvar at load sees what the operator configured.
+    script_host.seed_server_vars(config.server.vars.clone());
+
+    // The icon is validated at boot rather than per request: an operator whose
+    // logo is the wrong size finds out now, not from an empty space in a
+    // server browser they cannot see.
+    let icon = match &config.server.icon {
+        Some(path) => Some(baston_gateway::http::load_icon(path)?),
+        None => None,
+    };
+
     let state = Arc::new(AppState {
         cfx: cfx_identity.map(std::sync::Arc::new),
+        icon,
         downloads: baston_gateway::http::DownloadPolicy::new(&config.resources),
         builtins: baston_gateway::http::BuiltinResources::from_config(&config),
         config,

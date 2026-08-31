@@ -45,6 +45,7 @@ async fn app(dir: &Path, access: DisplayInfoAccess) -> axum::Router {
         builtins: BuiltinResources::from_config(&config),
         config,
         cfx: None,
+        icon: None,
         resource_manager,
         players,
         script_host,

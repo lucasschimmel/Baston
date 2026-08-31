@@ -40,6 +40,7 @@ port = 30120
 | `port` | `30120` | The game port. FiveM multiplexes TCP and UDP on it. |
 | `bind_address` | `0.0.0.0` | Interface to listen on. Must be one concrete address if you enable public listing. |
 | `max_players` | `32` | Slot count. A CFX licence can *lower* this (see `[license]`); it never raises it. |
+| `icon` | *(unset)* | Path to a **96×96 PNG**, published as `info.json` `icon`. Any other size or format is refused at boot — the FiveM browser will not display it, so a silent drop would leave you guessing. |
 | `enforce_game_build` | `""` | GTA build all clients must run, e.g. `"3258"`. Empty means no enforcement. |
 
 `enforce_game_build` matters more than it looks: the client switches build
@@ -153,6 +154,39 @@ Permissions: `monitor.read`, `resource.control`, `player.kick`, `zone.drain`,
 
 The loader refuses weak, duplicated or placeholder tokens, and keys with no
 permissions or no name — an unusable key that boots is worse than a refusal.
+
+## `[server.vars]` — how the server browser sees you
+
+CFX's `sets` mechanism. BASTON publishes every entry verbatim in `/info.json`
+`vars`, which is also what the server list advertises. It does **not** know or
+validate the names — neither does FXServer, which iterates the
+`ConVar_ServerInfo` flag rather than looking fields up. So the fields the
+browser reads today work, and so will the ones CFX adds later.
+
+```toml
+[server.vars]
+sv_projectName = "Chez Lucas"
+sv_projectDesc = "Serveur roleplay entre potes"
+tags = "roleplay, francais"
+locale = "fr-FR"
+banner_detail = "https://example.com/banner-1920x384.png"
+banner_connecting = "https://example.com/connecting.png"
+```
+
+Three names also drive a top-level field of `/info.json`, the way FXServer
+promotes them: `sv_hostname` (overrides `[server] name`), `sv_gametype`, and
+`sv_mapname`.
+
+Scripts write to the same store with `SetConvarServerInfo`, `SetGameType` and
+`SetMapName`, and take precedence over the file.
+
+**Everything here is public.** `/info.json` is served before authentication;
+never put a secret in it.
+
+Five names are reserved and cannot be set from here, because the FiveM client
+acts on them and BASTON is the only thing that may state them:
+`sv_licenseKeyToken`, `sv_maxClients`, `sv_enforceGameBuild`, `onesync`,
+`onesync_enabled`.
 
 ## `[license]` — your CFX identity
 

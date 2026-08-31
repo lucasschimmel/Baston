@@ -677,9 +677,29 @@ pub(crate) fn cfx_server_native(
 
         // --- server listing metadata ---
         //
-        // These are convars in the engine too, and `/info.json` reads them
-        // from the same place, so setting them here really does change what
-        // the server list shows.
+        // All of these are replicated convars in the engine, and `/info.json`
+        // publishes that store, so setting one here really does change what
+        // the server browser shows.
+        //
+        // Named natives rather than only a JS op: the op path exists in
+        // `bootstrap.js`, but Lua resolves an unknown global to a native name
+        // and would have landed in the neutral-value fallback — a silent
+        // no-op in one engine and a working call in the other.
+        "SET_CONVAR" | "SET_CONVAR_REPLICATED" | "SET_CONVAR_SERVER_INFO" => {
+            set_convar(state, &json_arg_string(&args, 0), json_arg_string(&args, 1));
+            serde_json::Value::Null
+        }
+        "GET_CONVAR" => {
+            let name = json_arg_string(&args, 0);
+            let fallback = json_arg_string(&args, 1);
+            serde_json::Value::String(
+                state
+                    .borrow::<SharedConvars>()
+                    .0
+                    .get(&name)
+                    .map_or(fallback, |v| v.value().clone()),
+            )
+        }
         "SET_GAME_TYPE" => {
             set_convar(state, "sv_gametype", json_arg_string(&args, 0));
             serde_json::Value::Null

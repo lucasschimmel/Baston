@@ -5,6 +5,7 @@ mod builtin;
 mod client;
 mod configuration;
 mod files;
+mod icon;
 // `pub` because the CFX server-list heartbeat advertises the same document
 // `/info.json` serves — one source, so the two cannot diverge.
 pub mod info;
@@ -13,6 +14,7 @@ mod resource_endpoint;
 mod stream_cache;
 
 pub use builtin::{BuiltinResources, DISPLAYINFO};
+pub use icon::{load as load_icon, IconError};
 pub use packfile_cache::PackfileCache;
 pub use stream_cache::StreamCache;
 
@@ -77,9 +79,22 @@ pub struct AppState {
     pub mesh: Option<Arc<crate::mesh::GatewayMesh>>,
     /// Resources served from inside the binary rather than from disk.
     pub builtins: BuiltinResources,
+    /// The base64 server icon, read once at boot from `[server] icon`.
+    ///
+    /// Held decoded-and-re-encoded rather than re-read per request: it is a
+    /// few kilobytes, `/info.json` is fetched by every connecting client, and
+    /// a disk read there would be on the connect path.
+    pub icon: Option<String>,
 }
 
 impl AppState {
+    /// The replicated server variables — `[server.vars]` plus whatever the
+    /// running scripts have set. See [`info::payload`] for the precedence.
+    #[must_use]
+    pub fn server_vars(&self) -> std::sync::Arc<dashmap::DashMap<String, String>> {
+        self.script_host.server_vars()
+    }
+
     /// The token `/info.json` publishes, if this server has an identity.
     ///
     /// `None` is the honest answer for a server with no CFX identity, and it

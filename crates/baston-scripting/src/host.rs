@@ -165,6 +165,36 @@ impl ScriptHost {
     /// Create the host. `deferrals` and `players` are shared with the
     /// gateway. A default net bridge is created; the gateway takes its
     /// receiving end via [`ScriptHost::spawn_with_net`].
+    /// The replicated server variables — CFX's `ConVar_ServerInfo` set.
+    ///
+    /// Everything an operator writes under `[server.vars]`, plus everything a
+    /// script writes with `SetConvarServerInfo`, `SetGameType` or
+    /// `SetMapName`. The gateway publishes this map in `/info.json` `vars`,
+    /// which is also what the server list advertises — so the engine never
+    /// needs to know the name of any individual field, exactly as FXServer
+    /// does not (`InfoHttpHandler.cpp` iterates the flag, it does not look
+    /// names up).
+    #[must_use]
+    pub fn server_vars(&self) -> Arc<DashMap<String, String>> {
+        Arc::clone(&self.convars)
+    }
+
+    /// Seed the store before any resource runs, from `[server.vars]`.
+    ///
+    /// Scripts write to the same map afterwards and win, which matches
+    /// FXServer: `sets` in a config file and `SetConvarServerInfo` at runtime
+    /// are the same store, last write wins.
+    pub fn seed_server_vars<I, K, V>(&self, entries: I)
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        for (name, value) in entries {
+            self.convars.insert(name.into(), value.into());
+        }
+    }
+
     pub fn spawn(
         deferrals: Arc<DeferralRegistry>,
         players: Arc<PlayerDirectory>,
