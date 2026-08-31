@@ -27,6 +27,23 @@ Relative to the config file rather than to the working directory, so a mounted
 `config/map.example.toml` in the repository is a working starting point — copy
 it to `config/map.toml` and edit.
 
+## Drawing one
+
+Nobody writes forty vertices by hand. `tools/zone-map-editor` builds a single
+HTML file — no install, no server — where you drop a top-down map image, draw
+rectangles, circles and traced outlines, reorder them, and export `map.toml`.
+
+```bash
+bun tools/zone-map-editor/build.mjs
+```
+
+It validates with **the server's own code**: `baston-zonemap`, the crate the
+Gateway parses maps with, compiled to WebAssembly and inlined into the page. The
+errors and warnings it shows are the Gateway's strings, and the region it names
+under your cursor is the one `region_at` would pick. A second implementation of
+these rules in JavaScript would drift, and a validator that drifts is worse than
+none.
+
 ## What a map looks like
 
 ```toml

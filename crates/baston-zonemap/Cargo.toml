@@ -1,0 +1,13 @@
+[package]
+name = "baston-zonemap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Zone geometry and the ordered region map, with no I/O and no wire types."
+
+[dependencies]
+serde = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

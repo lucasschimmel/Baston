@@ -5,12 +5,23 @@ members = ["crates/*"]
 # ignores it (see fuzz/README.md and .github/workflows/fuzz.yml).
 exclude = ["fuzz"]
 
+# Size-tuned build for the WebAssembly validator, whose bytes are inlined into
+# the map editor page. Separate from [profile.release] so tuning the blob never
+# changes how the server binaries are built.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = true
+panic = "abort"
+strip = true
+
 [workspace.package]
 version = "0.1.0-alpha"
 edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
+baston-zonemap = { path = "crates/baston-zonemap" }
 tokio = { version = "1.52", features = ["full"] }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }

@@ -36,6 +36,25 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   advertised straight into `getConfiguration` and served from memory, with no
   presence on disk and no way for a resources directory to replace it.
 
+- Added a zone map editor: `bun tools/zone-map-editor/build.mjs` produces one
+  self-contained HTML file where you drop a top-down map image, draw
+  rectangles, circles and traced outlines, reorder them, and export `map.toml`.
+  No install and no local server — tracing a city outline by flying its
+  perimeter in game was the wrong projection for authoring a 2D partition, and
+  the round trip through a server restart made every adjustment expensive.
+
+  It validates with **the server's own code**. `baston-zonemap` — the crate the
+  Gateway parses maps with — is compiled to `wasm32-unknown-unknown` and
+  inlined into the page, so the errors and warnings shown are the Gateway's
+  strings and the region named under the cursor is the one `region_at` picks. A
+  second implementation of the rules in JavaScript would drift, and a validator
+  that drifts is worse than none. The editor holds no TOML parser at all: it
+  writes documents and reads them back through the validator, so importing a
+  map cannot disagree with loading one.
+
+  The generated file is not committed, for the same reason: a stale copy would
+  validate against rules the server no longer has.
+
 - Added the zone map: an ordered list of regions in its own TOML file
   (`[meshing] map_file`), where the owner of a point is the first region that
   contains it. Regions are rectangles, circles or traced outlines, and they may
@@ -61,6 +80,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   before.
 
 ### Changed
+
+- Geometry and the zone map moved out of `baston-protocol` into their own
+  `baston-zonemap` crate, which carries only serde and toml and therefore
+  reaches WebAssembly — `baston-protocol` pulls tonic, prost and a C lz4, none
+  of which do. `baston-protocol` re-exports the types and keeps the protobuf
+  conversions, so nothing else had to learn a new crate name.
 
 - A zone's boundary scan now asks whether the ground it is about to stand on is
   still its own, instead of measuring the distance to the nearest rectangle

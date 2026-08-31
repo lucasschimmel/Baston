@@ -8,9 +8,7 @@ pub mod native;
 pub mod player_snapshot;
 pub mod players;
 pub mod rage;
-pub mod spatial;
 pub mod udp;
-pub mod zone_map;
 
 /// gRPC types + client/server stubs generated from `proto/baston.proto`
 /// by `tonic-build` (never hand-written).
@@ -28,8 +26,13 @@ pub mod mesh {
 
 pub use player_snapshot::PlayerStateSnapshot;
 pub use players::PlayerDirectory;
-pub use spatial::{Aabb, ZoneCoverage, ZoneShape};
-pub use zone_map::{MapError, Region, ZoneMap};
+// Geometry and the zone map live in `baston-zonemap`, which compiles to
+// WebAssembly so the map editor enforces the same rules the Gateway does.
+// Re-exported here because every consumer already speaks through this crate.
+pub use baston_zonemap::{
+    spatial, zone_map, Aabb, MapError, Polygon, Region, ShapeError, ZoneCoverage, ZoneMap,
+    ZoneShape,
+};
 
 impl From<Aabb> for mesh::BoundingBox {
     fn from(a: Aabb) -> Self {

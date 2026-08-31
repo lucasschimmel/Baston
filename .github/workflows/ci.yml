@@ -45,6 +45,21 @@ jobs:
       - name: rustfmt
         run: cargo fmt --all -- --check
 
+  # The map editor's validator is baston-zonemap compiled to WebAssembly, so
+  # the editor refuses exactly what the Gateway refuses. A dependency that
+  # stops reaching wasm32 breaks the tool silently — the host build and tests
+  # would still pass — so the target is built here.
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: build the zone-map validator for wasm
+        run: cargo build -p baston-zonemap-wasm --target wasm32-unknown-unknown --profile wasm-release
+
   # The four supported bundles (ADR-002). A Tier 2 capability behind a Cargo
   # feature can rot without the default build noticing, so every bundle is
   # built and tested here — that is the whole reason the bundle list is short.

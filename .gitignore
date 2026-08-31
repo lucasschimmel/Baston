@@ -21,3 +21,9 @@ baston-live-test.log
 node_modules/
 apps/**/dist/
 apps/**/.astro/
+
+# --- The zone map editor ---
+# Generated: the wasm validator is compiled and inlined into it. Committing it
+# would let a stale copy validate maps with rules the server no longer has,
+# which is the exact drift the shared crate exists to prevent.
+/tools/zone-map-editor/zone-map-editor.html

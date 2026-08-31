@@ -449,6 +449,7 @@ dependencies = [
 name = "baston-protocol"
 version = "0.1.0-alpha"
 dependencies = [
+ "baston-zonemap",
  "bincode 2.0.1",
  "bitflags",
  "dashmap",
@@ -530,6 +531,24 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "baston-zonemap"
+version = "0.1.0-alpha"
+dependencies = [
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
+name = "baston-zonemap-wasm"
+version = "0.1.0-alpha"
+dependencies = [
+ "baston-zonemap",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -204,6 +204,15 @@ impl ZoneMap {
             .map(|r| r.zone.as_str())
     }
 
+    /// Index of the first region containing the point, liveness ignored.
+    ///
+    /// The same rule [`Self::zone_at`] applies, answering with the region
+    /// rather than the zone: the map editor shows *which claim* wins under the
+    /// cursor, which is what makes an ordered list legible.
+    pub fn region_at(&self, x: f32, y: f32) -> Option<usize> {
+        self.regions.iter().position(|r| r.shape.contains(x, y))
+    }
+
     /// What `zone` owns: its own regions, and the higher-priority regions that
     /// overlap them and therefore cut into them.
     pub fn coverage_for(&self, zone: &str) -> ZoneCoverage {

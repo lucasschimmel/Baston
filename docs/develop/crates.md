@@ -161,9 +161,15 @@ FiveM client acts on them and BASTON must be the only thing that states them:
 
 ### Where a zone's territory is decided
 
-`baston-protocol::spatial` holds the geometry (`ZoneShape`, `Polygon`,
-`ZoneCoverage`) and `baston-protocol::zone_map` the ordered region list read
-from `meshing.map_file`. The Gateway is the only process that reads the file:
+`baston-zonemap` holds the geometry (`ZoneShape`, `Polygon`, `ZoneCoverage`)
+and the ordered region list read from `meshing.map_file`. It is its own crate,
+with only serde and toml, so it reaches `wasm32-unknown-unknown`: the map
+editor in `tools/zone-map-editor` compiles it to WebAssembly and enforces
+exactly what the Gateway enforces, rather than a JavaScript reimplementation
+that would drift. `baston-protocol` re-exports the types and owns the protobuf
+conversions, which is why nothing else had to learn a new crate name.
+
+The Gateway is the only process that reads the file:
 `ZoneRegistry` resolves ownership through it and hands each zone its
 `ZoneCoverage` in the `RegisterZone` reply.
 

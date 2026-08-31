@@ -1,0 +1,767 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BASTON zone map editor</title>
+<style>
+  :root {
+    --bg: #14161a;
+    --panel: #1c1f25;
+    --line: #2c313a;
+    --ink: #e6e9ef;
+    --muted: #949cab;
+    --accent: #6ea8fe;
+    --ok: #6bcf8e;
+    --warn: #e8c468;
+    --bad: #f0736a;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex;
+    background: var(--bg); color: var(--ink); font-size: 13px;
+  }
+  #stage { flex: 1; position: relative; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
+  #readout {
+    position: absolute; left: 12px; bottom: 12px;
+    background: #000a; padding: 6px 10px; border-radius: 6px;
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    font-size: 12px; pointer-events: none; white-space: pre;
+  }
+  #hint {
+    position: absolute; left: 12px; top: 12px;
+    background: #000a; padding: 6px 10px; border-radius: 6px;
+    color: var(--muted); pointer-events: none; max-width: 60ch;
+  }
+  aside {
+    width: 380px; flex: none; border-left: 1px solid var(--line);
+    background: var(--panel); display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  aside section { border-bottom: 1px solid var(--line); padding: 10px 12px; }
+  aside h2 {
+    margin: 0 0 8px; font-size: 11px; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--muted); font-weight: 600;
+  }
+  button {
+    background: #262b33; color: var(--ink); border: 1px solid var(--line);
+    border-radius: 5px; padding: 5px 9px; cursor: pointer; font-size: 12px;
+  }
+  button:hover { background: #2f353f; }
+  button.on { background: var(--accent); color: #10131a; border-color: var(--accent); }
+  button.tiny { padding: 2px 6px; font-size: 11px; line-height: 1.4; }
+  input, textarea {
+    background: #12141a; color: var(--ink); border: 1px solid var(--line);
+    border-radius: 5px; padding: 4px 6px; font-size: 12px; width: 100%;
+  }
+  textarea {
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    font-size: 11px; resize: vertical; white-space: pre; overflow-wrap: normal;
+  }
+  .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
+  .grid4 label { font-size: 10px; color: var(--muted); display: block; }
+  #regions { flex: 1; overflow-y: auto; padding: 6px; min-height: 120px; }
+  .region {
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px;
+    margin-bottom: 5px; background: #191d23; cursor: pointer;
+  }
+  .region.sel { border-color: var(--accent); background: #1e2530; }
+  .region .top { display: flex; align-items: center; gap: 6px; }
+  .swatch { width: 11px; height: 11px; border-radius: 3px; flex: none; }
+  .region .kind { color: var(--muted); font-size: 11px; margin-left: auto; }
+  .region .fields { display: none; margin-top: 6px; gap: 5px; }
+  .region.sel .fields { display: grid; grid-template-columns: 1fr 1fr; }
+  .region .fields label { font-size: 10px; color: var(--muted); }
+  .prio { color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px; }
+  #status { padding: 8px 12px; font-size: 12px; line-height: 1.5; }
+  #status.ok { color: var(--ok); }
+  #status .err { color: var(--bad); }
+  #status .warn { color: var(--warn); display: block; margin-top: 4px; }
+  .muted { color: var(--muted); }
+  code { font-family: ui-monospace, Consolas, monospace; background: #12141a; padding: 1px 4px; border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <canvas id="cv"></canvas>
+  <div id="hint"></div>
+  <div id="readout"></div>
+</div>
+
+<aside>
+  <section>
+    <h2>Map image</h2>
+    <div class="row">
+      <input type="file" id="img" accept="image/*" style="flex:1">
+    </div>
+    <div class="grid4" style="margin-top:8px">
+      <div><label>west X</label><input id="ex0" type="number" value="-4000"></div>
+      <div><label>south Y</label><input id="ey0" type="number" value="-4000"></div>
+      <div><label>east X</label><input id="ex1" type="number" value="4500"></div>
+      <div><label>north Y</label><input id="ey1" type="number" value="8000"></div>
+    </div>
+    <p class="muted" style="margin:6px 0 0">
+      World coordinates of the image edges. Point at a landmark you know and
+      adjust until the readout matches.
+    </p>
+  </section>
+
+  <section>
+    <h2>Draw</h2>
+    <div class="row">
+      <button id="t-select" class="on">Select</button>
+      <button id="t-rect">Rect</button>
+      <button id="t-circle">Circle</button>
+      <button id="t-poly">Polygon</button>
+      <button id="t-every">+ catch-all</button>
+    </div>
+  </section>
+
+  <section style="display:flex;flex-direction:column;flex:1;min-height:0;padding:0">
+    <h2 style="padding:10px 12px 0;margin-bottom:6px">
+      Regions — first match wins
+    </h2>
+    <div id="regions"></div>
+  </section>
+
+  <section>
+    <h2>Validation — the server's own</h2>
+    <div id="status">…</div>
+  </section>
+
+  <section>
+    <h2>map.toml</h2>
+    <textarea id="toml" rows="9" spellcheck="false"></textarea>
+    <div class="row" style="margin-top:6px">
+      <button id="dl">Download</button>
+      <button id="imp">Load from text above</button>
+      <input type="file" id="impf" accept=".toml,text/plain" style="display:none">
+      <button id="impfb">Open file…</button>
+    </div>
+  </section>
+</aside>
+
+<script>
+// ---------------------------------------------------------------------------
+// The validator. Compiled from the same Rust the Gateway runs, so a map this
+// page accepts is a map the server accepts — there is no second implementation
+// of the rules to drift out of step.
+// ---------------------------------------------------------------------------
+const WASM_BASE64 = "__WASM_BASE64__";
+
+let wasm = null;
+
+async function initWasm() {
+  const binary = Uint8Array.from(atob(WASM_BASE64), c => c.charCodeAt(0));
+  const { instance } = await WebAssembly.instantiate(binary, {});
+  wasm = instance.exports;
+}
+
+/** Hand a document to the validator and read its report back. */
+function wasmLoad(text) {
+  const bytes = new TextEncoder().encode(text);
+  const ptr = wasm.bz_alloc(bytes.length);
+  new Uint8Array(wasm.memory.buffer, ptr, bytes.length).set(bytes);
+  const len = wasm.bz_load(ptr, bytes.length);
+  const out = new Uint8Array(wasm.memory.buffer, wasm.bz_result_ptr(), len);
+  const report = JSON.parse(new TextDecoder().decode(out));
+  wasm.bz_free(ptr, bytes.length);
+  return report;
+}
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+const state = {
+  regions: [],            // the ordered list; index IS the priority
+  sel: -1,
+  tool: 'select',
+  view: { cx: 250, cy: -1000, scale: 0.06 },
+  image: null,
+  extent: { x0: -4000, y0: -4000, x1: 4500, y1: 8000 },
+  draft: null,            // shape being drawn
+  drag: null,             // handle being dragged
+  hover: -1,              // region under the cursor, per the validator
+  cursor: { x: 0, y: 0 },
+  report: null,
+};
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+
+// ---------------------------------------------------------------------------
+// World ↔ screen. World Y grows north; the canvas grows south, so it flips.
+// ---------------------------------------------------------------------------
+function toScreen(x, y) {
+  return [
+    (x - state.view.cx) * state.view.scale + cv.width / 2,
+    -(y - state.view.cy) * state.view.scale + cv.height / 2,
+  ];
+}
+function toWorld(sx, sy) {
+  return [
+    (sx - cv.width / 2) / state.view.scale + state.view.cx,
+    -(sy - cv.height / 2) / state.view.scale + state.view.cy,
+  ];
+}
+
+/** Stable colour per zone id, so the same zone reads the same everywhere. */
+function zoneColour(zone) {
+  let h = 0;
+  for (const c of zone) h = (h * 31 + c.charCodeAt(0)) % 360;
+  return `hsl(${h} 70% 60%)`;
+}
+
+// ---------------------------------------------------------------------------
+// The document. JS only ever *writes* TOML; reading it back is the validator's
+// job, which is why importing a map cannot disagree with loading one.
+// ---------------------------------------------------------------------------
+function num(n) {
+  return Number.isFinite(n) ? (Math.round(n * 10) / 10).toFixed(1) : '0.0';
+}
+
+function regionToToml(r) {
+  const head = `[[region]]\nname = ${JSON.stringify(r.name)}\nzone = ${JSON.stringify(r.zone)}\n`;
+  if (r.shape === 'rect') {
+    const b = r.bounds;
+    return head + `shape = "rect"\nbounds = [${b.map(num).join(', ')}]\n`;
+  }
+  if (r.shape === 'circle') {
+    return head + `shape = "circle"\ncenter = [${num(r.center[0])}, ${num(r.center[1])}]\n`
+      + `radius = ${num(r.radius)}\n`;
+  }
+  if (r.shape === 'poly') {
+    const pts = r.points.map(p => `  [${num(p[0])}, ${num(p[1])}],`).join('\n');
+    return head + `shape = "poly"\npoints = [\n${pts}\n]\n`;
+  }
+  return head + 'shape = "everywhere"\n';
+}
+
+function toToml(regions = state.regions) {
+  const header = '# BASTON zone map. The owner of a point is the FIRST region\n'
+    + '# below that contains it, so the order of this file is the priority.\n\n';
+  return header + regions.map(regionToToml).join('\n');
+}
+
+/** Normalise a rect so x_min < x_max and y_min < y_max whichever way it was drawn. */
+function fixRect(b) {
+  return [Math.min(b[0], b[2]), Math.min(b[1], b[3]), Math.max(b[0], b[2]), Math.max(b[1], b[3])];
+}
+
+// ---------------------------------------------------------------------------
+// Validation + hit testing, both through the validator
+// ---------------------------------------------------------------------------
+function revalidate() {
+  const doc = toToml();
+  document.getElementById('toml').value = doc;
+  state.report = wasmLoad(doc);
+
+  // Hit testing needs a *loadable* map, and a map under construction usually
+  // has no catch-all yet. Load a copy with one appended so the cursor can be
+  // answered while the real document is still incomplete; anything landing on
+  // that spare region belongs to nobody.
+  //
+  // Only when one is missing: appending a second `everywhere` would put one
+  // before the end, which the validator rightly refuses — and hit testing
+  // would then break on exactly the maps that are finished.
+  const last = state.regions[state.regions.length - 1];
+  const needsSpare = last?.shape !== 'everywhere';
+  const probeDoc = needsSpare
+    ? [...state.regions, { name: '__none__', zone: '__none__', shape: 'everywhere' }]
+    : state.regions;
+  state.probeOk = wasmLoad(toToml(probeDoc)).ok;
+  state.spareIndex = needsSpare ? state.regions.length : -1;
+
+  // `hover` is an index, and inserting or reordering moves what an index means.
+  // Ask again rather than keep a number that now points at a different region.
+  state.hover = ownerAt(state.cursor.x, state.cursor.y);
+
+  renderStatus();
+  renderList();
+  draw();
+}
+
+function ownerAt(x, y) {
+  if (!state.probeOk) return -1;
+  const i = wasm.bz_region_at(x, y);
+  return i === state.spareIndex ? -1 : i;
+}
+
+function renderStatus() {
+  const el = document.getElementById('status');
+  const r = state.report;
+  if (!r) { el.textContent = '…'; return; }
+  el.className = r.ok ? 'ok' : '';
+  if (!r.ok) {
+    el.innerHTML = `<span class="err">${escapeHtml(r.error || 'invalid')}</span>`;
+    return;
+  }
+  let html = `The Gateway would accept this map.`;
+  for (const w of r.warnings) {
+    html += `<span class="warn">⚠ ${escapeHtml(w)}</span>`;
+  }
+  el.innerHTML = html;
+}
+
+// Quotes included: region names land inside `value="…"` attributes, and a name
+// carrying a quote would otherwise end the attribute early.
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+// ---------------------------------------------------------------------------
+// Region list. Top to bottom IS highest to lowest priority.
+// ---------------------------------------------------------------------------
+function renderList() {
+  const box = document.getElementById('regions');
+  box.innerHTML = '';
+  state.regions.forEach((r, i) => {
+    const el = document.createElement('div');
+    el.className = 'region' + (i === state.sel ? ' sel' : '');
+    el.innerHTML = `
+      <div class="top">
+        <span class="prio">${i + 1}</span>
+        <span class="swatch" style="background:${zoneColour(r.zone)}"></span>
+        <strong>${escapeHtml(r.name)}</strong>
+        <span class="kind">${r.shape}</span>
+      </div>
+      <div class="fields">
+        <div><label>name</label><input data-f="name" value="${escapeHtml(r.name)}"></div>
+        <div><label>zone</label><input data-f="zone" value="${escapeHtml(r.zone)}"></div>
+        <div class="row" style="grid-column:1/3;margin-top:2px">
+          <button class="tiny" data-a="up">↑</button>
+          <button class="tiny" data-a="down">↓</button>
+          <button class="tiny" data-a="del" style="margin-left:auto">Delete</button>
+        </div>
+      </div>`;
+    el.onclick = e => {
+      if (e.target.tagName === 'INPUT') return;
+      const act = e.target.dataset?.a;
+      if (act === 'up' && i > 0) { swap(i, i - 1); return; }
+      if (act === 'down' && i < state.regions.length - 1) { swap(i, i + 1); return; }
+      if (act === 'del') { state.regions.splice(i, 1); state.sel = -1; revalidate(); return; }
+      state.sel = i; renderList(); draw();
+    };
+    el.querySelectorAll('input[data-f]').forEach(inp => {
+      inp.oninput = () => { r[inp.dataset.f] = inp.value; revalidate(); };
+    });
+    box.appendChild(el);
+  });
+}
+
+function swap(a, b) {
+  [state.regions[a], state.regions[b]] = [state.regions[b], state.regions[a]];
+  state.sel = b;
+  revalidate();
+}
+
+// ---------------------------------------------------------------------------
+// Drawing
+// ---------------------------------------------------------------------------
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = cv.clientWidth * dpr;
+  cv.height = cv.clientHeight * dpr;
+  draw();
+}
+
+function shapePath(r) {
+  ctx.beginPath();
+  if (r.shape === 'rect') {
+    const [a, b] = [toScreen(r.bounds[0], r.bounds[1]), toScreen(r.bounds[2], r.bounds[3])];
+    ctx.rect(Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1]));
+  } else if (r.shape === 'circle') {
+    const c = toScreen(r.center[0], r.center[1]);
+    ctx.arc(c[0], c[1], r.radius * state.view.scale, 0, Math.PI * 2);
+  } else if (r.shape === 'poly') {
+    r.points.forEach((p, i) => {
+      const s = toScreen(p[0], p[1]);
+      i ? ctx.lineTo(s[0], s[1]) : ctx.moveTo(s[0], s[1]);
+    });
+    ctx.closePath();
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = '#0f1115';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+
+  if (state.image) {
+    const e = state.extent;
+    const tl = toScreen(e.x0, e.y1);
+    const br = toScreen(e.x1, e.y0);
+    ctx.globalAlpha = 0.85;
+    ctx.drawImage(state.image, tl[0], tl[1], br[0] - tl[0], br[1] - tl[1]);
+    ctx.globalAlpha = 1;
+  }
+
+  // Painted bottom-up so the higher-priority region draws on top — the same
+  // order in which it wins.
+  for (let i = state.regions.length - 1; i >= 0; i--) {
+    const r = state.regions[i];
+    if (r.shape === 'everywhere') continue;
+    const colour = zoneColour(r.zone);
+    shapePath(r);
+    ctx.fillStyle = colour;
+    ctx.globalAlpha = i === state.sel ? 0.34 : (i === state.hover ? 0.26 : 0.16);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = colour;
+    ctx.lineWidth = i === state.sel ? 2.5 : 1.4;
+    ctx.stroke();
+  }
+
+  if (state.sel >= 0) drawHandles(state.regions[state.sel]);
+  if (state.draft) drawDraft();
+  drawReadout();
+}
+
+function handles(r) {
+  if (r.shape === 'rect') {
+    const [x0, y0, x1, y1] = r.bounds;
+    return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+  }
+  if (r.shape === 'circle') {
+    return [r.center, [r.center[0] + r.radius, r.center[1]]];
+  }
+  if (r.shape === 'poly') return r.points;
+  return [];
+}
+
+function drawHandles(r) {
+  ctx.fillStyle = '#fff';
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = 1;
+  for (const h of handles(r)) {
+    const s = toScreen(h[0], h[1]);
+    ctx.beginPath();
+    ctx.arc(s[0], s[1], 4.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+}
+
+function drawDraft() {
+  const d = state.draft;
+  ctx.strokeStyle = '#6ea8fe';
+  ctx.lineWidth = 1.6;
+  ctx.setLineDash([5, 4]);
+  ctx.beginPath();
+  if (d.shape === 'rect' && d.bounds) {
+    const [a, b] = [toScreen(d.bounds[0], d.bounds[1]), toScreen(d.bounds[2], d.bounds[3])];
+    ctx.rect(Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1]));
+  } else if (d.shape === 'circle') {
+    const c = toScreen(d.center[0], d.center[1]);
+    ctx.arc(c[0], c[1], Math.max(d.radius * state.view.scale, 1), 0, Math.PI * 2);
+  } else if (d.shape === 'poly') {
+    const pts = [...d.points, [state.cursor.x, state.cursor.y]];
+    pts.forEach((p, i) => {
+      const s = toScreen(p[0], p[1]);
+      i ? ctx.lineTo(s[0], s[1]) : ctx.moveTo(s[0], s[1]);
+    });
+  }
+  ctx.stroke();
+  ctx.setLineDash([]);
+  if (d.shape === 'poly') {
+    ctx.fillStyle = '#6ea8fe';
+    for (const p of d.points) {
+      const s = toScreen(p[0], p[1]);
+      ctx.beginPath();
+      ctx.arc(s[0], s[1], 3.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+}
+
+function drawReadout() {
+  const owner = state.hover >= 0 ? state.regions[state.hover] : null;
+  document.getElementById('readout').textContent =
+    `x ${state.cursor.x.toFixed(1)}   y ${state.cursor.y.toFixed(1)}\n`
+    + `owner: ${owner ? `${owner.zone}  (${owner.name})` : '— nobody —'}`;
+}
+
+const HINTS = {
+  select: 'Click a region to select it, then drag its handles. Wheel zooms, right-drag pans.',
+  rect: 'Drag a rectangle.',
+  circle: 'Click the centre, drag out the radius.',
+  poly: 'Click each vertex. Enter or double-click closes it, Backspace undoes, Escape cancels.',
+};
+function renderHint() {
+  document.getElementById('hint').textContent = HINTS[state.tool] || '';
+}
+
+// ---------------------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------------------
+function eventWorld(e) {
+  const rect = cv.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  return toWorld((e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr);
+}
+
+let panning = null;
+
+cv.addEventListener('contextmenu', e => e.preventDefault());
+
+cv.addEventListener('mousedown', e => {
+  const [x, y] = eventWorld(e);
+  if (e.button === 2 || e.button === 1) {
+    panning = { x: e.clientX, y: e.clientY, cx: state.view.cx, cy: state.view.cy };
+    return;
+  }
+
+  if (state.tool === 'select') {
+    if (state.sel >= 0) {
+      const r = state.regions[state.sel];
+      const hs = handles(r);
+      const grab = 8 / state.view.scale;
+      for (let i = 0; i < hs.length; i++) {
+        if (Math.hypot(hs[i][0] - x, hs[i][1] - y) < grab) {
+          state.drag = { region: state.sel, handle: i };
+          return;
+        }
+      }
+    }
+    state.sel = ownerAt(x, y);
+    renderList();
+    draw();
+    return;
+  }
+
+  if (state.tool === 'rect') {
+    state.draft = { shape: 'rect', bounds: [x, y, x, y] };
+  } else if (state.tool === 'circle') {
+    state.draft = { shape: 'circle', center: [x, y], radius: 0 };
+  } else if (state.tool === 'poly') {
+    if (!state.draft) state.draft = { shape: 'poly', points: [] };
+    state.draft.points.push([x, y]);
+  }
+  draw();
+});
+
+cv.addEventListener('mousemove', e => {
+  const [x, y] = eventWorld(e);
+  state.cursor = { x, y };
+
+  if (panning) {
+    const dpr = window.devicePixelRatio || 1;
+    state.view.cx = panning.cx - (e.clientX - panning.x) * dpr / state.view.scale;
+    state.view.cy = panning.cy + (e.clientY - panning.y) * dpr / state.view.scale;
+    draw();
+    return;
+  }
+
+  if (state.drag) {
+    applyHandle(state.regions[state.drag.region], state.drag.handle, x, y);
+    draw();
+    return;
+  }
+
+  const d = state.draft;
+  if (d?.shape === 'rect') { d.bounds[2] = x; d.bounds[3] = y; }
+  if (d?.shape === 'circle') d.radius = Math.hypot(x - d.center[0], y - d.center[1]);
+
+  state.hover = ownerAt(x, y);
+  draw();
+});
+
+window.addEventListener('mouseup', () => {
+  if (panning) { panning = null; return; }
+  if (state.drag) { state.drag = null; revalidate(); return; }
+  const d = state.draft;
+  if (d?.shape === 'rect') { d.bounds = fixRect(d.bounds); commitDraft(); }
+  else if (d?.shape === 'circle' && d.radius > 0) commitDraft();
+});
+
+cv.addEventListener('dblclick', () => {
+  if (state.draft?.shape === 'poly') commitDraft();
+});
+
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  const [wx, wy] = eventWorld(e);
+  const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+  state.view.scale = Math.min(4, Math.max(0.005, state.view.scale * factor));
+  // Zoom toward the cursor: keep the world point under it fixed.
+  const [ax, ay] = eventWorld(e);
+  state.view.cx += wx - ax;
+  state.view.cy += wy - ay;
+  draw();
+}, { passive: false });
+
+window.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.key === 'Escape') { state.draft = null; draw(); }
+  if (e.key === 'Enter' && state.draft?.shape === 'poly') commitDraft();
+  if (e.key === 'Backspace' && state.draft?.shape === 'poly') {
+    state.draft.points.pop();
+    draw();
+  }
+  if (e.key === 'Delete' && state.sel >= 0) {
+    state.regions.splice(state.sel, 1);
+    state.sel = -1;
+    revalidate();
+  }
+});
+
+function applyHandle(r, i, x, y) {
+  if (r.shape === 'rect') {
+    const b = r.bounds;
+    if (i === 0) { b[0] = x; b[1] = y; }
+    if (i === 1) { b[2] = x; b[1] = y; }
+    if (i === 2) { b[2] = x; b[3] = y; }
+    if (i === 3) { b[0] = x; b[3] = y; }
+    r.bounds = fixRect(b);
+  } else if (r.shape === 'circle') {
+    if (i === 0) r.center = [x, y];
+    else r.radius = Math.max(1, Math.hypot(x - r.center[0], y - r.center[1]));
+  } else if (r.shape === 'poly') {
+    r.points[i] = [x, y];
+  }
+}
+
+let untitled = 0;
+
+function commitDraft() {
+  const d = state.draft;
+  state.draft = null;
+  if (!d) return;
+  if (d.shape === 'rect' && (d.bounds[2] - d.bounds[0] < 1 || d.bounds[3] - d.bounds[1] < 1)) return;
+  if (d.shape === 'poly' && d.points.length < 3) return;
+
+  const zone = state.regions.length ? state.regions[state.regions.length - 1].zone : 'zone-a';
+  d.name = `region-${++untitled}`;
+  d.zone = zone;
+  // New regions go on top: a shape you just drew inside another one is almost
+  // always meant to win, and the list makes the choice visible either way.
+  state.regions.unshift(d);
+  state.sel = 0;
+  revalidate();
+}
+
+// ---------------------------------------------------------------------------
+// Panel wiring
+// ---------------------------------------------------------------------------
+// Buttons keep focus after a click, and a focused button answers Enter and
+// Space itself. Picking the polygon tool and then pressing Enter to close the
+// outline would re-activate the tool and throw the outline away.
+function releaseFocus(el) {
+  el.blur();
+}
+
+for (const [id, tool] of [['t-select', 'select'], ['t-rect', 'rect'], ['t-circle', 'circle'], ['t-poly', 'poly']]) {
+  document.getElementById(id).onclick = e => {
+    state.tool = tool;
+    state.draft = null;
+    for (const b of document.querySelectorAll('aside button')) b.classList.remove('on');
+    document.getElementById(id).classList.add('on');
+    releaseFocus(e.currentTarget);
+    renderHint();
+    draw();
+  };
+}
+
+document.getElementById('t-every').onclick = e => {
+  releaseFocus(e.currentTarget);
+  if (state.regions.some(r => r.shape === 'everywhere')) return;
+  // Always last: it is what makes a gap impossible, and anything after it
+  // would be unreachable.
+  state.regions.push({ name: 'the-rest', zone: 'zone-country', shape: 'everywhere' });
+  revalidate();
+};
+
+document.getElementById('img').onchange = e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const img = new Image();
+  img.onload = () => { state.image = img; draw(); };
+  img.src = URL.createObjectURL(file);
+};
+
+for (const [id, key] of [['ex0', 'x0'], ['ey0', 'y0'], ['ex1', 'x1'], ['ey1', 'y1']]) {
+  document.getElementById(id).oninput = e => {
+    const v = parseFloat(e.target.value);
+    if (Number.isFinite(v)) { state.extent[key] = v; draw(); }
+  };
+}
+
+document.getElementById('dl').onclick = () => {
+  const blob = new Blob([toToml()], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'map.toml';
+  a.click();
+};
+
+/** Rebuild the editor's state from a document, via the validator. */
+function importToml(text) {
+  const report = wasmLoad(text);
+  if (!report.ok) {
+    state.report = report;
+    renderStatus();
+    return;
+  }
+  state.regions = report.regions.map(r => {
+    const base = { name: r.name, zone: r.zone, shape: r.shape };
+    if (r.shape === 'rect') base.bounds = r.bounds;
+    if (r.shape === 'circle') { base.center = r.center; base.radius = r.radius; }
+    if (r.shape === 'poly') base.points = r.points;
+    return base;
+  });
+  state.sel = -1;
+  fitToRegions();
+  revalidate();
+}
+
+document.getElementById('imp').onclick = () => importToml(document.getElementById('toml').value);
+document.getElementById('impfb').onclick = () => document.getElementById('impf').click();
+document.getElementById('impf').onchange = e => {
+  const file = e.target.files[0];
+  if (file) file.text().then(importToml);
+};
+
+/** Frame everything that has a finite extent. */
+function fitToRegions() {
+  let box = null;
+  const grow = (x, y) => {
+    box = box ? [Math.min(box[0], x), Math.min(box[1], y), Math.max(box[2], x), Math.max(box[3], y)]
+               : [x, y, x, y];
+  };
+  for (const r of state.regions) {
+    if (r.shape === 'rect') { grow(r.bounds[0], r.bounds[1]); grow(r.bounds[2], r.bounds[3]); }
+    if (r.shape === 'circle') {
+      grow(r.center[0] - r.radius, r.center[1] - r.radius);
+      grow(r.center[0] + r.radius, r.center[1] + r.radius);
+    }
+    if (r.shape === 'poly') for (const p of r.points) grow(p[0], p[1]);
+  }
+  if (!box) return;
+  state.view.cx = (box[0] + box[2]) / 2;
+  state.view.cy = (box[1] + box[3]) / 2;
+  const span = Math.max(box[2] - box[0], box[3] - box[1], 100);
+  state.view.scale = Math.min(cv.width, cv.height) * 0.8 / span;
+}
+
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+window.addEventListener('resize', resize);
+
+initWasm().then(() => {
+  resize();
+  renderHint();
+  revalidate();
+}).catch(err => {
+  document.getElementById('status').innerHTML =
+    `<span class="err">the validator failed to start: ${escapeHtml(err)}</span>`;
+});
+</script>
+</body>
+</html>
