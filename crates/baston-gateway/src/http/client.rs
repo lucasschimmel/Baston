@@ -53,6 +53,11 @@ fn peer_ip(headers: &HeaderMap) -> String {
 }
 
 /// Resolve the connecting player's identifiers: dev bypass or real CFX auth.
+// The error is a ready-made `Response` the caller returns as-is. It is 128
+// bytes, which trips `result_large_err` from Rust 1.98 on, but boxing it would
+// only be undone one frame later — a handler must hand axum a `Response`. This
+// runs once per connecting player, not on a hot path.
+#[allow(clippy::result_large_err)]
 async fn authenticate(
     state: &AppState,
     body: &str,

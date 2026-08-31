@@ -205,6 +205,9 @@ fn disk_body(state: DiskStream) -> Body {
     Body::from_stream(chunks)
 }
 
+// Same as `client::authenticate`: the error is the `Response` the caller
+// returns unchanged, so boxing it buys nothing.
+#[allow(clippy::result_large_err)]
 async fn acquire_download(state: &AppState) -> Result<DownloadPermit, Response> {
     match tokio::time::timeout(
         state.downloads.timeout,
