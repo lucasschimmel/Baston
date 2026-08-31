@@ -103,7 +103,7 @@ async fn fixture(audit: AuditLog, with_mesh: bool) -> Fixture {
     let observability = script_host.observability();
     let resource_manager = ResourceManager::new(script_host, dir.path().to_owned());
     resource_manager.discover().await.unwrap();
-    resource_manager.start_all().await.unwrap();
+    resource_manager.start_all().await;
 
     players.insert(PlayerInfo {
         source: 7,

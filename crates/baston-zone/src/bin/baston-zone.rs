@@ -101,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
         ScriptHost::spawn_with_net(Arc::clone(&deferrals), Arc::clone(&players), net_bridge)?;
     let resource_manager = ResourceManager::new(script_host.clone(), config.resources.path.clone());
     resource_manager.discover().await?;
-    resource_manager.start_all().await?;
+    resource_manager.start_all().await;
     let _watcher = if config.dev.hot_reload {
         Some(spawn_hot_reload(Arc::clone(&resource_manager))?)
     } else {

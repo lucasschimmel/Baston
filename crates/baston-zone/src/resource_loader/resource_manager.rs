@@ -11,7 +11,7 @@ use baston_scripting::{Observability, ScriptHost, ScriptResourceState, ScriptSou
 use tokio::sync::Mutex;
 
 use super::manifest::{discover, DiscoveredResource};
-use super::topo::topo_sort;
+use super::topo::plan;
 use crate::ZoneError;
 
 /// Lifecycle state of a resource.
@@ -27,6 +27,37 @@ pub enum ResourceState {
 struct ResourceEntry {
     discovered: DiscoveredResource,
     state: ResourceState,
+}
+
+/// What happened to each resource during startup.
+#[derive(Debug, Default)]
+pub struct StartReport {
+    pub started: Vec<String>,
+    /// `(resource, why)` — it tried and could not, or could never have.
+    pub failed: Vec<(String, String)>,
+    /// `(resource, why)` — a dependency did not come up.
+    pub skipped: Vec<(String, String)>,
+}
+
+impl StartReport {
+    /// One line the operator can act on, rather than a wall they must read.
+    pub fn log(&self) {
+        let (started, failed, skipped) =
+            (self.started.len(), self.failed.len(), self.skipped.len());
+        if failed == 0 && skipped == 0 {
+            tracing::info!(target: "resources", "{started} resource(s) started");
+            return;
+        }
+        let names: Vec<&str> = self
+            .failed
+            .iter()
+            .chain(&self.skipped)
+            .map(|(n, _)| n.as_str())
+            .collect();
+        tracing::warn!(target: "resources",
+            "{started} resource(s) started, {} not running: {}",
+            failed + skipped, names.join(", "));
+    }
 }
 
 /// Manages every resource under the configured `resources/` directory.
@@ -116,7 +147,15 @@ impl ResourceManager {
     }
 
     /// Start every discovered resource in dependency order.
-    pub async fn start_all(&self) -> Result<(), ZoneError> {
+    ///
+    /// Never fails. A resource that cannot start is recorded, reported and
+    /// skipped, because a server that dies when one script has a syntax error
+    /// is a server any single bad resource can deny — and the resource that
+    /// broke is usually the least important one running.
+    ///
+    /// Whatever depended on a failed resource is skipped rather than started
+    /// into a world its dependency never built.
+    pub async fn start_all(&self) -> StartReport {
         let graph: HashMap<String, Vec<String>> = {
             let resources = self.resources.lock().await;
             resources
@@ -124,10 +163,68 @@ impl ResourceManager {
                 .map(|(name, e)| (name.clone(), e.discovered.manifest.dependencies.clone()))
                 .collect()
         };
-        for name in topo_sort(&graph)? {
-            self.start(&name).await?;
+
+        let plan = plan(&graph);
+        let mut report = StartReport::default();
+        for (name, why) in plan.unsatisfiable {
+            tracing::error!(target: "resources", resource = %name, "not started: {why}");
+            self.mark_failed(&name).await;
+            report.failed.push((name, why));
         }
-        Ok(())
+
+        // name -> who waits on it, so one failure can carry forward.
+        let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+        for (name, deps) in &graph {
+            for dep in deps {
+                dependents.entry(dep).or_default().push(name);
+            }
+        }
+        let mut blocked: HashMap<String, String> = HashMap::new();
+
+        for name in plan.order {
+            if let Some(why) = blocked.get(&name) {
+                tracing::warn!(target: "resources", resource = %name, "not started: {why}");
+                self.mark_failed(&name).await;
+                report.skipped.push((name.clone(), why.clone()));
+                continue;
+            }
+            match self.start(&name).await {
+                Ok(()) => report.started.push(name),
+                Err(e) => {
+                    tracing::error!(target: "resources", resource = %name, error = %e,
+                        "resource failed to start — skipping it, the server stays up");
+                    metrics::counter!("resource_start_failures_total").increment(1);
+                    self.mark_failed(&name).await;
+                    for &dependent in dependents
+                        .get(name.as_str())
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[])
+                    {
+                        blocked
+                            .entry(dependent.to_owned())
+                            .or_insert_with(|| format!("{name} failed to start"));
+                    }
+                    report.failed.push((name, e.to_string()));
+                }
+            }
+        }
+        report.log();
+        report
+    }
+
+    /// Record that a resource is not running, in both registries.
+    ///
+    /// Scripts see `stopped` rather than an error state, because FiveM has no
+    /// error state: `GetResourceState` answers started/stopped/missing, and a
+    /// resource that failed to start is one that is not running. Inventing a
+    /// value here would only be a value no script knows how to read.
+    async fn mark_failed(&self, name: &str) {
+        if let Some(entry) = self.resources.lock().await.get_mut(name) {
+            entry.state = ResourceState::Error;
+        }
+        self.script_host
+            .resources()
+            .set_state(name, ScriptResourceState::Stopped);
     }
 
     /// Start one resource: read its server scripts and load them into a

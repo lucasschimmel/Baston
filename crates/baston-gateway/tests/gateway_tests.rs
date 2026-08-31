@@ -82,7 +82,7 @@ async fn app_with_config(
     script_host.seed_server_vars(config.server.vars.clone());
     let resource_manager = ResourceManager::new(script_host.clone(), dir.to_owned());
     resource_manager.discover().await.unwrap();
-    resource_manager.start_all().await.unwrap();
+    resource_manager.start_all().await;
 
     let auth = baston_gateway::AuthService::new(&config.auth).unwrap();
     router(Arc::new(AppState {

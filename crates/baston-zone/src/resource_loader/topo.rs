@@ -67,6 +67,143 @@ pub fn topo_sort(resources: &HashMap<String, Vec<String>>) -> Result<Vec<String>
     Ok(ordered)
 }
 
+/// A start order, and the resources that cannot have one.
+///
+/// Separating them is the point: a manifest naming a dependency nobody
+/// installed, or two resources waiting on each other, used to fail the whole
+/// startup. Only the resources actually involved are unstartable — the rest of
+/// the server has no reason to care.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct StartPlan {
+    /// Startable resources, dependencies first.
+    pub order: Vec<String>,
+    /// `(resource, why)` for those that can never start as configured.
+    pub unsatisfiable: Vec<(String, String)>,
+}
+
+/// Order what can be ordered, and say what cannot.
+///
+/// Unlike [`topo_sort`], this never fails. A resource whose dependency is
+/// missing is dropped along with everything that waits on it, and whatever
+/// remains in a cycle is dropped too; both are reported rather than raised.
+pub fn plan(resources: &HashMap<String, Vec<String>>) -> StartPlan {
+    let mut unsatisfiable: Vec<(String, String)> = Vec::new();
+    let mut remaining: HashMap<String, Vec<String>> = resources.clone();
+
+    // Drop resources with a dependency nobody installed, then whatever was
+    // waiting on them, until the set stops shrinking.
+    loop {
+        let doomed: Vec<(String, String)> = remaining
+            .iter()
+            .filter_map(|(name, deps)| {
+                let missing = deps.iter().find(|d| !remaining.contains_key(*d))?;
+                Some((name.clone(), missing.clone()))
+            })
+            .collect();
+        if doomed.is_empty() {
+            break;
+        }
+        for (name, missing) in doomed {
+            remaining.remove(&name);
+            unsatisfiable.push((
+                name,
+                format!("depends on {missing:?}, which is not installed"),
+            ));
+        }
+    }
+
+    match topo_sort(&remaining) {
+        Ok(order) => {
+            unsatisfiable.sort_unstable();
+            StartPlan {
+                order,
+                unsatisfiable,
+            }
+        }
+        Err(ZoneError::CyclicDependency(cycle)) => {
+            // Only the cycle is unstartable; sorting without it succeeds.
+            for name in &cycle {
+                remaining.remove(name);
+                unsatisfiable.push((
+                    name.clone(),
+                    format!("in a dependency cycle: {}", cycle.join(" -> ")),
+                ));
+            }
+            unsatisfiable.sort_unstable();
+            StartPlan {
+                order: topo_sort(&remaining).unwrap_or_default(),
+                unsatisfiable,
+            }
+        }
+        // `remaining` has no unknown dependencies left, so no other error is
+        // reachable; treating one as "nothing starts" still keeps us alive.
+        Err(_) => StartPlan {
+            order: Vec::new(),
+            unsatisfiable,
+        },
+    }
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    fn graph(edges: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
+        edges
+            .iter()
+            .map(|(n, deps)| {
+                (
+                    (*n).to_owned(),
+                    deps.iter().map(|d| (*d).to_owned()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_healthy_graph_plans_dependencies_first() {
+        let plan = plan(&graph(&[("app", &["lib"]), ("lib", &[])]));
+        assert_eq!(plan.order, vec!["lib", "app"]);
+        assert!(plan.unsatisfiable.is_empty());
+    }
+
+    /// The case that used to deny the whole server: one manifest naming a
+    /// resource nobody installed.
+    #[test]
+    fn a_missing_dependency_costs_only_its_dependents() {
+        let plan = plan(&graph(&[
+            ("chat", &[]),
+            ("map", &["money-fountain"]),
+            ("spawn", &[]),
+        ]));
+        assert_eq!(plan.order, vec!["chat", "spawn"]);
+        assert_eq!(plan.unsatisfiable.len(), 1);
+        assert_eq!(plan.unsatisfiable[0].0, "map");
+        assert!(plan.unsatisfiable[0].1.contains("money-fountain"));
+    }
+
+    #[test]
+    fn the_loss_carries_to_whatever_waited_on_it() {
+        let plan = plan(&graph(&[("a", &["ghost"]), ("b", &["a"]), ("c", &[])]));
+        assert_eq!(plan.order, vec!["c"]);
+        let names: Vec<&str> = plan.unsatisfiable.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn a_cycle_costs_only_the_cycle() {
+        let plan = plan(&graph(&[("a", &["b"]), ("b", &["a"]), ("alone", &[])]));
+        assert_eq!(plan.order, vec!["alone"]);
+        assert_eq!(plan.unsatisfiable.len(), 2);
+        assert!(plan.unsatisfiable[0].1.contains("cycle"));
+    }
+
+    #[test]
+    fn nothing_installed_is_not_a_failure() {
+        assert_eq!(plan(&HashMap::new()), StartPlan::default());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

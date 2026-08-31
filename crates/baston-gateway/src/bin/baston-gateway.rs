@@ -293,7 +293,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     resource_manager.discover().await?;
-    resource_manager.start_all().await?;
+    resource_manager.start_all().await;
 
     // Keep the watcher alive for the process lifetime.
     let _watcher = if modules.is_enabled(ModuleId::HotReload) {
