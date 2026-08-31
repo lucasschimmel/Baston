@@ -19,20 +19,29 @@ room to spare, and single-process has none of the caveats below.
 `onesync_tick_utilization` before assuming it. Multi-zone splits work by
 *geography*, so it only helps when your load is geographically spread.
 
-**Not yet, if** you need players near a zone border to see each other's world.
-See the first limitation.
+**Not yet, if** your resources create networked entities server-side
+(`CreateVehicle` and friends). See the first limitation.
 
 ## Known limitations
 
-### Cross-zone area of interest is not implemented
+### Scripts in a zone cannot create networked entities
 
-A player standing near a zone boundary **does not receive entities from the
-neighbouring zone**. Each zone builds interest from its own entities only.
+`CreateVehicle`, `CreatePed` and `CreateObject` return a handle from a zone
+process and **create nothing**. No player sees the entity — not players in
+another zone, not players in the same one. The script can read back what it
+created, and that is the whole extent of it.
 
-Practically: two players either side of a border cannot see each other's
-vehicles, and a car driving toward the border pops in only after the driver
-crosses. If your map has busy borders, place them where players rarely are —
-water, mountains, map edges — or stay single-process.
+The returned handle is a plausible non-zero number, so the usual `if veh == 0`
+guard does not catch it either.
+
+Entity creation goes through a world-control surface that reserves a network id
+synchronously and queues the spawn for the process that owns the world. Only the
+gateway wires one (`GatewayWorldControl`); `baston-zone` never does, so the
+native falls back to a server-local record.
+
+Single-process is unaffected: there the gateway *is* the process running the
+resources, and creation works normally. This is specific to `[meshing]` — which
+is also why the test suite does not catch it.
 
 ### Zone failure loses player state
 
@@ -68,8 +77,32 @@ FiveM client ──▶ baston-gateway            :30120 game · :50050 gRPC · :
 - **The gateway** is the only process a client talks to. It owns the FiveM
   protocol, the routing table, OneSync, and the interest calculation for real
   clients.
-- **A zone** owns entities and runs resources for its rectangle. Clients never
-  connect to it. It cannot start without NATS.
+- **A zone** runs the resources for its rectangle and holds the server-side
+  entity state for it. Clients never connect to it. It cannot start without
+  NATS.
+
+### Zones do not decide what players see
+
+Worth being explicit, because it is the opposite of what a zoned architecture
+usually implies: **entity visibility never passes through the zones.**
+
+A FiveM client syncs one of two ways, and both terminate at the gateway:
+
+- `onesync off` — the gateway relays each client's sync blob to the target
+  netId, filtered only by routing bucket. The GTA netcode on each client does
+  its own scoping; the server is a router. This mirrors FXServer's
+  `RoutingPacketHandler`, which has no spatial test either.
+- `onesync on` — the gateway runs a single global OneSync game state, fed
+  directly by the clients' clone streams.
+
+Neither consults the routing table. Two players either side of a border see each
+other exactly as they would on a single-process server, and there is no border
+effect on visibility to design around.
+
+The per-client area-of-interest filter in `StateAggregator` is not a
+counterexample: it serves only binary-protocol clients (the loadtest harness),
+and it merges every zone's state into one world before filtering, so it is not
+per-zone either.
 
 Resources run **in every zone process**, once per zone. A resource holding state
 in a variable holds a different copy per zone. State that must be shared belongs

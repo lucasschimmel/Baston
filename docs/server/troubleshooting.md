@@ -224,9 +224,22 @@ up, the per-client interest budget is saturating — raise
 
 ### It only happens near a zone border
 
-**Cross-zone area of interest is not implemented.** A player near a boundary
-does not receive entities from the neighbouring zone. This is a known
-limitation, not a misconfiguration. See [multi-zone](multi-zone.md).
+Zone borders do not affect what a player sees. Entity visibility is handled
+entirely at the gateway — the msgRoute relay with `onesync off`, one global
+OneSync game state with `onesync on` — and neither consults the routing table.
+A border is invisible to sync by construction.
+
+So look elsewhere. The usual causes, in order:
+
+- **A gap in your zone tiling.** Nothing validates that your rectangles cover
+  the map. A player standing in an uncovered spot keeps its old zone and its
+  handoffs are refused with `no live zone covers the target coordinates` —
+  check the gateway log for that line, and re-read
+  [Zone configuration](zone-config.md).
+- **Handoff churn.** Watch `handoffs_committed_total`. A player crossing back
+  and forth reloads its resources each time; raise `handoff_cooldown_secs`.
+- **`boundary_margin` larger than the smallest zone dimension**, which leaves
+  everyone permanently "approaching a boundary".
 
 ---
 
