@@ -627,3 +627,37 @@ async fn init_connect_refuses_a_client_that_did_not_switch_build() {
         .unwrap();
     assert_eq!(body_json(accepted).await["status"], "ok");
 }
+
+/// The server list takes the heartbeat's `fallbackData` and *then* queries the
+/// server back. A live run against the real ingress reported
+/// `server request failed for endpoint .../dynamic.json`, because nothing
+/// served it.
+#[tokio::test]
+async fn the_endpoints_the_server_list_queries_back_are_served() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(dir.path(), AXIOM_CORE_JS).await;
+
+    let response = app
+        .clone()
+        .oneshot(Request::get("/dynamic.json").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let dynamic = body_json(response).await;
+    assert_eq!(dynamic["clients"], 0);
+    assert_eq!(dynamic["hostname"], "BASTON Dev");
+    // A string, as GameServer.cpp writes it — the list parses it as one.
+    assert_eq!(dynamic["sv_maxclients"], "32");
+
+    let response = app
+        .oneshot(Request::get("/players.json").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let players = body_json(response).await;
+    assert_eq!(
+        players.as_array().map(Vec::len),
+        Some(0),
+        "players.json is a list, empty with nobody connected: {players}"
+    );
+}

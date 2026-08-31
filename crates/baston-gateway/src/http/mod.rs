@@ -112,6 +112,9 @@ pub fn router(state: Arc<AppState>) -> Router {
     let download_timeout = state.downloads.timeout;
     Router::new()
         .route("/info.json", get(info::info_json))
+        // The server list queries both of these back after a heartbeat.
+        .route("/dynamic.json", get(info::dynamic_json))
+        .route("/players.json", get(info::players_json))
         .route(
             "/files/{resource}/{*path}",
             get(files::serve_resource_file)

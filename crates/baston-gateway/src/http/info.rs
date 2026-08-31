@@ -132,8 +132,12 @@ pub fn payload(state: &AppState, resources: Vec<String>) -> serde_json::Value {
 }
 
 /// The `dynamic.json` half of a server-list heartbeat (`GameServer.cpp` builds
-/// info, dynamic and players together). Nothing serves this over HTTP today;
-/// it exists because the ingress contract asks for it.
+/// info, dynamic and players together).
+///
+/// It rides in the heartbeat's `fallbackData` *and* is served over HTTP,
+/// because the server list does both: it takes the fallback and then queries
+/// the server back. A live run showed the ingress reporting
+/// `server request failed for endpoint .../dynamic.json` — it really does ask.
 pub fn dynamic_payload(state: &AppState) -> serde_json::Value {
     let vars = state.server_vars();
     let read = |name: &str, fallback: &str| {
@@ -154,4 +158,38 @@ pub fn dynamic_payload(state: &AppState) -> serde_json::Value {
 pub async fn info_json(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let resources = state.resource_manager.started_names().await;
     Json(payload(&state, resources))
+}
+
+/// `GET /dynamic.json` — the changing half: player count and the current
+/// hostname, gametype and map.
+pub async fn dynamic_json(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(dynamic_payload(&state))
+}
+
+/// `GET /players.json` — one entry per connected player, as `GameServer.cpp`
+/// builds it. The endpoint FXServer serves and every server browser reads.
+pub async fn players_json(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(players_payload(&state))
+}
+
+/// The `players.json` half of the heartbeat.
+pub fn players_payload(state: &AppState) -> serde_json::Value {
+    let players: Vec<serde_json::Value> = state
+        .players
+        .sources()
+        .into_iter()
+        .filter_map(|source| {
+            let player = state.players.get(source)?;
+            Some(json!({
+                "id": source,
+                "name": player.name,
+                "identifiers": player.identifiers,
+                // Ping is not tracked per player here yet; 0 reads as unknown
+                // rather than inventing a latency.
+                "ping": 0,
+                "endpoint": state.players.endpoint(source).unwrap_or_default(),
+            }))
+        })
+        .collect();
+    serde_json::Value::Array(players)
 }
