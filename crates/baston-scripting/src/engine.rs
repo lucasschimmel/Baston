@@ -4,13 +4,15 @@
 //! selection needs no new manifest key and existing FiveM resources keep
 //! working unchanged. The choice is made once, when the resource loads.
 //!
-//! One engine per resource is a BASTON limitation, not a rule of the platform.
-//! FiveM runs each script in the runtime its own extension picks, and
-//! `cfx-server-data` ships a resource that relies on it: `runcode` has Lua
-//! server scripts and a shared `runcode.js`. Supporting that here means two
-//! runtimes inside one resource — two threads, and an answer for how events,
-//! exports and state bags behave across them — so the refusal below names the
-//! limitation rather than blaming the resource for it.
+//! A resource may use both. FiveM runs each script in the runtime its own
+//! extension picks, and `cfx-server-data` ships a resource that relies on it:
+//! `runcode` has Lua server scripts and a shared `runcode.js`. So the scripts
+//! are grouped by engine and the resource gets one runtime per group.
+//!
+//! The two halves share what the host owns — events, state bags, KVP, the
+//! player directory — because those live outside the isolates. They do not
+//! share `exports`, which are registered inside a runtime; that matches the
+//! existing limit, since exports do not cross resources either.
 
 use crate::error::ScriptError;
 
@@ -65,15 +67,21 @@ impl std::fmt::Display for Engine {
     }
 }
 
-/// Pick the engine for a resource from its server script paths.
+/// Group a resource's server scripts by the engine that runs each one.
 ///
-/// Refuses rather than guessing in every ambiguous case: an unrecognised
-/// extension, a mix of languages, or an engine this bundle does not contain.
-/// Each refusal names the fix, because the operator hitting it is usually one
-/// bundle away from a working server.
-pub fn select(resource: &str, script_paths: &[String]) -> Result<Engine, ScriptError> {
-    let mut chosen: Option<Engine> = None;
-    for path in script_paths {
+/// Order is preserved within a group, because `server_scripts` order is what
+/// a resource relies on; between groups it does not exist, since the groups
+/// run in separate runtimes.
+///
+/// Refuses rather than guessing: an unrecognised extension, or an engine this
+/// bundle does not contain. Each refusal names the fix, because the operator
+/// hitting it is usually one bundle away from a working server.
+pub fn group_by_engine(
+    resource: &str,
+    script_paths: &[String],
+) -> Result<Vec<(Engine, Vec<usize>)>, ScriptError> {
+    let mut groups: Vec<(Engine, Vec<usize>)> = Vec::new();
+    for (index, path) in script_paths.iter().enumerate() {
         let Some(engine) = Engine::of_path(path) else {
             return Err(ScriptError::RuntimeInit {
                 resource: resource.to_owned(),
@@ -83,29 +91,23 @@ pub fn select(resource: &str, script_paths: &[String]) -> Result<Engine, ScriptE
                 ),
             });
         };
-        match chosen {
-            None => chosen = Some(engine),
-            Some(previous) if previous != engine => {
-                return Err(ScriptError::RuntimeInit {
-                    resource: resource.to_owned(),
-                    message: format!(
-                        "server_scripts mixes {previous} and {engine}, which BASTON \
-                         cannot run in one resource yet\n  \
-                         → FiveM does allow it; this is a BASTON limitation\n  \
-                         → split the resource in two, one per language, for now"
-                    ),
-                });
-            }
-            Some(_) => {}
+        match groups.iter_mut().find(|(known, _)| *known == engine) {
+            Some((_, indices)) => indices.push(index),
+            None => groups.push((engine, vec![index])),
         }
     }
 
-    let engine = chosen.ok_or_else(|| ScriptError::RuntimeInit {
-        resource: resource.to_owned(),
-        message: "no server_scripts to run".to_owned(),
-    })?;
+    if groups.is_empty() {
+        return Err(ScriptError::RuntimeInit {
+            resource: resource.to_owned(),
+            message: "no server_scripts to run".to_owned(),
+        });
+    }
 
-    if !engine.is_compiled_in() {
+    // A missing runtime is fatal for the whole resource rather than for its
+    // half: running only the Lua side of a resource that also has JS would be
+    // a resource behaving in a way its author never wrote.
+    if let Some((engine, _)) = groups.iter().find(|(e, _)| !e.is_compiled_in()) {
         return Err(ScriptError::RuntimeInit {
             resource: resource.to_owned(),
             message: format!(
@@ -116,7 +118,7 @@ pub fn select(resource: &str, script_paths: &[String]) -> Result<Engine, ScriptE
             ),
         });
     }
-    Ok(engine)
+    Ok(groups)
 }
 
 #[cfg(test)]
@@ -138,50 +140,65 @@ mod tests {
         assert_eq!(Engine::of_path("noextension"), None);
     }
 
+    /// Groups, not a single choice: the count and the order inside each are
+    /// what a resource's `server_scripts` promised.
     #[test]
     #[cfg(feature = "js")]
-    fn a_javascript_resource_selects_the_js_engine() {
-        let engine = select("test", &paths(&["a.js", "b.js"])).unwrap();
-        assert_eq!(engine, Engine::Js);
+    fn scripts_of_one_language_form_one_group_in_order() {
+        let groups = group_by_engine("test", &paths(&["a.js", "b.js"])).unwrap();
+        assert_eq!(groups, vec![(Engine::Js, vec![0, 1])]);
     }
 
     #[test]
     #[cfg(feature = "lua")]
-    fn a_lua_resource_selects_the_lua_engine() {
-        let engine = select("test", &paths(&["sv.lua"])).unwrap();
-        assert_eq!(engine, Engine::Lua);
+    fn a_lua_resource_groups_onto_the_lua_engine() {
+        let groups = group_by_engine("test", &paths(&["sv.lua"])).unwrap();
+        assert_eq!(groups, vec![(Engine::Lua, vec![0])]);
     }
 
-    /// The refusal has to name both languages *and* own the limitation.
-    /// `cfx-server-data`'s `runcode` mixes them and FiveM runs it, so telling
-    /// the operator their resource is wrong sends them looking for a fault
-    /// that is on our side.
+    /// `cfx-server-data`'s runcode: Lua server scripts and a shared
+    /// `runcode.js`. FiveM runs it, and refusing it was our limitation.
     #[test]
-    fn mixing_engines_is_refused_as_our_limitation_not_the_resources_fault() {
-        let err = select("test", &paths(&["a.js", "b.lua"])).expect_err("mixed");
-        let text = err.to_string();
-        assert!(text.contains("mixes"), "{text}");
-        assert!(text.contains("js") && text.contains("lua"), "{text}");
-        assert!(text.contains("BASTON limitation"), "{text}");
-        assert!(text.contains("FiveM does allow it"), "{text}");
+    #[cfg(all(feature = "js", feature = "lua"))]
+    fn a_resource_using_both_languages_gets_a_group_for_each() {
+        let groups = group_by_engine(
+            "runcode",
+            &paths(&["runcode_sv.lua", "runcode.js", "runcode_web.lua"]),
+        )
+        .unwrap();
+        assert_eq!(
+            groups,
+            vec![(Engine::Lua, vec![0, 2]), (Engine::Js, vec![1])],
+            "each language keeps its own scripts, in the order they were declared"
+        );
+    }
+
+    /// A group appears in the order its language was first seen, so the log
+    /// and the error messages read the way the manifest does.
+    #[test]
+    #[cfg(all(feature = "js", feature = "lua"))]
+    fn groups_follow_the_order_the_languages_first_appear() {
+        let groups = group_by_engine("test", &paths(&["a.js", "b.lua"])).unwrap();
+        assert_eq!(groups[0].0, Engine::Js);
+        assert_eq!(groups[1].0, Engine::Lua);
     }
 
     #[test]
     fn an_unknown_extension_names_what_is_supported() {
-        let err = select("test", &paths(&["main.py"])).expect_err("unsupported");
+        let err = group_by_engine("test", &paths(&["main.py"])).expect_err("unsupported");
         assert!(err.to_string().contains(".lua"), "{err}");
     }
 
     #[test]
     fn a_resource_without_server_scripts_is_refused() {
-        assert!(select("test", &[]).is_err());
+        assert!(group_by_engine("test", &[]).is_err());
     }
 
     #[test]
     #[cfg(not(feature = "lua"))]
     fn a_lua_resource_on_a_js_build_names_the_bundle() {
         // The single most likely support question for a bundled binary.
-        let err = select("test", &paths(&["sv.lua"])).expect_err("no lua here");
+        let err = group_by_engine("test", &paths(&["sv.lua"])).expect_err("no lua here");
         let text = err.to_string();
         assert!(text.contains("bundle lua"), "{text}");
         assert!(text.contains("--modules"), "{text}");

@@ -1436,3 +1436,81 @@ async fn perform_http_request_without_a_worker_refuses() {
 
     assert_eq!(host.kvp().get("caller", "token"), Some("0".to_owned()));
 }
+
+/// The shape of `cfx-server-data`'s runcode: Lua server scripts and a shared
+/// `runcode.js`. FiveM runs it; BASTON refused the whole resource.
+#[tokio::test]
+#[cfg(all(feature = "js", feature = "lua"))]
+async fn a_resource_mixing_lua_and_javascript_runs_both() {
+    let (host, _) = host();
+    host.load_resource(
+        "runcode",
+        vec![
+            ScriptSource {
+                path: "runcode_sv.lua".into(),
+                code: r#"
+                    AddEventHandler('probe', function()
+                        SetResourceKvp('lua-ran', 'yes')
+                    end)
+                "#
+                .into(),
+            },
+            ScriptSource {
+                path: "runcode.js".into(),
+                code: r#"
+                    AddEventHandler('probe', () => {
+                        SetResourceKvp('js-ran', 'yes');
+                    });
+                "#
+                .into(),
+            },
+        ],
+    )
+    .await
+    .expect("a resource using both languages must load");
+
+    // One event, addressed to the resource, has to reach both halves.
+    host.trigger_event("probe", &[]).await.unwrap();
+
+    let kvp = host.kvp();
+    assert_eq!(
+        kvp.get("runcode", "lua-ran").as_deref(),
+        Some("yes"),
+        "the Lua half did not receive the event"
+    );
+    assert_eq!(
+        kvp.get("runcode", "js-ran").as_deref(),
+        Some("yes"),
+        "the JavaScript half did not receive the event"
+    );
+}
+
+/// Stopping a resource has to take every runtime with it, or half of it keeps
+/// answering events after it was stopped.
+#[tokio::test]
+#[cfg(all(feature = "js", feature = "lua"))]
+async fn stopping_a_mixed_resource_stops_both_halves() {
+    let (host, _) = host();
+    host.load_resource(
+        "mixed",
+        vec![
+            ScriptSource {
+                path: "a.lua".into(),
+                code: "AddEventHandler('tick', function() SetResourceKvp('lua', 'x') end)".into(),
+            },
+            ScriptSource {
+                path: "b.js".into(),
+                code: "AddEventHandler('tick', () => { SetResourceKvp('js', 'x'); });".into(),
+            },
+        ],
+    )
+    .await
+    .unwrap();
+
+    host.unload_resource("mixed").await.unwrap();
+    host.trigger_event("tick", &[]).await.unwrap();
+
+    let kvp = host.kvp();
+    assert!(kvp.get("mixed", "lua").is_none(), "the Lua half still ran");
+    assert!(kvp.get("mixed", "js").is_none(), "the JS half still ran");
+}

@@ -75,6 +75,19 @@ enum RuntimeCommand {
     },
 }
 
+/// Every runtime in the map, paired with the resource it belongs to.
+///
+/// The broadcast paths want "every isolate"; the map is keyed by resource and
+/// a resource may hold two. Flattening here keeps that a detail of the map
+/// rather than a loop every caller repeats.
+fn each_runtime(
+    runtimes: &HashMap<String, Vec<ResourceRuntimeHandle>>,
+) -> impl Iterator<Item = (&String, &ResourceRuntimeHandle)> {
+    runtimes
+        .iter()
+        .flat_map(|(name, handles)| handles.iter().map(move |handle| (name, handle)))
+}
+
 /// `Send` handle to one resource's isolate thread. Dropping it shuts the
 /// thread down (channel closes, loop exits, isolate is destroyed).
 struct ResourceRuntimeHandle {
@@ -115,7 +128,12 @@ pub type CrossZonePublisher = Arc<dyn Fn(&str, &str) + Send + Sync>;
 /// Cloneable orchestrator for all resource runtimes.
 #[derive(Clone)]
 pub struct ScriptHost {
-    runtimes: Arc<RwLock<HashMap<String, ResourceRuntimeHandle>>>,
+    /// Resource name → its runtimes, one per language its scripts use.
+    ///
+    /// A `Vec` rather than a single handle because FiveM lets one resource mix
+    /// Lua and JavaScript, and `cfx-server-data` ships one that does. They are
+    /// separate isolates on separate threads sharing everything the host owns.
+    runtimes: Arc<RwLock<HashMap<String, Vec<ResourceRuntimeHandle>>>>,
     deferrals: Arc<DeferralRegistry>,
     players: Arc<PlayerDirectory>,
     net: crate::net_bridge::NetBridge,
@@ -344,18 +362,26 @@ impl ScriptHost {
             serde_json::to_string(args).map_err(|e| ScriptError::HostStart(e.to_string()))?;
         let queued = {
             let runtimes = self.runtimes.read().await;
-            let Some(handle) = runtimes.get(resource) else {
+            let Some(handles) = runtimes.get(resource) else {
                 // The resource stopped while the request was in flight. Not an
                 // error: there is simply nobody left to tell.
                 return Ok(());
             };
-            handle
-                .send(|reply| RuntimeCommand::DispatchEvent {
-                    event: event.to_owned(),
-                    args_json,
-                    reply,
-                })
-                .await?
+            // Every half of the resource: an event addressed to a resource is
+            // addressed to all of it, whichever language declared the handler.
+            let mut queued = Vec::new();
+            for handle in handles {
+                queued.extend(
+                    handle
+                        .send(|reply| RuntimeCommand::DispatchEvent {
+                            event: event.to_owned(),
+                            args_json: args_json.clone(),
+                            reply,
+                        })
+                        .await?,
+                );
+            }
+            queued
         };
         self.rebroadcast(queued).await;
         Ok(())
@@ -427,8 +453,8 @@ impl ScriptHost {
         let mut queued = Vec::new();
         {
             let runtimes = self.runtimes.read().await;
-            let mut replies = Vec::with_capacity(runtimes.len());
-            for (resource, handle) in runtimes.iter() {
+            let mut replies = Vec::with_capacity(each_runtime(&runtimes).count());
+            for (resource, handle) in each_runtime(&runtimes) {
                 let event = event.to_owned();
                 let args_json = args_json.clone();
                 match handle
@@ -470,7 +496,7 @@ impl ScriptHost {
     ) -> std::collections::HashMap<String, String> {
         let mut out = std::collections::HashMap::new();
         let runtimes = self.runtimes.read().await;
-        for (resource, handle) in runtimes.iter() {
+        for (resource, handle) in each_runtime(&runtimes) {
             let (reply, rx) = oneshot::channel();
             if handle
                 .tx
@@ -482,7 +508,17 @@ impl ScriptHost {
             }
             match rx.await {
                 Ok(Ok(Some(json))) => {
-                    out.insert(resource.clone(), json);
+                    // The map is keyed by resource, and a resource using both
+                    // languages has two runtimes that can each register state.
+                    // The payloads are opaque strings, so there is nothing to
+                    // merge: the first one wins and the loss is named rather
+                    // than silently overwritten.
+                    if let Some(existing) = out.insert(resource.clone(), json) {
+                        tracing::warn!(target: "scripting", %resource,
+                            bytes = existing.len(),
+                            "two runtimes of this resource registered zone transfer \
+                             state; only one crosses the handoff");
+                    }
                 }
                 Ok(Ok(None)) => {}
                 Ok(Err(e)) => {
@@ -531,35 +567,51 @@ impl ScriptHost {
         }
 
         let script_paths: Vec<String> = scripts.iter().map(|s| s.path.clone()).collect();
-        let engine = crate::engine::select(name, &script_paths)?;
-        tracing::info!(target: "scripting", resource = %name, %engine, "runtime selected");
+        let groups = crate::engine::group_by_engine(name, &script_paths)?;
+        // Scripts are moved into their group, so the sources are taken out of
+        // the original vector by index rather than cloned.
+        let mut sources: Vec<Option<ScriptSource>> = scripts.into_iter().map(Some).collect();
 
-        let handle = spawn_runtime_thread(RuntimeThreadParams {
-            resource_name: name,
-            engine,
-            started_at: self.started_at,
-            deferrals: Arc::clone(&self.deferrals),
-            players: Arc::clone(&self.players),
-            net: self.net.clone(),
-            observability: Arc::clone(&self.observability),
-            convars: Arc::clone(&self.convars),
-            resources: self.resources.clone(),
-            state_bags: self.state_bags.clone(),
-            routing: Arc::clone(&self.routing),
-            entity_world: Arc::clone(&self.entity_world),
-            world_control: self.world_control(),
-            kvp: self.kvp(),
-            http: self.http(),
-            http_handlers: Arc::clone(&self.http_handlers),
-            resource_control: self.resource_control(),
-            voice: self.voice.read().unwrap_or_else(|e| e.into_inner()).clone(),
-            db: self.db(),
-        })?;
-        let mut queued = handle
-            .send(|reply| RuntimeCommand::ExecuteScripts { scripts, reply })
-            .await?;
+        let mut handles = Vec::with_capacity(groups.len());
+        let mut queued = Vec::new();
+        for (engine, indices) in groups {
+            tracing::info!(target: "scripting", resource = %name, %engine,
+                scripts = indices.len(), "runtime selected");
+            let scripts: Vec<ScriptSource> = indices
+                .into_iter()
+                .filter_map(|i| sources[i].take())
+                .collect();
 
-        self.runtimes.write().await.insert(name.to_owned(), handle);
+            let handle = spawn_runtime_thread(RuntimeThreadParams {
+                resource_name: name,
+                engine,
+                started_at: self.started_at,
+                deferrals: Arc::clone(&self.deferrals),
+                players: Arc::clone(&self.players),
+                net: self.net.clone(),
+                observability: Arc::clone(&self.observability),
+                convars: Arc::clone(&self.convars),
+                resources: self.resources.clone(),
+                state_bags: self.state_bags.clone(),
+                routing: Arc::clone(&self.routing),
+                entity_world: Arc::clone(&self.entity_world),
+                world_control: self.world_control(),
+                kvp: self.kvp(),
+                http: self.http(),
+                http_handlers: Arc::clone(&self.http_handlers),
+                resource_control: self.resource_control(),
+                voice: self.voice.read().unwrap_or_else(|e| e.into_inner()).clone(),
+                db: self.db(),
+            })?;
+            queued.extend(
+                handle
+                    .send(|reply| RuntimeCommand::ExecuteScripts { scripts, reply })
+                    .await?,
+            );
+            handles.push(handle);
+        }
+
+        self.runtimes.write().await.insert(name.to_owned(), handles);
         queued.extend(self.flush_state_bag_callbacks().await);
         self.rebroadcast(queued).await;
 
@@ -615,8 +667,8 @@ impl ScriptHost {
         let mut queued = Vec::new();
         {
             let runtimes = self.runtimes.read().await;
-            let mut replies = Vec::with_capacity(runtimes.len());
-            for (resource, handle) in runtimes.iter() {
+            let mut replies = Vec::with_capacity(each_runtime(&runtimes).count());
+            for (resource, handle) in each_runtime(&runtimes) {
                 let player_name = player_name.to_owned();
                 match handle
                     .begin(|reply| RuntimeCommand::DispatchPlayerConnecting {
@@ -658,8 +710,8 @@ impl ScriptHost {
         let mut queued = Vec::new();
         {
             let runtimes = self.runtimes.read().await;
-            let mut replies = Vec::with_capacity(runtimes.len());
-            for (resource, handle) in runtimes.iter() {
+            let mut replies = Vec::with_capacity(each_runtime(&runtimes).count());
+            for (resource, handle) in each_runtime(&runtimes) {
                 match handle
                     .begin(|reply| RuntimeCommand::DispatchCommand {
                         command: command.to_owned(),
@@ -728,8 +780,8 @@ impl ScriptHost {
                 break;
             }
             let runtimes = self.runtimes.read().await;
-            let mut replies = Vec::with_capacity(runtimes.len());
-            for (resource, handle) in runtimes.iter() {
+            let mut replies = Vec::with_capacity(each_runtime(&runtimes).count());
+            for (resource, handle) in each_runtime(&runtimes) {
                 let event = event.clone();
                 let args_json = args_json.clone();
                 match handle
@@ -770,8 +822,8 @@ impl ScriptHost {
                 return queued_events;
             }
             let runtimes = self.runtimes.read().await;
-            let mut replies = Vec::with_capacity(runtimes.len());
-            for (resource, handle) in runtimes.iter() {
+            let mut replies = Vec::with_capacity(each_runtime(&runtimes).count());
+            for (resource, handle) in each_runtime(&runtimes) {
                 match handle
                     .begin(|reply| RuntimeCommand::DispatchStateBagChanges { reply })
                     .await

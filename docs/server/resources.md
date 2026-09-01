@@ -66,9 +66,21 @@ for it:
 | `.js`, `.mjs`, `.cjs` | deno_core / V8 | `js` or `full` |
 | `.lua` | mlua / Lua 5.4 | `lua` or `full` |
 
-A resource runs on **one** engine. Mixing `.js` and `.lua` in one
-`server_scripts` is refused at load, with a message telling you to split it into
-two resources that talk over events.
+A resource may use **both**, as it can in FiveM: its `.lua` scripts run in one
+runtime and its `.js` scripts in another, and the resource gets one of each.
+`cfx-server-data`'s `runcode` is written that way.
+
+The two halves share everything the server owns — events, state bags, KVP, the
+player directory — because none of that lives inside a runtime. An event
+addressed to the resource reaches both, and a handler in either language runs.
+
+What they do not share is `exports`, which are registered *inside* a runtime:
+the Lua half cannot call an export the JavaScript half declared. That is the
+same limit exports already have between resources.
+
+One more thing to know: `RegisterZoneTransferState` is stored per resource, so
+if both halves register some, only one crosses a zone handoff. The server logs
+which resource that happened to.
 
 If your bundle does not contain the runtime a resource asks for, the load fails
 naming the bundle that would run it:
