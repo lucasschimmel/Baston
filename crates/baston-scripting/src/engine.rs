@@ -2,9 +2,15 @@
 //!
 //! A resource declares its language by the extension of its server scripts, so
 //! selection needs no new manifest key and existing FiveM resources keep
-//! working unchanged. The choice is made once, when the resource loads, and a
-//! resource never mixes engines: one Lua file and one JS file in the same
-//! `server_scripts` is a mistake worth refusing, not a feature.
+//! working unchanged. The choice is made once, when the resource loads.
+//!
+//! One engine per resource is a BASTON limitation, not a rule of the platform.
+//! FiveM runs each script in the runtime its own extension picks, and
+//! `cfx-server-data` ships a resource that relies on it: `runcode` has Lua
+//! server scripts and a shared `runcode.js`. Supporting that here means two
+//! runtimes inside one resource — two threads, and an answer for how events,
+//! exports and state bags behave across them — so the refusal below names the
+//! limitation rather than blaming the resource for it.
 
 use crate::error::ScriptError;
 
@@ -83,8 +89,10 @@ pub fn select(resource: &str, script_paths: &[String]) -> Result<Engine, ScriptE
                 return Err(ScriptError::RuntimeInit {
                     resource: resource.to_owned(),
                     message: format!(
-                        "server_scripts mixes {previous} and {engine}\n  \
-                         → a resource runs on one engine; split it into two resources"
+                        "server_scripts mixes {previous} and {engine}, which BASTON \
+                         cannot run in one resource yet\n  \
+                         → FiveM does allow it; this is a BASTON limitation\n  \
+                         → split the resource in two, one per language, for now"
                     ),
                 });
             }
@@ -144,12 +152,18 @@ mod tests {
         assert_eq!(engine, Engine::Lua);
     }
 
+    /// The refusal has to name both languages *and* own the limitation.
+    /// `cfx-server-data`'s `runcode` mixes them and FiveM runs it, so telling
+    /// the operator their resource is wrong sends them looking for a fault
+    /// that is on our side.
     #[test]
-    fn mixing_engines_is_refused_with_both_names() {
+    fn mixing_engines_is_refused_as_our_limitation_not_the_resources_fault() {
         let err = select("test", &paths(&["a.js", "b.lua"])).expect_err("mixed");
         let text = err.to_string();
         assert!(text.contains("mixes"), "{text}");
-        assert!(text.contains("split it into two resources"), "{text}");
+        assert!(text.contains("js") && text.contains("lua"), "{text}");
+        assert!(text.contains("BASTON limitation"), "{text}");
+        assert!(text.contains("FiveM does allow it"), "{text}");
     }
 
     #[test]

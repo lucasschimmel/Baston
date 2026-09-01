@@ -414,8 +414,14 @@ impl LicenseConfig {
 pub struct ListingConfig {
     #[serde(default)]
     pub enabled: bool,
-    /// The public address players connect to, advertised to the server list.
-    /// Required when enabled; BASTON refuses to guess it.
+    /// Public address to advertise *instead of* the one CFX discovers.
+    ///
+    /// Normally unset. FXServer's `sv_listingIpOverride` defaults to empty too,
+    /// and for the same reason: with no override CFX reaches the server through
+    /// the hostname the nucleus assigns it, where CFX terminates TLS itself.
+    /// Setting one makes the server list query this address directly — over
+    /// HTTPS, which the game port does not speak — so it is for networks that
+    /// genuinely need it, not a thing to fill in by default.
     #[serde(default)]
     pub ip_override: Option<IpAddr>,
 }
@@ -1464,22 +1470,20 @@ impl BastonConfig {
                         .to_owned(),
                 });
             }
-            let ip = self
-                .listing
-                .ip_override
-                .ok_or_else(|| ConfigError::Invalid {
-                    section: "listing",
-                    reason: "listing requires ip_override, the public address players connect to"
-                        .to_owned(),
-                })?;
-            if ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() {
-                return Err(ConfigError::Invalid {
-                    section: "listing",
-                    reason: format!(
-                        "ip_override ({ip}) must be a concrete public address, not a wildcard, \
-                         loopback or multicast one"
-                    ),
-                });
+            // An absent override is the normal case: CFX then reaches the
+            // server through the nucleus-assigned hostname. Only a value that
+            // is present has to be one players could actually connect to.
+            if let Some(ip) = self.listing.ip_override {
+                if ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() {
+                    return Err(ConfigError::Invalid {
+                        section: "listing",
+                        reason: format!(
+                            "ip_override ({ip}) must be a concrete public address, not a \
+                             wildcard, loopback or multicast one — or leave it unset and let \
+                             CFX reach the server through the hostname it assigns"
+                        ),
+                    });
+                }
             }
         }
         if self.voice.enabled && self.voice.port == self.server.port {

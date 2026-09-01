@@ -75,6 +75,13 @@ function AddEventHandler(event, fn)
     return { key = event, index = #list }
 end
 
+-- The resource a script belongs to. Absent entirely until now, so
+-- `LoadResourceFile(GetCurrentResourceName(), ...)` — how a resource reads its
+-- own files, and what playernames does — asked for a file belonging to nil.
+function GetCurrentResourceName()
+    return host.resource_name()
+end
+
 -- FiveM's older name for the same thing. A resource calling it is opting into
 -- client -> server traffic exactly as RegisterNetEvent does; without the alias
 -- the call fell through to the native dispatcher, did nothing, and the resource

@@ -548,6 +548,11 @@ pub(crate) fn cfx_server_native(
             state.borrow::<SharedPlayers>().0.remove(source);
             serde_json::Value::Null
         }
+        // The Lua prelude answers this directly; the native form is what the
+        // JS path and any direct InvokeNative caller reach.
+        "GET_CURRENT_RESOURCE_NAME" => {
+            serde_json::json!(state.borrow::<RuntimeContext>().resource_name.clone())
+        }
         "GET_HASH_KEY" => serde_json::json!(hash_rage_string(&json_arg_string(&args, 0))),
         "GET_HOST_ID" => serde_json::json!(""),
         "GET_NUM_PLAYER_INDICES" => {

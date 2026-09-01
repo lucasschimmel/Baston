@@ -162,42 +162,6 @@ fn listing_without_an_authenticated_identity_is_rejected() {
 }
 
 #[test]
-fn listing_requires_a_concrete_public_address() {
-    let base = "[server]\nport = 30120\n\
-                [license]\nmode = \"cfx\"\nsv_license_key = \"cfxk_1a2b3c4d5e6f7g8h9i0j_key\"\n";
-
-    let missing: BastonConfig =
-        toml::from_str(&format!("{base}[listing]\nenabled = true\n")).unwrap();
-    assert!(
-        matches!(
-            missing.validate(),
-            Err(ConfigError::Invalid {
-                section: "listing",
-                ..
-            })
-        ),
-        "an absent ip_override must be refused, never guessed"
-    );
-
-    for bad in ["0.0.0.0", "127.0.0.1", "224.0.0.1"] {
-        let config: BastonConfig = toml::from_str(&format!(
-            "{base}[listing]\nenabled = true\nip_override = \"{bad}\"\n"
-        ))
-        .unwrap();
-        assert!(
-            matches!(
-                config.validate(),
-                Err(ConfigError::Invalid {
-                    section: "listing",
-                    ..
-                })
-            ),
-            "{bad} is not an address players can reach"
-        );
-    }
-}
-
-#[test]
 fn a_fully_configured_listing_validates() {
     let config: BastonConfig = toml::from_str(
         "[server]\nport = 30120\n\
@@ -524,4 +488,40 @@ fn no_map_file_means_zones_keep_declaring_their_own_bounds() {
     let config: BastonConfig =
         toml::from_str("[server]\nport = 30120\n[meshing]\nenabled = true\n").unwrap();
     assert_eq!(config.map_file_path(), None);
+}
+
+#[test]
+fn listing_without_an_ip_override_is_the_normal_case() {
+    // FXServer's sv_listingIpOverride defaults to empty for the same reason:
+    // with no override CFX reaches the server through the hostname the nucleus
+    // assigns, where CFX terminates TLS. Requiring one forced the direct-IP
+    // path, where the list queries the game port over HTTPS and fails.
+    let config: BastonConfig = toml::from_str(
+        "[server]\nport = 30120\n\
+         [license]\nmode = \"cfx\"\nsv_license_key = \"cfxk_1a2b3c4d5e6f7g8h9i0j_key\"\n\
+         [listing]\nenabled = true\n",
+    )
+    .unwrap();
+    config
+        .validate()
+        .expect("a listing with no override must be valid");
+    assert!(config.listing.ip_override.is_none());
+}
+
+#[test]
+fn an_override_that_is_given_still_has_to_be_reachable() {
+    let base = "[server]\nport = 30120\n\
+                [license]\nmode = \"cfx\"\nsv_license_key = \"cfxk_1a2b3c4d5e6f7g8h9i0j_key\"\n";
+    for bad in ["0.0.0.0", "127.0.0.1", "224.0.0.1"] {
+        let config: BastonConfig = toml::from_str(&format!(
+            "{base}[listing]\nenabled = true\nip_override = \"{bad}\"\n"
+        ))
+        .unwrap();
+        let message = config.validate().unwrap_err().to_string();
+        assert!(message.contains(bad), "{message}");
+        assert!(
+            message.contains("leave it unset"),
+            "the error should name the way out: {message}"
+        );
+    }
 }
