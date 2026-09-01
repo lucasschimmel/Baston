@@ -38,7 +38,7 @@ pub(crate) fn queue_native_call(
     };
     net.tx
         .try_send(crate::net_bridge::NetOutbound::ClientEvent {
-            source,
+            target: crate::net_bridge::EventTarget::One(source),
             event: INVOKE_NATIVE_EVENT.to_owned(),
             args_json: serde_json::json!([call]).to_string(),
         })

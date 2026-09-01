@@ -329,19 +329,23 @@ impl LuaRuntime {
 
         let state = Rc::clone(&self.state);
         let trigger_client_event = lua
-            .create_function(move |_, (event, source, args): (String, u32, String)| {
+            // Signed, because -1 is how every FiveM script says "everyone".
+            // Taking a u32 here made that call an argument-conversion error
+            // rather than a broadcast.
+            .create_function(move |_, (event, target, args): (String, i64, String)| {
+                let target = crate::net_bridge::EventTarget::from_script(target);
                 let state = state.borrow();
                 let net = &state.borrow::<SharedNet>().0;
                 if net
                     .tx
                     .try_send(crate::net_bridge::NetOutbound::ClientEvent {
-                        source,
+                        target,
                         event: event.clone(),
                         args_json: args,
                     })
                     .is_err()
                 {
-                    tracing::warn!(target: "events", %event, source,
+                    tracing::warn!(target: "events", %event, %target,
                         "client event dropped: net bridge full or closed");
                 }
                 Ok(())
@@ -1068,6 +1072,12 @@ mod tests {
 
     fn runtime(name: &str) -> LuaRuntime {
         let (net, _rx) = crate::net_bridge::NetBridge::new();
+        runtime_with_net(name, net)
+    }
+
+    /// A runtime whose net bridge the caller keeps, for tests that read what
+    /// a script actually put on the wire.
+    fn runtime_with_net(name: &str, net: crate::net_bridge::NetBridge) -> LuaRuntime {
         LuaRuntime::new(
             name,
             Instant::now(),
@@ -1116,6 +1126,43 @@ mod tests {
             "must be nil, not a sentinel"
         );
         assert!(!result.get::<bool>("truthy").unwrap());
+    }
+
+    /// The call that killed playernames, and one of the most common lines in
+    /// any FiveM resource: `TriggerClientEvent(name, -1, …)`. The binding took
+    /// a `u32`, so -1 was an argument-conversion error rather than a broadcast.
+    #[test]
+    fn triggering_a_client_event_at_minus_one_addresses_everyone() {
+        let (bridge, mut rx) = crate::net_bridge::NetBridge::new();
+        let mut rt = runtime_with_net("test", bridge);
+        rt.execute_script(
+            "main.lua",
+            r#"TriggerClientEvent('playernames:configure', -1, 'template')"#,
+        )
+        .expect("a broadcast must not be an argument error");
+
+        match rx.try_recv().expect("an event should have been queued") {
+            crate::net_bridge::NetOutbound::ClientEvent { target, event, .. } => {
+                assert_eq!(target, crate::net_bridge::EventTarget::All);
+                assert_eq!(event, "playernames:configure");
+            }
+            other => panic!("unexpected outbound: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_client_event_with_a_real_source_still_goes_to_that_player() {
+        let (bridge, mut rx) = crate::net_bridge::NetBridge::new();
+        let mut rt = runtime_with_net("test", bridge);
+        rt.execute_script("main.lua", r#"TriggerClientEvent('ping', 7, 'hi')"#)
+            .unwrap();
+
+        match rx.try_recv().unwrap() {
+            crate::net_bridge::NetOutbound::ClientEvent { target, .. } => {
+                assert_eq!(target, crate::net_bridge::EventTarget::One(7));
+            }
+            other => panic!("unexpected outbound: {other:?}"),
+        }
     }
 
     #[test]
@@ -1561,8 +1608,8 @@ mod tests {
 
         let outbound = rx.try_recv().expect("the call reaches the bridge");
         match outbound {
-            crate::net_bridge::NetOutbound::ClientEvent { source, event, .. } => {
-                assert_eq!(source, 7);
+            crate::net_bridge::NetOutbound::ClientEvent { target, event, .. } => {
+                assert_eq!(target, crate::net_bridge::EventTarget::One(7));
                 assert_eq!(event, baston_protocol::native::INVOKE_NATIVE_EVENT);
             }
             other => panic!("unexpected outbound: {other:?}"),

@@ -28,6 +28,16 @@ pub enum UdpCommand {
         data: Vec<u8>,
         reliable: bool,
     },
+    /// Send the same message to every connected player.
+    ///
+    /// One packet built once and handed to each peer, rather than N commands
+    /// through the channel: `TriggerClientEvent(name, -1, …)` is how a script
+    /// says "everyone", and a busy resource says it often.
+    Broadcast {
+        channel: u8,
+        data: Vec<u8>,
+        reliable: bool,
+    },
     /// Forcefully drop a player's game connection.
     DropSource { source: u32 },
     /// Wire the embedded voice server (per-player teardown on disconnect).
@@ -61,6 +71,18 @@ impl ControlPlaneHandle {
                 reliable: true,
             },
             Some(source),
+        );
+    }
+
+    /// Send to every connected player.
+    pub fn broadcast(&self, channel: u8, data: Vec<u8>) {
+        self.try_send(
+            UdpCommand::Broadcast {
+                channel,
+                data,
+                reliable: true,
+            },
+            None,
         );
     }
 

@@ -52,7 +52,7 @@ pub use native_state::SharedGameState;
 pub use native_state::{
     DbAccess, NativeState, RuntimeContext, SharedDb, SharedVoice, VoiceControl,
 };
-pub use net_bridge::{NetBridge, NetOutbound};
+pub use net_bridge::{EventTarget, NetBridge, NetOutbound};
 pub use observability::{
     DispatchKind, HandlerPerfStats, Observability, ProfilerRecordOptions, ProfilerStatus,
     ResMonSnapshot, ResourcePerfStats,

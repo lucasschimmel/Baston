@@ -683,7 +683,10 @@ async fn main() -> anyhow::Result<()> {
                     let Ok(v) = serde_json::from_slice::<serde_json::Value>(&msg.payload) else {
                         continue;
                     };
-                    let (Some(source), Some(event)) = (v["source"].as_u64(), v["event"].as_str())
+                    // Signed: a zone relaying `TriggerClientEvent(name, -1, …)`
+                    // sends -1, and `as_u64` would have discarded the message
+                    // rather than broadcasting it.
+                    let (Some(source), Some(event)) = (v["source"].as_i64(), v["event"].as_str())
                     else {
                         continue;
                     };
@@ -713,7 +716,14 @@ async fn main() -> anyhow::Result<()> {
                     };
                     if let Some(args) = args {
                         let packet = baston_protocol::events::build_net_event(event, &args);
-                        udp.control().send(source as u32, 0, packet);
+                        match baston_scripting::EventTarget::from_script(source) {
+                            baston_scripting::EventTarget::All => {
+                                udp.control().broadcast(0, packet)
+                            }
+                            baston_scripting::EventTarget::One(source) => {
+                                udp.control().send(source, 0, packet)
+                            }
+                        }
                     }
                 }
             });

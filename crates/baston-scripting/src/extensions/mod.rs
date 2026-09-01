@@ -197,20 +197,23 @@ fn op_trigger_event(state: &mut OpState, #[string] event: String, #[string] args
 fn op_trigger_client_event(
     state: &mut OpState,
     #[string] event: String,
-    source: u32,
+    // Signed: -1 is FiveM's "every client", and a u32 turned that into a
+    // conversion error instead of a broadcast.
+    target: i32,
     #[string] args_json: String,
 ) {
+    let target = crate::net_bridge::EventTarget::from_script(i64::from(target));
     let net = &state.borrow::<Natives>().0.borrow::<SharedNet>().0;
     if net
         .tx
         .try_send(crate::net_bridge::NetOutbound::ClientEvent {
-            source,
+            target,
             event: event.clone(),
             args_json,
         })
         .is_err()
     {
-        tracing::warn!(target: "events", %event, source, "client event dropped: net bridge full or closed");
+        tracing::warn!(target: "events", %event, %target, "client event dropped: net bridge full or closed");
     }
 }
 

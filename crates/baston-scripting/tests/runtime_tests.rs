@@ -635,7 +635,7 @@ fn owned_entity(network_id: u32, owner: u32) -> baston_scripting::EntitySummary 
 /// Decompose an `__baston:invokeNative` message into `(target, hash, args)`.
 fn invoke_native_call(outbound: baston_scripting::NetOutbound) -> (u32, String, serde_json::Value) {
     let baston_scripting::NetOutbound::ClientEvent {
-        source,
+        target,
         event,
         args_json,
     } = outbound
@@ -643,6 +643,10 @@ fn invoke_native_call(outbound: baston_scripting::NetOutbound) -> (u32, String, 
         panic!("a native dispatch emits a JSON-args client event, not a raw one")
     };
     assert_eq!(event, "__baston:invokeNative");
+    // A native runs on the client that was asked for it — never on everyone.
+    let baston_scripting::EventTarget::One(source) = target else {
+        panic!("a native dispatch must address one client, got {target}")
+    };
     let payload: serde_json::Value = serde_json::from_str(&args_json).expect("payload is JSON");
     let call = payload[0].clone();
     let hash = call["hash"].as_str().expect("hash").to_owned();
@@ -1226,14 +1230,14 @@ async fn trigger_client_event_internal_forwards_its_payload_verbatim() {
         .expect("the raw event reached the bridge")
         .expect("net bridge open");
     let baston_scripting::NetOutbound::ClientEventRaw {
-        source,
+        target,
         event,
         payload,
     } = outbound
     else {
         panic!("the internal native must emit a raw event, not a JSON-args one")
     };
-    assert_eq!(source, 7);
+    assert_eq!(target, baston_scripting::EventTarget::One(7));
     assert_eq!(event, "custom:ping");
     assert_eq!(payload, vec![0x92, 0x01, 0xCC, 0xFF]);
 }

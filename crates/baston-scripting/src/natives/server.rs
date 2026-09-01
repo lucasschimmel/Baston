@@ -654,7 +654,12 @@ pub(crate) fn cfx_server_native(
                     "latent client event sent whole; rate limiting is not implemented"
                 );
             }
-            send_raw_client_event(state, source, event, payload);
+            send_raw_client_event(
+                state,
+                crate::net_bridge::EventTarget::One(source),
+                event,
+                payload,
+            );
             serde_json::Value::Null
         }
 
@@ -899,12 +904,17 @@ fn latin1_bytes(text: &str) -> Vec<u8> {
 }
 
 /// Queue an already-encoded client event on the net bridge.
-fn send_raw_client_event(state: &NativeState, source: u32, event: String, payload: Vec<u8>) {
+fn send_raw_client_event(
+    state: &NativeState,
+    target: crate::net_bridge::EventTarget,
+    event: String,
+    payload: Vec<u8>,
+) {
     let net = &state.borrow::<super::SharedNet>().0;
     if net
         .tx
         .try_send(crate::net_bridge::NetOutbound::ClientEventRaw {
-            source,
+            target,
             event: event.clone(),
             payload,
         })
@@ -913,7 +923,7 @@ fn send_raw_client_event(state: &NativeState, source: u32, event: String, payloa
         tracing::warn!(
             target: "events",
             %event,
-            source,
+            %target,
             "raw client event dropped: net bridge full or closed"
         );
     }

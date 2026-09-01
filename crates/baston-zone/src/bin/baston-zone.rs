@@ -127,19 +127,22 @@ async fn main() -> anyhow::Result<()> {
                 // already-packed payload crosses as a byte array, because JSON
                 // has no binary type and re-encoding it would corrupt it.
                 let payload = match msg {
+                    // `source` crosses as a signed number so -1 keeps its
+                    // FiveM meaning — every client — all the way to the
+                    // gateway, which owns the peers a zone cannot reach.
                     baston_scripting::NetOutbound::ClientEvent {
-                        source,
+                        target,
                         event,
                         args_json,
                     } => serde_json::json!({
-                        "source": source, "event": event, "args": args_json,
+                        "source": target.to_script(), "event": event, "args": args_json,
                     }),
                     baston_scripting::NetOutbound::ClientEventRaw {
-                        source,
+                        target,
                         event,
                         payload,
                     } => serde_json::json!({
-                        "source": source, "event": event, "raw": payload,
+                        "source": target.to_script(), "event": event, "raw": payload,
                     }),
                 };
                 if let Err(e) = nats

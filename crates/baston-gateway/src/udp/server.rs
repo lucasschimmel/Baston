@@ -503,6 +503,33 @@ impl UdpServer {
         }
     }
 
+    /// Frame a client event and send it where its target says.
+    ///
+    /// The two outbound variants differ only in whether the payload was
+    /// already msgpack; who receives it is the same question for both.
+    pub(super) fn dispatch_client_event(
+        &mut self,
+        target: baston_scripting::EventTarget,
+        event: &str,
+        payload: &[u8],
+    ) {
+        let data = events::build_net_event(event, payload);
+        let command = match target {
+            baston_scripting::EventTarget::All => UdpCommand::Broadcast {
+                channel: 0,
+                data,
+                reliable: true,
+            },
+            baston_scripting::EventTarget::One(source) => UdpCommand::SendToSource {
+                source,
+                channel: 0,
+                data,
+                reliable: true,
+            },
+        };
+        self.handle_command(command);
+    }
+
     pub(super) fn handle_command(&mut self, cmd: UdpCommand) {
         match cmd {
             UdpCommand::SendToSource {
@@ -522,6 +549,30 @@ impl UdpServer {
                 };
                 if let Err(e) = self.host.peer_mut(peer_id).send(channel, &packet) {
                     tracing::warn!(target: "udp", source, error = ?e, "packet send failed");
+                }
+            }
+            UdpCommand::Broadcast {
+                channel,
+                data,
+                reliable,
+            } => {
+                let packet = if reliable {
+                    enet::Packet::reliable(data.as_slice())
+                } else {
+                    enet::Packet::unreliable(data.as_slice())
+                };
+                // Collected first: `peer_mut` borrows the host mutably, and
+                // the map cannot be iterated across that borrow.
+                let peers: Vec<enet::PeerID> = self.source_peers.values().copied().collect();
+                let mut failed = 0usize;
+                for peer_id in peers {
+                    if self.host.peer_mut(peer_id).send(channel, &packet).is_err() {
+                        failed += 1;
+                    }
+                }
+                if failed > 0 {
+                    tracing::warn!(target: "udp", failed,
+                        "broadcast did not reach every peer");
                 }
             }
             UdpCommand::DropSource { source } => {
@@ -743,7 +794,7 @@ impl UdpServer {
     fn handle_net_outbound(&mut self, outbound: NetOutbound) {
         match outbound {
             NetOutbound::ClientEvent {
-                source,
+                target,
                 event,
                 args_json,
             } => {
@@ -754,27 +805,15 @@ impl UdpServer {
                         return;
                     }
                 };
-                let packet = events::build_net_event(&event, &msgpack);
-                self.handle_command(UdpCommand::SendToSource {
-                    source,
-                    channel: 0,
-                    data: packet,
-                    reliable: true,
-                });
+                self.dispatch_client_event(target, &event, &msgpack);
             }
             // Already msgpack: framed and sent as-is.
             NetOutbound::ClientEventRaw {
-                source,
+                target,
                 event,
                 payload,
             } => {
-                let packet = events::build_net_event(&event, &payload);
-                self.handle_command(UdpCommand::SendToSource {
-                    source,
-                    channel: 0,
-                    data: packet,
-                    reliable: true,
-                });
+                self.dispatch_client_event(target, &event, &payload);
             }
         }
     }
