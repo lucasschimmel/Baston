@@ -60,12 +60,13 @@ pub struct Listing {
 impl Listing {
     /// # Errors
     ///
-    /// Fails when the HTTP client cannot be built, or the public address is
-    /// missing.
+    /// Fails when the HTTP client cannot be built.
+    ///
+    /// An empty `ip_override` is not an error and is the normal case: it tells
+    /// the server list to reach the server through the hostname the nucleus
+    /// assigned, where CFX terminates TLS. FXServer's `sv_listingIpOverride`
+    /// defaults to empty for the same reason.
     pub fn new(address: PublicAddress) -> Result<Self, CfxError> {
-        if address.ip_override.trim().is_empty() {
-            return Err(CfxError::ListingAddressMissing);
-        }
         let http = reqwest::Client::builder()
             .user_agent(user_agent())
             .timeout(REQUEST_TIMEOUT)
@@ -221,14 +222,18 @@ impl Listing {
 mod tests {
     use super::*;
 
+    /// No override is the normal configuration, not a mistake. It is what
+    /// tells the list to reach the server through the nucleus-assigned
+    /// hostname; requiring one forced the direct-IP path, which the list
+    /// queries over HTTPS and the game port answers in plain HTTP.
     #[test]
-    fn a_listing_without_a_public_address_is_refused_at_construction() {
-        let err = Listing::new(PublicAddress {
-            ip_override: "   ".to_owned(),
+    fn a_listing_without_a_public_address_is_the_normal_case() {
+        let listing = Listing::new(PublicAddress {
+            ip_override: String::new(),
             port: 30120,
         })
-        .expect_err("blank address must be refused");
-        assert!(matches!(err, CfxError::ListingAddressMissing));
+        .expect("an absent override is how FXServer ships too");
+        assert!(listing.address.ip_override.is_empty());
     }
 
     #[test]

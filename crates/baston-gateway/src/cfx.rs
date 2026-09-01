@@ -109,14 +109,15 @@ pub fn spawn_listing(state: &Arc<AppState>) -> Result<(), CfxError> {
         tracing::error!(target: "cfx", "[listing] is enabled without a CFX identity; not listing");
         return Ok(());
     };
-    let ip = state
-        .config
-        .listing
-        .ip_override
-        .ok_or(CfxError::ListingAddressMissing)?;
-
+    // Empty unless the operator set one: CFX then reaches the server through
+    // the nucleus-assigned hostname rather than querying this address itself.
     let listing = Listing::new(PublicAddress {
-        ip_override: ip.to_string(),
+        ip_override: state
+            .config
+            .listing
+            .ip_override
+            .map(|ip| ip.to_string())
+            .unwrap_or_default(),
         port: state.config.server.port,
     })?;
 
