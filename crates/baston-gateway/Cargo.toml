@@ -32,6 +32,12 @@ metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 axum-server = { workspace = true }
 rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+tokio-rustls = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+rcgen = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
 tonic = { workspace = true }
 prost = { workspace = true }
 baston-modules = { workspace = true }

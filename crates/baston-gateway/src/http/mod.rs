@@ -6,6 +6,7 @@ mod client;
 mod configuration;
 mod files;
 mod icon;
+pub mod multiplex;
 // `pub` because the CFX server-list heartbeat advertises the same document
 // `/info.json` serves — one source, so the two cannot diverge.
 pub mod info;

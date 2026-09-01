@@ -764,34 +764,37 @@ async fn main() -> anyhow::Result<()> {
     let http_state = Arc::clone(&state);
     let (http_ready_tx, http_ready_rx) = tokio::sync::oneshot::channel();
     let http_server = tokio::spawn(async move {
-        if let Some(tls) = http_state.config.tls.clone() {
-            let tls_config =
-                axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert_pem, &tls.key_pem)
-                    .await?;
-            tracing::info!(%addr, "HTTPS gateway listening");
-            let server = axum_server::from_tcp_rustls(tcp_listener, tls_config);
-            let _ = http_ready_tx.send(());
-            // Connect info, so a resource's HTTP handler sees the peer address
-            // the way FXServer reports `request.address`.
-            server
-                .serve(
-                    router(http_state)
-                        .into_make_service_with_connect_info::<std::net::SocketAddr>(),
-                )
-                .await?;
-        } else {
-            // Plain HTTP is the Phase B-validated mode: the FiveM client sends
-            // some game-port requests in plaintext, and getConfiguration hands
-            // out a literal http://<host>/files URL so downloads stay plain.
-            let listener = tokio::net::TcpListener::from_std(tcp_listener)?;
-            tracing::info!(%addr, "HTTP gateway listening");
-            let _ = http_ready_tx.send(());
-            axum::serve(
-                listener,
-                router(http_state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
-            )
-            .await?;
-        }
+        // One port, both protocols. The FiveM client sends some game-port
+        // requests as plain HTTP — and `getConfiguration` hands out literal
+        // `http://…/files` URLs — while the CFX server list queries a listed
+        // server over HTTPS. Serving only one of the two breaks the other, so
+        // the first bytes of each connection decide, exactly as FXServer does.
+        let tls = match baston_gateway::http::multiplex::acceptor(http_state.config.tls.as_ref()) {
+            Ok(acceptor) => {
+                match http_state.config.tls.as_ref() {
+                    Some(config) => tracing::info!(%addr,
+                        "gateway listening — HTTP, and HTTPS with {}",
+                        config.cert_pem.display()),
+                    None => tracing::info!(%addr,
+                        "gateway listening — HTTP, and HTTPS with a self-signed \
+                         certificate generated at boot"),
+                }
+                Some(acceptor)
+            }
+            // Losing TLS costs the server list, not the server: clients keep
+            // connecting over plain HTTP, so this is a warning, not a stop.
+            Err(e) => {
+                tracing::warn!(target: "http", error = %e,
+                    "no TLS on the game port — the CFX server list queries over \
+                     HTTPS and will not be able to reach this server");
+                tracing::info!(%addr, "gateway listening — HTTP only");
+                None
+            }
+        };
+
+        let listener = tokio::net::TcpListener::from_std(tcp_listener)?;
+        let _ = http_ready_tx.send(());
+        baston_gateway::http::multiplex::serve(listener, router(http_state), tls).await?;
         Ok::<(), anyhow::Error>(())
     });
     http_ready_rx

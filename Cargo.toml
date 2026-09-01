@@ -51,6 +51,11 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 # Explicit provider so rustls doesn't panic when both ring (reqwest) and aws-lc-rs (axum-server) are compiled in.
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
+rustls-pemfile = "2"
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
+rcgen = "0.13"
 async-nats = "0.38"
 bincode = { version = "2", features = ["serde"] }
 bitflags = { version = "2", features = ["serde"] }

@@ -348,15 +348,29 @@ connected. Keep it to development servers.
 
 `auth_bypass` warns loudly on every boot. That warning is the feature.
 
-## `[tls]` — deliberately absent
+## `[tls]` — the certificate for the game port
 
-There is no `[tls]` section, and adding one breaks the server.
+| Key | Default | What it does |
+| --- | --- | --- |
+| `cert_pem` | *(unset)* | Certificate chain, PEM. |
+| `key_pem` | *(unset)* | Private key, PEM. |
 
-The FiveM client sends some game-port requests as plain HTTP, and a TLS-only
-listener answers them with `Received HTTP/0.9 when not allowed`. Proper HTTPS
-needs first-byte TLS/plain multiplexing on the game port, which is not
-implemented. Packfile downloads are handed out as literal `http://` URLs for the
-same reason.
+**Optional.** With no `[tls]` section the server generates a self-signed
+certificate at boot, which is what FXServer does too — the only thing that
+speaks TLS to the game port is the CFX server list, and it reaches servers at
+arbitrary addresses so it cannot be checking names.
+
+The game port serves **both** protocols, chosen per connection by its first
+bytes: a TLS record starts `0x16` with a `client_hello` at offset 5, and no
+HTTP method does. That is FXServer's own test
+(`HttpServerManager.cpp`), and it is needed in both directions — the FiveM
+client sends some game-port requests as plain HTTP, and a TLS-only listener
+answers them with `Received HTTP/0.9 when not allowed`, while the server list
+queries over HTTPS and a plain-only listener gets
+`server gave HTTP response to HTTPS client`.
+
+Packfile downloads are still handed out as literal `http://` URLs: the client
+fetches them in plaintext, and nothing asks otherwise.
 
 ## Environment variables
 
