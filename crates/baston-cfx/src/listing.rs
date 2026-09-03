@@ -171,6 +171,13 @@ impl Listing {
         });
 
         let text = self.post_json(INGRESS_EP, &body).await?;
+        // The module doc promises the response body is logged, because this
+        // exchange is transcribed from sources rather than tested against the
+        // live service and `lastError` is only the field we already know to
+        // look for. It carries no credential of ours — the tokens travel in
+        // the request — so the whole body goes out at debug, which is the only
+        // way an operator can tell us what the ingress actually said.
+        tracing::debug!(target: "cfx", body = %text, "server list ingress replied");
         // The ingress reports query problems in the body of a 200, so a
         // successful POST is not a successful listing.
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
