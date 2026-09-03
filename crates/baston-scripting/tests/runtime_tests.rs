@@ -1569,3 +1569,56 @@ async fn lua_reads_player_identity_and_round_trips_msgpack() {
         "the script stopped before the end, so an assertion above failed"
     );
 }
+
+/// `Player(source).state` is line 115 of cfx-server-data's `player-data`, and
+/// it rejected every connecting player. The accessors did not exist in either
+/// runtime -- only the change handlers did -- so state bags could be watched
+/// and never read or written.
+///
+/// The trap worth a test of its own: `if Player then` passed anyway. The `_G`
+/// metatable answers any capitalised name with a native stub, so a resource
+/// feature-detecting a missing function gets a truthy one.
+#[tokio::test]
+#[cfg(feature = "lua")]
+async fn lua_reads_and_writes_state_bags_through_the_accessors() {
+    let (host, _) = host();
+
+    host.load_resource(
+        "state-bag-shape",
+        vec![ScriptSource {
+            path: "server.lua".into(),
+            code: r#"
+                assert(type(Player) == 'function', 'Player must be a real function')
+
+                Player(7).state['cfx.re/playerData@id'] = 42
+                assert(Player(7).state['cfx.re/playerData@id'] == 42, 'player bag read back')
+
+                -- A second source must not see the first one's value.
+                assert(Player(8).state['cfx.re/playerData@id'] == nil, 'bags must not be shared')
+
+                Entity(1234).state.owner = 'lucas'
+                assert(Entity(1234).state.owner == 'lucas', 'entity bag read back')
+
+                GlobalState.weather = 'EXTRASUNNY'
+                assert(GlobalState.weather == 'EXTRASUNNY', 'global bag read back')
+
+                -- The explicit form FiveM also accepts.
+                Player(7).state:set('crew', 'baston', true)
+                assert(Player(7).state.crew == 'baston', 'set() form')
+
+                SetResourceKvp('reached-the-end', 'yes')
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("a resource using state bags must load");
+
+    assert_eq!(
+        host.kvp()
+            .get("state-bag-shape", "reached-the-end")
+            .as_deref(),
+        Some("yes"),
+        "the script stopped before the end, so an assertion above failed"
+    );
+}

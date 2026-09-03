@@ -191,6 +191,44 @@ function RemoveStateBagChangeHandler(cookie)
     return host.remove_state_bag_handler(cookie)
 end
 
+--- The accessors a resource actually uses: `Player(source).state`,
+--- `Entity(netId).state` and `GlobalState`. The change handlers above existed
+--- without them, so state bags could be watched and never read or written.
+---
+--- `Player` was the worse half of that. The `_G` metatable answers any
+--- capitalised name with a native stub, so `if Player then` -- how
+--- cfx-server-data's player-data feature-detects -- passed, and the call after
+--- it returned nil for `.state` to index. Every connecting player was rejected
+--- by that line.
+local function state_bag(bag_name)
+    -- `bag:set(key, value, replicated)` is FiveM's explicit form; plain
+    -- assignment is the common one and replicates, which is also FiveM.
+    local methods = {
+        set = function(_, key, value, replicated)
+            SetStateBagValue(bag_name, key, value, 0, replicated ~= false)
+        end,
+    }
+
+    return setmetatable({}, {
+        __index = function(_, key)
+            return methods[key] or GetStateBagValue(bag_name, key)
+        end,
+        __newindex = function(_, key, value)
+            SetStateBagValue(bag_name, key, value, 0, true)
+        end,
+    })
+end
+
+function Player(source)
+    return { state = state_bag(("player:%d"):format(tonumber(source) or 0)) }
+end
+
+function Entity(entity)
+    return { state = state_bag(("entity:%d"):format(tonumber(entity) or 0)) }
+end
+
+GlobalState = state_bag("global")
+
 -- ------------------------------------------- server → client native calls ---
 
 --- Run a GTA native on `source`'s client.
