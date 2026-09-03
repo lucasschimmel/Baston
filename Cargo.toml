@@ -5,12 +5,23 @@ members = ["crates/*"]
 # ignores it (see fuzz/README.md and .github/workflows/fuzz.yml).
 exclude = ["fuzz"]
 
+# Size-tuned build for the WebAssembly validator, whose bytes are inlined into
+# the map editor page. Separate from [profile.release] so tuning the blob never
+# changes how the server binaries are built.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = true
+panic = "abort"
+strip = true
+
 [workspace.package]
 version = "0.1.0-alpha"
 edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
+baston-zonemap = { path = "crates/baston-zonemap" }
 tokio = { version = "1.52", features = ["full"] }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }
@@ -21,6 +32,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 thiserror = "2"
 deno_core = "0.406"
+# Lua 5.4 via mlua. `vendored` builds the interpreter from source so an operator
+# never has to install a Lua toolchain to run the `lua` bundle.
+#
+# 5.4 rather than LuaJIT: luajit-src bootstraps through `minilua`, which does
+# not build on Windows here, and the `lua` bundle has to build on every target
+# BASTON ships. CFX supports both (`lua54` in fxmanifest), and the interpreter
+# is swappable behind this one feature later — the runtime code does not care.
+# Not `send`: like a V8 isolate, a Lua state lives on its own thread and is
+# never shared, so requiring Send from everything it touches buys nothing.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "json", "chrono", "macros"] }
+mlua = { version = "0.10", features = ["lua54", "vendored", "serialize"] }
 dashmap = "6"
 notify = "8"
 tower-http = { version = "0.7", features = ["trace", "cors", "timeout"] }
@@ -29,6 +51,11 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 # Explicit provider so rustls doesn't panic when both ring (reqwest) and aws-lc-rs (axum-server) are compiled in.
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
+rustls-pemfile = "2"
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
+rcgen = "0.13"
 async-nats = "0.38"
 bincode = { version = "2", features = ["serde"] }
 bitflags = { version = "2", features = ["serde"] }
@@ -55,14 +82,15 @@ subtle = "2"
 # OneSync clone stream uses. lz4_flex has no external-dictionary support.
 lz4-sys = "1.11"
 
+baston-db = { path = "crates/baston-db" }
+baston-modules = { path = "crates/baston-modules" }
 baston-config = { path = "crates/baston-config" }
 baston-core = { path = "crates/baston-core" }
+baston-cfx = { path = "crates/baston-cfx" }
 baston-protocol = { path = "crates/baston-protocol" }
-baston-scripting = { path = "crates/baston-scripting" }
-baston-zone = { path = "crates/baston-zone" }
+baston-scripting = { path = "crates/baston-scripting", default-features = false }
+baston-zone = { path = "crates/baston-zone", default-features = false }
 baston-gateway = { path = "crates/baston-gateway" }
-baston-cfx-platform = { path = "crates/baston-cfx-platform" }
-baston-escrow-plugin = { path = "crates/baston-escrow-plugin" }
 baston-voice = { path = "crates/baston-voice" }
 
 [profile.dev]

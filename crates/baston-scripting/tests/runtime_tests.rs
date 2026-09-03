@@ -1,5 +1,8 @@
 //! Milestone A2 exit-criterion tests: FiveM-style JS runs in a deno_core
 //! isolate through the ScriptHost, including the playerConnecting flow.
+// These load JavaScript resources, so they only exist in a bundle that
+// contains the JS runtime. The Lua path has its own tests in src/lua.rs.
+#![cfg(feature = "js")]
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -632,7 +635,7 @@ fn owned_entity(network_id: u32, owner: u32) -> baston_scripting::EntitySummary 
 /// Decompose an `__baston:invokeNative` message into `(target, hash, args)`.
 fn invoke_native_call(outbound: baston_scripting::NetOutbound) -> (u32, String, serde_json::Value) {
     let baston_scripting::NetOutbound::ClientEvent {
-        source,
+        target,
         event,
         args_json,
     } = outbound
@@ -640,6 +643,10 @@ fn invoke_native_call(outbound: baston_scripting::NetOutbound) -> (u32, String, 
         panic!("a native dispatch emits a JSON-args client event, not a raw one")
     };
     assert_eq!(event, "__baston:invokeNative");
+    // A native runs on the client that was asked for it — never on everyone.
+    let baston_scripting::EventTarget::One(source) = target else {
+        panic!("a native dispatch must address one client, got {target}")
+    };
     let payload: serde_json::Value = serde_json::from_str(&args_json).expect("payload is JSON");
     let call = payload[0].clone();
     let hash = call["hash"].as_str().expect("hash").to_owned();
@@ -1223,14 +1230,14 @@ async fn trigger_client_event_internal_forwards_its_payload_verbatim() {
         .expect("the raw event reached the bridge")
         .expect("net bridge open");
     let baston_scripting::NetOutbound::ClientEventRaw {
-        source,
+        target,
         event,
         payload,
     } = outbound
     else {
         panic!("the internal native must emit a raw event, not a JSON-args one")
     };
-    assert_eq!(source, 7);
+    assert_eq!(target, baston_scripting::EventTarget::One(7));
     assert_eq!(event, "custom:ping");
     assert_eq!(payload, vec![0x92, 0x01, 0xCC, 0xFF]);
 }
@@ -1428,4 +1435,190 @@ async fn perform_http_request_without_a_worker_refuses() {
     .expect("load");
 
     assert_eq!(host.kvp().get("caller", "token"), Some("0".to_owned()));
+}
+
+/// The shape of `cfx-server-data`'s runcode: Lua server scripts and a shared
+/// `runcode.js`. FiveM runs it; BASTON refused the whole resource.
+#[tokio::test]
+#[cfg(all(feature = "js", feature = "lua"))]
+async fn a_resource_mixing_lua_and_javascript_runs_both() {
+    let (host, _) = host();
+    host.load_resource(
+        "runcode",
+        vec![
+            ScriptSource {
+                path: "runcode_sv.lua".into(),
+                code: r#"
+                    AddEventHandler('probe', function()
+                        SetResourceKvp('lua-ran', 'yes')
+                    end)
+                "#
+                .into(),
+            },
+            ScriptSource {
+                path: "runcode.js".into(),
+                code: r#"
+                    AddEventHandler('probe', () => {
+                        SetResourceKvp('js-ran', 'yes');
+                    });
+                "#
+                .into(),
+            },
+        ],
+    )
+    .await
+    .expect("a resource using both languages must load");
+
+    // One event, addressed to the resource, has to reach both halves.
+    host.trigger_event("probe", &[]).await.unwrap();
+
+    let kvp = host.kvp();
+    assert_eq!(
+        kvp.get("runcode", "lua-ran").as_deref(),
+        Some("yes"),
+        "the Lua half did not receive the event"
+    );
+    assert_eq!(
+        kvp.get("runcode", "js-ran").as_deref(),
+        Some("yes"),
+        "the JavaScript half did not receive the event"
+    );
+}
+
+/// Stopping a resource has to take every runtime with it, or half of it keeps
+/// answering events after it was stopped.
+#[tokio::test]
+#[cfg(all(feature = "js", feature = "lua"))]
+async fn stopping_a_mixed_resource_stops_both_halves() {
+    let (host, _) = host();
+    host.load_resource(
+        "mixed",
+        vec![
+            ScriptSource {
+                path: "a.lua".into(),
+                code: "AddEventHandler('tick', function() SetResourceKvp('lua', 'x') end)".into(),
+            },
+            ScriptSource {
+                path: "b.js".into(),
+                code: "AddEventHandler('tick', () => { SetResourceKvp('js', 'x'); });".into(),
+            },
+        ],
+    )
+    .await
+    .unwrap();
+
+    host.unload_resource("mixed").await.unwrap();
+    host.trigger_event("tick", &[]).await.unwrap();
+
+    let kvp = host.kvp();
+    assert!(kvp.get("mixed", "lua").is_none(), "the Lua half still ran");
+    assert!(kvp.get("mixed", "js").is_none(), "the JS half still ran");
+}
+
+/// The exact shape cfx-server-data's `player-data` runs on every connection:
+/// walk the identifiers, then persist one through msgpack. There was a JS test
+/// for the identifier natives and no Lua one, which is precisely how the gap
+/// survived -- the ops were wired for V8 only, so every Lua resource asking who
+/// connected got the unknown-native `nil` and `ipairs` died on it.
+#[tokio::test]
+#[cfg(feature = "lua")]
+async fn lua_reads_player_identity_and_round_trips_msgpack() {
+    let (host, _, players) = host_with_players();
+    players.insert(baston_protocol::PlayerInfo {
+        source: 7,
+        name: "Lucas".into(),
+        identifiers: vec!["license:abc123".into(), "ip:127.0.0.1".into()],
+    });
+
+    host.load_resource(
+        "player-data-shape",
+        vec![ScriptSource {
+            path: "server.lua".into(),
+            code: r#"
+                local seen = {}
+                for _, identifier in ipairs(GetPlayerIdentifiers(7)) do
+                    seen[#seen + 1] = identifier
+                end
+                assert(#seen == 2, 'identifier count is ' .. #seen)
+                assert(seen[1] == 'license:abc123', seen[1])
+                assert(GetPlayerName(7) == 'Lucas', 'name')
+                assert(GetPlayerEndpoint(7) == '127.0.0.1', 'endpoint')
+                assert(GetPlayerIdentifierByType(7, 'license') == 'license:abc123', 'by type')
+
+                -- A source that has gone away must still yield a table. The
+                -- resource loops over this without checking, and so does ours.
+                assert(#GetPlayerIdentifiers(999) == 0, 'unknown source must be empty, not nil')
+
+                local packed = msgpack.pack({ id = 42 })
+                assert(msgpack.unpack(packed).id == 42, 'msgpack round trip')
+
+                SetResourceKvp('reached-the-end', 'yes')
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("a resource reading player identity must load");
+
+    // The assertions above only prove anything if the script got past them.
+    assert_eq!(
+        host.kvp()
+            .get("player-data-shape", "reached-the-end")
+            .as_deref(),
+        Some("yes"),
+        "the script stopped before the end, so an assertion above failed"
+    );
+}
+
+/// `Player(source).state` is line 115 of cfx-server-data's `player-data`, and
+/// it rejected every connecting player. The accessors did not exist in either
+/// runtime -- only the change handlers did -- so state bags could be watched
+/// and never read or written.
+///
+/// The trap worth a test of its own: `if Player then` passed anyway. The `_G`
+/// metatable answers any capitalised name with a native stub, so a resource
+/// feature-detecting a missing function gets a truthy one.
+#[tokio::test]
+#[cfg(feature = "lua")]
+async fn lua_reads_and_writes_state_bags_through_the_accessors() {
+    let (host, _) = host();
+
+    host.load_resource(
+        "state-bag-shape",
+        vec![ScriptSource {
+            path: "server.lua".into(),
+            code: r#"
+                assert(type(Player) == 'function', 'Player must be a real function')
+
+                Player(7).state['cfx.re/playerData@id'] = 42
+                assert(Player(7).state['cfx.re/playerData@id'] == 42, 'player bag read back')
+
+                -- A second source must not see the first one's value.
+                assert(Player(8).state['cfx.re/playerData@id'] == nil, 'bags must not be shared')
+
+                Entity(1234).state.owner = 'lucas'
+                assert(Entity(1234).state.owner == 'lucas', 'entity bag read back')
+
+                GlobalState.weather = 'EXTRASUNNY'
+                assert(GlobalState.weather == 'EXTRASUNNY', 'global bag read back')
+
+                -- The explicit form FiveM also accepts.
+                Player(7).state:set('crew', 'baston', true)
+                assert(Player(7).state.crew == 'baston', 'set() form')
+
+                SetResourceKvp('reached-the-end', 'yes')
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("a resource using state bags must load");
+
+    assert_eq!(
+        host.kvp()
+            .get("state-bag-shape", "reached-the-end")
+            .as_deref(),
+        Some("yes"),
+        "the script stopped before the end, so an assertion above failed"
+    );
 }

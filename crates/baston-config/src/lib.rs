@@ -1,11 +1,16 @@
 //! Runtime configuration for BASTON, loaded from `baston.toml` with
 //! environment-variable overrides (`BASTON_PORT`, `BASTON_RESOURCES_PATH`).
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+pub mod modules;
+pub use baston_modules::{Bundle, ModuleId, ModuleSet};
+pub use modules::{LegacyToggles, ModulesConfig};
 
 /// Errors produced while loading or parsing the configuration.
 #[derive(Debug, thiserror::Error)]
@@ -32,34 +37,6 @@ pub enum ConfigError {
         reason: String,
     },
     #[error(
-        "[escrow] enabled = true but server_license is empty\n  \
-         → set [escrow] server_license = \"license:...\" in baston.toml\n  \
-         → to disable escrow support: set [escrow] enabled = false"
-    )]
-    EscrowMissingLicense,
-    #[error(
-        "[escrow] backend = \"direct\" but dll_path is not set\n  \
-         → set [escrow] dll_path = \"C:/FXServer/svadhesive.dll\" in baston.toml"
-    )]
-    EscrowMissingDllPath,
-    #[error(
-        "[escrow] dll_path \"{0}\" not found\n  \
-         → install FXServer and point dll_path at its svadhesive.dll\n  \
-         → to disable escrow support: set [escrow] enabled = false"
-    )]
-    EscrowDllNotFound(String),
-    #[error(
-        "[escrow] backend = \"sidecar\" but fxserver_path is not set\n  \
-         → set [escrow] fxserver_path = \"C:/FXServer/FXServer.exe\" in baston.toml"
-    )]
-    EscrowMissingFxserverPath,
-    #[error(
-        "[escrow] fxserver_path \"{0}\" not found\n  \
-         → install FXServer and point fxserver_path at its FXServer.exe\n  \
-         → to disable escrow support: set [escrow] enabled = false"
-    )]
-    EscrowFxserverNotFound(String),
-    #[error(
         "[license] mode = \"{0}\" requires a licence key\n  \
          → set [license] sv_license_key = \"cfxk_...\" (create one at https://portal.cfx.re)\n  \
          → for local dev/LAN only: set [license] mode = \"off\""
@@ -69,8 +46,8 @@ pub enum ConfigError {
         "[license] sv_license_key does not look like a real CFX key (it is empty, a \
          placeholder, or malformed)\n  \
          → paste your real key from https://portal.cfx.re\n  \
-         → note: \"gate\" only checks the key's shape, not its validity — use \"verified\" \
-         to have the official CFX component validate it"
+         → note: \"gate\" only checks the key's shape — BASTON does not validate it \
+         against CFX"
     )]
     LicenseMalformedKey,
     #[error(
@@ -103,16 +80,36 @@ pub enum ConfigError {
     )]
     ApiKeyNoPermissions(String),
     #[error(
-        "[license] mode = \"verified\" but fxserver_path is not set\n  \
-         → set [license] fxserver_path = \"C:/FXServer/FXServer.exe\" (an official FXServer \
-         you downloaded from CFX; BASTON never ships it)"
+        "module \"{module}\" is configured in two places that disagree\n  \
+         → {legacy_site} says {legacy_value}, but [modules] {list} says the opposite\n  \
+         → keep one of the two; {legacy_site} is the older spelling and still works"
     )]
-    LicenseMissingFxserverPath,
+    ModuleConflict {
+        module: &'static str,
+        legacy_site: &'static str,
+        legacy_value: bool,
+        list: &'static str,
+    },
     #[error(
-        "[license] fxserver_path \"{0}\" not found\n  \
-         → point it at a real FXServer.exe, or use mode = \"gate\" (no sidecar)"
+        "module \"{module}\" is not compiled into this build\n  \
+         → it ships in bundle {bundle}\n  \
+         → run `baston-gateway --modules` to see what this binary contains"
     )]
-    LicenseFxserverNotFound(String),
+    ModuleNotCompiledIn {
+        module: &'static str,
+        bundle: &'static str,
+    },
+    #[error(
+        "invalid module override {var}={value}\n  \
+         → expected one of: true/false, 1/0, yes/no, on/off"
+    )]
+    ModuleEnvOverride { var: String, value: String },
+    #[error(
+        "[db] the db module is enabled but url is empty\n  \
+         → set [db] url = \"postgres://user:pass@host/base\" (or sqlite:baston.db)\n  \
+         → to disable database access: remove \"db\" from [modules] enable"
+    )]
+    DbMissingUrl,
 }
 
 /// `[tls]` section — HTTPS for packfile downloads (required by FiveM canary 31725+).
@@ -147,14 +144,32 @@ pub struct BastonConfig {
     #[serde(default)]
     pub meshing: MeshingConfig,
     #[serde(default)]
-    pub escrow: EscrowConfig,
-    #[serde(default)]
     pub license: LicenseConfig,
+    #[serde(default)]
+    pub listing: ListingConfig,
     #[serde(default)]
     pub api: ApiConfig,
     #[serde(default)]
     pub voice: VoiceConfig,
+    #[serde(default)]
+    pub db: DbConfig,
+    #[serde(default)]
+    pub modules: ModulesConfig,
     pub tls: Option<TlsConfig>,
+    /// Modules resolved from `[modules]`, the legacy section flags and the
+    /// environment. Populated by [`BastonConfig::load`]; a config built straight
+    /// from `toml::from_str` in a test carries an empty set until
+    /// [`BastonConfig::resolve_modules`] runs.
+    #[serde(skip)]
+    pub enabled_modules: ModuleSet,
+    /// `(section, module)` pairs whose module is off, so the boot path can warn
+    /// that those settings are inert instead of leaving the operator guessing.
+    #[serde(skip)]
+    pub inert_sections: Vec<(&'static str, &'static str)>,
+    /// Directory the configuration was read from. Paths named inside the file
+    /// resolve against it rather than against the working directory.
+    #[serde(skip)]
+    pub config_dir: Option<PathBuf>,
 }
 
 /// `[voice]` section — the embedded Mumble-compatible voice server.
@@ -287,41 +302,29 @@ impl ApiConfig {
     }
 }
 
-/// `[license]` section — CFX server-licence integration.
+/// `[license]` section — the operator's CFX server-licence key.
 ///
-/// BASTON never validates a licence itself and never talks to CFX. Modes:
+/// Modes:
 /// - `"off"`: no check (dev/LAN only). Emits a visible warning each boot.
-/// - `"gate"`: require a well-formed `sv_license_key` in config (shape only, no
-///   validation, no sidecar). Cross-platform.
-/// - `"verified"`: run the genuine, unmodified FXServer sidecar which validates
-///   the key against CFX and lets BASTON enforce the verdict + entitlements
-///   locally. Windows + `escrow` feature only.
+/// - `"gate"`: require a well-formed `sv_license_key` — shape only, never
+///   validity. Catches the empty or placeholder key before you go live.
+/// - `"cfx"`: validate the key with CFX, read the entitlements it grants, and
+///   apply them **restrictively** before any listener opens. Required for
+///   [`ListingConfig`].
+///
+/// `"cfx"` couples two things an operator should understand before choosing
+/// it: the server becomes discoverable, *and* its slot count becomes bounded
+/// by what the licence actually grants. A server that wants more slots than
+/// its tier allows wants `"off"`. See
+/// `docs/adr/004-cfx-identity-without-fxserver.md`.
 #[derive(Clone, Deserialize)]
 pub struct LicenseConfig {
-    /// `off` | `gate` | `verified`.
+    /// `off` | `gate` | `cfx`.
     #[serde(default)]
     pub mode: LicenseMode,
     /// CFX server licence key, created at <https://portal.cfx.re>.
     #[serde(default)]
     pub sv_license_key: String,
-    /// Path to an official `FXServer.exe` provided by the operator
-    /// (mode = `"verified"`). BASTON never ships this binary.
-    #[serde(default)]
-    pub fxserver_path: Option<PathBuf>,
-    /// Private, localhost-only TCP port for the FXServer sidecar's endpoint
-    /// (mode = `"verified"`, or escrow). Nothing connects to it — BASTON talks to
-    /// the sidecar over a local file-drop channel — it only keeps the sidecar's
-    /// listener off BASTON's public port. Give each sidecar on a host a distinct
-    /// port if you run several.
-    #[serde(default = "default_sidecar_port")]
-    pub sidecar_port: u16,
-    /// Let the official FXServer broker register and heartbeat this Baston
-    /// endpoint in the public CFX server list.
-    #[serde(default)]
-    pub public_listing: bool,
-    /// Public address advertised by the official broker.
-    #[serde(default)]
-    pub listing_ip_override: Option<IpAddr>,
 }
 
 impl fmt::Debug for LicenseConfig {
@@ -329,10 +332,6 @@ impl fmt::Debug for LicenseConfig {
         f.debug_struct("LicenseConfig")
             .field("mode", &self.mode)
             .field("sv_license_key", &"[REDACTED]")
-            .field("fxserver_path", &self.fxserver_path)
-            .field("sidecar_port", &self.sidecar_port)
-            .field("public_listing", &self.public_listing)
-            .field("listing_ip_override", &self.listing_ip_override)
             .finish()
     }
 }
@@ -342,37 +341,38 @@ impl Default for LicenseConfig {
         Self {
             mode: LicenseMode::Off,
             sv_license_key: String::new(),
-            fxserver_path: None,
-            sidecar_port: default_sidecar_port(),
-            public_listing: false,
-            listing_ip_override: None,
         }
     }
 }
 
-fn default_sidecar_port() -> u16 {
-    30130
-}
-
 /// Licence enforcement mode (`[license] mode`). Missing → `Off` so existing
-/// dev/LAN configs keep booting; operators opt into `gate`/`verified` (see
-/// `docs/licensing.md`). Unknown values are rejected by serde at parse time.
+/// dev/LAN configs keep booting (see `docs/operations/licensing.md`). Unknown
+/// values are rejected by serde at parse time — including the removed
+/// `"verified"`, which must stop a boot rather than silently downgrade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LicenseMode {
     /// No check (dev/LAN only). Emits a visible warning each boot.
     #[default]
     Off,
-    /// Require a well-formed `sv_license_key` (shape only, no sidecar).
+    /// Require a well-formed `sv_license_key`. Shape only — never validity.
     Gate,
-    /// Run the genuine FXServer sidecar to validate the key against CFX.
-    Verified,
+    /// Authenticate with CFX and enforce what the licence grants.
+    Cfx,
+}
+
+impl LicenseMode {
+    /// Whether this mode talks to CFX at boot.
+    #[must_use]
+    pub fn authenticates(self) -> bool {
+        matches!(self, Self::Cfx)
+    }
 }
 
 impl LicenseConfig {
     /// A key is well-formed when it is non-empty, whitespace-free, long enough,
     /// and not a placeholder. This is a *shape* check only — it never proves the
-    /// key is valid (only the CFX component can, in `"verified"` mode).
+    /// key is valid; BASTON has no authenticated path to CFX.
     pub fn is_well_formed_key(&self) -> bool {
         let key = self.sv_license_key.trim();
         !key.is_empty()
@@ -381,36 +381,22 @@ impl LicenseConfig {
             && !key.to_ascii_uppercase().contains("REPLACE_ME")
     }
 
-    /// Validate the licence section. Fatal, actionable errors on misconfiguration;
-    /// no-op for `"off"`. Platform/feature availability for `"verified"` is
-    /// handled at the composition root, not here.
+    /// Validate the licence section. Fatal, actionable errors on
+    /// misconfiguration; no-op for `"off"`.
     pub fn validate(&self) -> Result<(), ConfigError> {
         match self.mode {
             LicenseMode::Off => Ok(()),
-            LicenseMode::Gate => {
+            LicenseMode::Gate | LicenseMode::Cfx => {
+                let mode = if self.mode == LicenseMode::Cfx {
+                    "cfx"
+                } else {
+                    "gate"
+                };
                 if self.sv_license_key.trim().is_empty() {
-                    return Err(ConfigError::LicenseMissingKey("gate".into()));
+                    return Err(ConfigError::LicenseMissingKey(mode.into()));
                 }
                 if !self.is_well_formed_key() {
                     return Err(ConfigError::LicenseMalformedKey);
-                }
-                Ok(())
-            }
-            LicenseMode::Verified => {
-                if self.sv_license_key.trim().is_empty() {
-                    return Err(ConfigError::LicenseMissingKey("verified".into()));
-                }
-                if !self.is_well_formed_key() {
-                    return Err(ConfigError::LicenseMalformedKey);
-                }
-                let path = self
-                    .fxserver_path
-                    .as_ref()
-                    .ok_or(ConfigError::LicenseMissingFxserverPath)?;
-                if !path.exists() {
-                    return Err(ConfigError::LicenseFxserverNotFound(
-                        path.display().to_string(),
-                    ));
                 }
                 Ok(())
             }
@@ -418,90 +404,26 @@ impl LicenseConfig {
     }
 }
 
-/// `[escrow]` section — CFX Asset Escrow support (Phase D-bis).
+/// `[listing]` section — presence in the public CFX server list.
 ///
-/// Off by default. When enabled, the composition-root binary (built with the
-/// `escrow` feature, on Windows) installs `baston-escrow-plugin`. The default
-/// backend is `sidecar`: preliminary research showed `svadhesive.dll` exposes
-/// no FFI-callable decrypt symbol, so the `direct` backend is unsupported.
-#[derive(Debug, Clone, Deserialize)]
-pub struct EscrowConfig {
-    /// Enable escrow support. Never activates without this being explicitly true.
+/// Off by default, and requires `[license] mode = "cfx"`: the heartbeat is
+/// signed with a credential only that exchange produces, and being listed
+/// without publishing the licence token would mean being discoverable while no
+/// client ever checks the slot count.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ListingConfig {
     #[serde(default)]
     pub enabled: bool,
-    /// `sidecar` (supported) or `direct` (unsupported — see crate docs).
+    /// Public address to advertise *instead of* the one CFX discovers.
+    ///
+    /// Normally unset. FXServer's `sv_listingIpOverride` defaults to empty too,
+    /// and for the same reason: with no override CFX reaches the server through
+    /// the hostname the nucleus assigns it, where CFX terminates TLS itself.
+    /// Setting one makes the server list query this address directly — over
+    /// HTTPS, which the game port does not speak — so it is for networks that
+    /// genuinely need it, not a thing to fill in by default.
     #[serde(default)]
-    pub backend: EscrowBackend,
-    /// CFX server licence (`"license:..."`). Required when `enabled`.
-    #[serde(default)]
-    pub server_license: String,
-    /// Path to `svadhesive.dll` (backend = `"direct"`).
-    #[serde(default)]
-    pub dll_path: Option<PathBuf>,
-    /// Path to `FXServer.exe` (backend = `"sidecar"`).
-    #[serde(default)]
-    pub fxserver_path: Option<PathBuf>,
-}
-
-impl Default for EscrowConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            backend: EscrowBackend::Sidecar,
-            server_license: String::new(),
-            dll_path: None,
-            fxserver_path: None,
-        }
-    }
-}
-
-/// Escrow decryption backend (`[escrow] backend`). Unknown values are rejected
-/// by serde at parse time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum EscrowBackend {
-    /// Supported: a minimal FXServer subprocess decrypts via svadhesive.
-    #[default]
-    Sidecar,
-    /// Unsupported: `svadhesive.dll` exposes no FFI-callable decrypt symbol.
-    Direct,
-}
-
-impl EscrowConfig {
-    /// Validate the escrow section. No-op when disabled; otherwise checks the
-    /// licence and the backend-specific binary path exist, with actionable
-    /// error messages for a fatal startup failure.
-    pub fn validate(&self) -> Result<(), ConfigError> {
-        if !self.enabled {
-            return Ok(());
-        }
-        if self.server_license.is_empty() {
-            return Err(ConfigError::EscrowMissingLicense);
-        }
-        match self.backend {
-            EscrowBackend::Sidecar => {
-                let path = self
-                    .fxserver_path
-                    .as_ref()
-                    .ok_or(ConfigError::EscrowMissingFxserverPath)?;
-                if !path.exists() {
-                    return Err(ConfigError::EscrowFxserverNotFound(
-                        path.display().to_string(),
-                    ));
-                }
-            }
-            EscrowBackend::Direct => {
-                let path = self
-                    .dll_path
-                    .as_ref()
-                    .ok_or(ConfigError::EscrowMissingDllPath)?;
-                if !path.exists() {
-                    return Err(ConfigError::EscrowDllNotFound(path.display().to_string()));
-                }
-            }
-        }
-        Ok(())
-    }
+    pub ip_override: Option<IpAddr>,
 }
 
 /// `[meshing]` section — Phase D zone federation.
@@ -525,8 +447,19 @@ pub struct MeshingConfig {
     #[serde(default)]
     pub zone_public_grpc_addr: Option<String>,
     /// Zone bounds `x_min,y_min,x_max,y_max` (env `ZONE_BOUNDS` overrides).
+    ///
+    /// What a zone declares about itself. A Gateway holding a `map_file`
+    /// overrules it: the map is then the single source of truth and the zone
+    /// is told its territory in the registration reply.
     #[serde(default)]
     pub zone_bounds: Option<String>,
+    /// Zone map, relative to the directory holding this file (env
+    /// `BASTON_MAP_FILE` overrides). Gateway only.
+    ///
+    /// Unset means zones declare their own rectangles, which is how meshing
+    /// worked before maps existed and stays the default.
+    #[serde(default)]
+    pub map_file: Option<String>,
     #[serde(default = "default_heartbeat_interval")]
     pub heartbeat_interval_secs: u64,
     /// Silence window before the Gateway evicts a zone (3 missed heartbeats).
@@ -710,6 +643,68 @@ impl StateSyncConfig {
     }
 }
 
+/// `[db]` section — pooled database access for scripts (ADR-002, Tier 2).
+///
+/// One `url` rather than discrete host/user/password fields: it is what every
+/// driver documents, what a hosting panel hands out, and it keeps the
+/// credential in one place an operator can move to an environment variable.
+#[derive(Clone, Deserialize)]
+pub struct DbConfig {
+    /// Connection URL. `sqlite:…`, `postgres://…` or `mysql://…`.
+    ///
+    /// Empty means the module has nothing to connect to; the loader says so
+    /// rather than starting a server whose first query fails.
+    #[serde(default)]
+    pub url: String,
+    #[serde(default = "default_db_pool_size")]
+    pub pool_size: u32,
+    #[serde(default = "default_db_query_timeout")]
+    pub query_timeout_secs: u64,
+}
+
+impl Default for DbConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            pool_size: default_db_pool_size(),
+            query_timeout_secs: default_db_query_timeout(),
+        }
+    }
+}
+
+/// The URL carries a password, so it never reaches a log or a bug report.
+impl fmt::Debug for DbConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DbConfig")
+            .field(
+                "url",
+                &if self.url.is_empty() {
+                    "<unset>"
+                } else {
+                    "<redacted>"
+                },
+            )
+            .field("pool_size", &self.pool_size)
+            .field("query_timeout_secs", &self.query_timeout_secs)
+            .finish()
+    }
+}
+
+impl DbConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.url.trim().is_empty() {
+            return Err(ConfigError::DbMissingUrl);
+        }
+        if self.pool_size == 0 {
+            return Err(ConfigError::Invalid {
+                section: "db",
+                reason: "pool_size must be at least 1".to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// `[metrics]` section — Prometheus exporter.
 #[derive(Debug, Clone, Deserialize)]
 pub struct MetricsConfig {
@@ -731,6 +726,26 @@ pub struct UdpConfig {
     pub poll_interval_ms: u64,
 }
 
+/// Game build enforced when the operator states none.
+///
+/// It must stay equal to `baston_protocol::rage::sync_parse::GameBuild::default()`
+/// — the build the sync-tree decoder falls back to. A test in `baston-gateway`,
+/// which depends on both crates, holds the two together; this crate does not
+/// depend on `baston-protocol` for one integer.
+pub const DEFAULT_GAME_BUILD: u32 = 3258;
+
+/// Oldest build FiveM still lets a client run.
+const MIN_GAME_BUILD: u32 = 1604;
+
+/// Upper bound on a game build.
+///
+/// A typo catcher, not an allowlist: a build Rockstar ships next has to work
+/// without a code change, the same way `[server.vars]` passes through fields
+/// BASTON has never heard of. It exists so `"32258"` fails at boot with its own
+/// name in the error instead of at connect time, in the client, as a build
+/// switch that never happens.
+const MAX_GAME_BUILD: u32 = 4999;
+
 /// `[server]` section.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
@@ -744,12 +759,92 @@ pub struct ServerConfig {
     #[serde(default = "default_max_players")]
     pub max_players: u32,
     /// Game build advertised as `sv_enforceGameBuild` in `info.json` vars.
-    /// The client build-switches to it pre-connect (NetLibrary.cpp); with
-    /// no enforcement, mixed-build clients end up in the same non-OneSync
-    /// session and the GTA P2P join fails ("Could not connect to session
-    /// provider"). Empty string = no enforcement.
+    ///
+    /// The client reads it *before* connecting and build-switches to it
+    /// (NetLibrary.cpp), which is what decides the game content a player has:
+    /// the weapons, vehicles and DLC props of that build, and no others. It is
+    /// also the build whose sync-tree node layouts the server decodes against,
+    /// so the two are one setting on purpose — see [`ServerConfig::game_build`].
+    ///
+    /// Empty string = no enforcement: every client keeps whatever build it
+    /// launched, mixed-build clients end up in the same non-OneSync session and
+    /// the GTA P2P join fails ("Could not connect to session provider"). The
+    /// default is [`DEFAULT_GAME_BUILD`] rather than empty, because a server
+    /// that enforces nothing still has to decode *some* build's layouts, and an
+    /// unstated one is the same choice made silently.
     #[serde(default = "default_enforce_game_build")]
     pub enforce_game_build: String,
+    /// A 96×96 PNG published as `info.json` `icon`, base64-encoded — the
+    /// picture the FiveM server browser shows next to the name. Both the size
+    /// and the format are the client's requirement, not BASTON's, and a file
+    /// that is neither is refused at load rather than silently dropped.
+    #[serde(default)]
+    pub icon: Option<PathBuf>,
+    /// Replicated server variables, published in `info.json` `vars` and
+    /// advertised to the server list.
+    ///
+    /// This is CFX's `sets` mechanism. FXServer does not know the name of any
+    /// individual field either — `InfoHttpHandler.cpp` iterates every convar
+    /// carrying `ConVar_ServerInfo` and publishes what it finds. So this map
+    /// is a passthrough, and the fields the server browser reads today
+    /// (`sv_projectName`, `sv_projectDesc`, `tags`, `locale`, `banner_detail`,
+    /// `banner_connecting`) work without BASTON knowing them, as will whatever
+    /// CFX adds next.
+    ///
+    /// **Everything here is public.** It is served to anyone who asks for
+    /// `/info.json`, before authentication. Do not put a secret in it.
+    ///
+    /// A `BTreeMap` so `/info.json` is byte-stable across boots: an unstable
+    /// key order would make the document's hash change for no reason.
+    #[serde(default)]
+    pub vars: BTreeMap<String, String>,
+}
+
+impl ServerConfig {
+    /// The enforced game build, as a number.
+    ///
+    /// `None` means `enforce_game_build` is empty: nothing is advertised and
+    /// the server cannot know which build a connecting client runs.
+    ///
+    /// This is the **only** place the string becomes a number. [`Self::validate`]
+    /// and the caller that feeds the sync-tree decoder both come through here,
+    /// so a value that boots is a value the decoder agrees with — the failure
+    /// this closes is a config typo that used to be swallowed by a parse
+    /// fallback, leaving the server decoding one build's node layouts while its
+    /// clients ran another.
+    pub fn game_build(&self) -> Result<Option<u32>, ConfigError> {
+        let raw = self.enforce_game_build.as_str();
+        if raw.is_empty() {
+            return Ok(None);
+        }
+        let invalid = |reason: String| ConfigError::Invalid {
+            section: "server",
+            reason: format!(
+                "enforce_game_build = \"{raw}\" is not a game build ({reason})\n  \
+                 → use the build number your resources need, e.g. \"{DEFAULT_GAME_BUILD}\"\n  \
+                 → use \"\" to enforce nothing and let every client keep its own build"
+            ),
+        };
+        // Not `parse` alone: it accepts "+3258" and "03258", and the
+        // `<build>_<revision>` form is what the *client* reports, never what an
+        // operator enforces.
+        if !raw.chars().all(|c| c.is_ascii_digit()) {
+            return Err(invalid("expected decimal digits only".to_owned()));
+        }
+        let build: u32 = raw
+            .parse()
+            .map_err(|_| invalid("out of range".to_owned()))?;
+        if !(MIN_GAME_BUILD..=MAX_GAME_BUILD).contains(&build) {
+            return Err(invalid(format!(
+                "expected {MIN_GAME_BUILD}..={MAX_GAME_BUILD}"
+            )));
+        }
+        Ok(Some(build))
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        self.game_build().map(|_| ())
+    }
 }
 
 /// `[auth]` section — CFX ticket validation (Phase B).
@@ -1011,7 +1106,7 @@ fn default_max_players() -> u32 {
     32
 }
 fn default_enforce_game_build() -> String {
-    String::new()
+    DEFAULT_GAME_BUILD.to_string()
 }
 fn default_resources_path() -> PathBuf {
     PathBuf::from("resources")
@@ -1101,6 +1196,14 @@ fn default_file_download_chunk_bytes() -> usize {
 fn default_file_download_concurrency() -> usize {
     64
 }
+fn default_db_pool_size() -> u32 {
+    // Enough for a busy resource set without exhausting a small managed
+    // database's connection budget.
+    10
+}
+fn default_db_query_timeout() -> u64 {
+    15
+}
 fn default_metrics_port() -> u16 {
     9090
 }
@@ -1141,6 +1244,7 @@ impl Default for MeshingConfig {
             zone_grpc_addr: default_zone_grpc_addr(),
             zone_public_grpc_addr: None,
             zone_bounds: None,
+            map_file: None,
             heartbeat_interval_secs: default_heartbeat_interval(),
             zone_timeout_secs: default_zone_timeout(),
             boundary_margin: default_boundary_margin(),
@@ -1245,6 +1349,24 @@ impl Default for DevConfig {
 }
 
 impl BastonConfig {
+    /// Absolute path of `meshing.map_file`, resolved against the directory of
+    /// the configuration file it was read from.
+    ///
+    /// Relative to the config rather than to the working directory: a mounted
+    /// `config/` then works without anyone having to know where the process
+    /// was launched from.
+    pub fn map_file_path(&self) -> Option<PathBuf> {
+        let map = self.meshing.map_file.as_ref()?;
+        let path = PathBuf::from(map);
+        if path.is_absolute() {
+            return Some(path);
+        }
+        Some(match self.config_dir.as_ref() {
+            Some(dir) => dir.join(path),
+            None => path,
+        })
+    }
+
     /// Load configuration from a TOML file, then apply environment overrides.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let raw = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
@@ -1255,9 +1377,67 @@ impl BastonConfig {
             path: path.to_owned(),
             source,
         })?;
+        config.config_dir = path.parent().map(Path::to_path_buf);
         config.apply_env_overrides()?;
+        config.resolve_modules(&raw)?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Where `load` looks when `BASTON_CONFIG` is not set, in order.
+    ///
+    /// `config/baston.toml` is where the repository keeps it; a bare
+    /// `baston.toml` next to the binary is what a deployed server usually has.
+    /// Both work, so neither layout has to know about the other.
+    pub const SEARCH_PATHS: &'static [&'static str] = &["baston.toml", "config/baston.toml"];
+
+    /// The configuration file to load: `BASTON_CONFIG` if set, else the first
+    /// of [`Self::SEARCH_PATHS`] that exists.
+    ///
+    /// Returns the last candidate when none exist, so the caller's error names
+    /// a concrete path instead of reporting that nothing was found anywhere.
+    pub fn discover() -> PathBuf {
+        if let Ok(path) = std::env::var("BASTON_CONFIG") {
+            return PathBuf::from(path);
+        }
+        Self::SEARCH_PATHS
+            .iter()
+            .map(PathBuf::from)
+            .find(|path| path.is_file())
+            .unwrap_or_else(|| PathBuf::from(Self::SEARCH_PATHS[Self::SEARCH_PATHS.len() - 1]))
+    }
+
+    /// Parse a configuration document, including module resolution.
+    ///
+    /// `load` reads a file; this is the same pipeline over an in-memory
+    /// document, so tests exercise module resolution instead of the empty set
+    /// a bare `toml::from_str` leaves behind.
+    pub fn parse(raw: &str) -> Result<Self, ConfigError> {
+        let mut config: Self = toml::from_str(raw).map_err(|source| ConfigError::Parse {
+            path: PathBuf::from("<memory>"),
+            source,
+        })?;
+        config.apply_env_overrides()?;
+        config.resolve_modules(raw)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Resolve `[modules]` against the legacy section flags and the
+    /// environment, then record which configured sections are inert.
+    ///
+    /// Runs before [`Self::validate`] so section validators can assume the
+    /// module set is known — a section belonging to a disabled module is not
+    /// held to the invariants that only matter when it runs.
+    pub fn resolve_modules(&mut self, raw: &str) -> Result<(), ConfigError> {
+        self.enabled_modules = self.modules.resolve(LegacyToggles::from_toml(raw))?;
+        self.inert_sections = modules::inert_sections(self.enabled_modules, raw);
+        Ok(())
+    }
+
+    /// Whether a module runs in this process.
+    pub fn module_enabled(&self, module: ModuleId) -> bool {
+        self.enabled_modules.is_enabled(module)
     }
 
     /// Validate cross-section invariants after env overrides. Kept in `load`
@@ -1265,47 +1445,45 @@ impl BastonConfig {
     /// actionable error messages — callers must not have to remember to call
     /// the per-section validators themselves.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        self.server.validate()?;
         self.license.validate()?;
-        self.escrow.validate()?;
         self.api.validate()?;
         self.state_sync.validate()?;
         self.resources.validate()?;
         self.debug.validate()?;
-        if self.license.public_listing {
-            if self.license.mode != LicenseMode::Verified {
+        // Only held to its invariants when it actually runs: a `[db]` block
+        // left in a config with the module off is not a reason to refuse boot.
+        if self.enabled_modules.is_enabled(ModuleId::Db) {
+            self.db.validate()?;
+        }
+        if self.listing.enabled {
+            // Being listed and being slot-checked are the same bargain: the
+            // heartbeat needs a credential only `cfx` produces, and the client
+            // only checks entitlements when it finds the token that comes with
+            // it. Allowing a listing without one would be the whole point of
+            // the licence, skipped.
+            if !self.license.mode.authenticates() {
                 return Err(ConfigError::Invalid {
-                    section: "license",
-                    reason: "public_listing requires mode = \"verified\"".to_owned(),
+                    section: "listing",
+                    reason: "listing requires [license] mode = \"cfx\"; a server cannot be \
+                             listed without an authenticated CFX identity"
+                        .to_owned(),
                 });
             }
-            let listing_ip =
-                self.license
-                    .listing_ip_override
-                    .ok_or_else(|| ConfigError::Invalid {
-                        section: "license",
-                        reason: "public_listing requires listing_ip_override".to_owned(),
-                    })?;
-            if listing_ip.is_unspecified() || listing_ip.is_loopback() || listing_ip.is_multicast()
-            {
-                return Err(ConfigError::Invalid {
-                    section: "license",
-                    reason: "listing_ip_override must be a concrete unicast address".to_owned(),
-                });
-            }
-            if self.server.bind_address.is_unspecified()
-                || self.server.bind_address.is_loopback()
-                || self.server.bind_address.is_multicast()
-            {
-                return Err(ConfigError::Invalid {
-                    section: "server",
-                    reason: "public listing requires bind_address to select a concrete non-loopback interface".to_owned(),
-                });
-            }
-            if self.udp.port.unwrap_or(self.server.port) != self.server.port {
-                return Err(ConfigError::Invalid {
-                    section: "udp",
-                    reason: "public listing requires udp.port to equal server.port".to_owned(),
-                });
+            // An absent override is the normal case: CFX then reaches the
+            // server through the nucleus-assigned hostname. Only a value that
+            // is present has to be one players could actually connect to.
+            if let Some(ip) = self.listing.ip_override {
+                if ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() {
+                    return Err(ConfigError::Invalid {
+                        section: "listing",
+                        reason: format!(
+                            "ip_override ({ip}) must be a concrete public address, not a \
+                             wildcard, loopback or multicast one — or leave it unset and let \
+                             CFX reach the server through the hostname it assigns"
+                        ),
+                    });
+                }
             }
         }
         if self.voice.enabled && self.voice.port == self.server.port {
@@ -1336,6 +1514,9 @@ impl BastonConfig {
         // Phase D federation overrides (Docker Compose contract).
         if let Ok(zone_id) = std::env::var("ZONE_ID") {
             self.nats.zone_id = zone_id;
+        }
+        if let Ok(map) = std::env::var("BASTON_MAP_FILE") {
+            self.meshing.map_file = Some(map);
         }
         if let Ok(bounds) = std::env::var("ZONE_BOUNDS") {
             self.meshing.zone_bounds = Some(bounds);

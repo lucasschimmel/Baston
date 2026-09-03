@@ -151,6 +151,11 @@ impl ServerGameState {
         // A same-owner re-create refreshes the blob but must not lose the
         // kinematic state already established for this object id.
         let previous = self.entities.get(&object_id);
+        // Decode before moving the blob into the entity, as `apply_sync` does.
+        // The create record is the only place the creation nodes appear —
+        // model, population type, and a ped's seat — so a create that is not
+        // parsed loses them permanently: no later sync record carries them.
+        let decoded = parse_sync_tree(entity_type, true, &data, self.length_hack, self.build);
         let mut entity = ServerEntity {
             object_id,
             uniqifier,
@@ -182,13 +187,6 @@ impl ServerGameState {
             create_data: data,
             data: Vec::new(),
         };
-        let decoded = parse_sync_tree(
-            entity_type,
-            true,
-            &entity.data,
-            self.length_hack,
-            self.build,
-        );
         entity.apply_sync_data(&decoded);
         self.entities.insert(object_id, entity);
         self.routing_buckets

@@ -1,0 +1,214 @@
+---
+title: "Runbook: local live test"
+description: "Driving a real FiveM client against a local BASTON server."
+---
+
+This runbook uses the local TOML configs in the repository root:
+
+- `config/baston.mono.local.toml`
+- `baston.gateway-mesh.local.toml`
+- `baston.gateway-onesync.local.toml`
+- `baston.zone-a.local.toml`
+- `baston.zone-b.local.toml`
+
+They are ignored by Git via `*.local.toml`. Fill only the missing licence values
+when needed.
+
+## 1. Build and infrastructure
+
+```powershell
+cd D:\Dev\Fivem\Utils\Baston
+docker compose -f deploy/docker/docker-compose.yml up -d nats prometheus grafana
+cargo build --release -p baston-gateway -p baston-zone -p baston-loadtest
+```
+
+Check local quality:
+
+```powershell
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+## 2. Single-process real client test
+
+Terminal 1:
+
+```powershell
+.\tools\local\start-mono.ps1
+```
+
+FiveM F8:
+
+```text
+connect localhost:30120
+```
+
+Expected:
+
+- server logs `player authenticated: license:...`
+- `UDP connection established`
+- `session host elected`
+- `[axiom-core] onCharacterSpawned`
+
+Metrics:
+
+```powershell
+(Invoke-WebRequest http://localhost:9090/metrics).Content |
+  Select-String "state_updates_accepted|world_state_entities|state_updates_rejected"
+```
+
+Expected: `world_state_entities 1`, accepted updates increasing, rejected at 0.
+
+## 3. Two-zone mesh test
+
+Terminal infra:
+
+```powershell
+docker compose -f deploy/docker/docker-compose.yml up -d nats prometheus grafana
+```
+
+Terminal gateway:
+
+```powershell
+.\tools\local\start-gateway-mesh.ps1
+```
+
+Terminal zone A:
+
+```powershell
+.\tools\local\start-zone-a.ps1
+```
+
+Terminal zone B:
+
+```powershell
+.\tools\local\start-zone-b.ps1
+```
+
+Check zone registration:
+
+```powershell
+$Token = "<admin-token-from-your-local-toml>"
+Invoke-RestMethod -Headers @{ Authorization = "Bearer $Token" } `
+  http://localhost:8080/api/v1/zones
+```
+
+Expected: `zone-a` and `zone-b` registered and heartbeating.
+
+FiveM F8:
+
+```text
+connect localhost:30120
+```
+
+Handoff test: move across x = 0. Expected logs include handoff preparation and
+commit, with no kick and no long freeze.
+
+## 4. Two real clients
+
+Start the gateway with debug UDP logs:
+
+```powershell
+.\tools\local\start-gateway-mesh.ps1 -Log "info,udp=debug"
+```
+
+Start both zones as above, then connect two PCs or two FiveM installs:
+
+```text
+connect <server-ip>:30120
+```
+
+Checklist:
+
+- `session host elected` appears once
+- both players spawn
+- A sees B, B sees A
+- names appear above peds
+- movement is fluid
+- disconnecting A despawns A for B
+- `world_state_entities` reaches 2
+
+## 5. OneSync test
+
+Terminal:
+
+```powershell
+.\tools\local\start-onesync.ps1
+```
+
+FiveM F8:
+
+```text
+connect localhost:30120
+```
+
+Checklist:
+
+- no `HS_MISMATCH` loop
+- spawn works
+- with two clients, peds and vehicles replicate
+- no critical `unhandled game message` logs
+
+## 6. Licence gate
+
+`gate` is the only check BASTON performs, and it checks the key's *shape*, not
+its validity — nothing here contacts CFX. Edit
+`config/baston.mono.local.toml` or a zone config:
+
+```toml
+[license]
+mode = "gate"
+sv_license_key = "cfxk_FILL_ME"
+```
+
+Expected: the server refuses to boot on an empty, whitespace-carrying, short
+or `REPLACE_ME` key, naming the fix; a well-formed key boots with a warning
+that no licence is enforced.
+
+There is no `verified` mode any more — a config carrying one fails to parse.
+See [`docs/operations/licensing.md`](../licensing.md).
+
+## 7. displayinfo overlay
+
+In the config you launch with:
+
+```toml
+[debug]
+display_info = "everyone"
+refresh_hz = 5
+```
+
+Connect, then in the game console:
+
+```
+/displayinfo 3
+```
+
+Expected: a right-aligned readout appears. Level 3 needs section 3's two-zone
+mesh to show anything under `Mesh:`; on a single-process server it says so
+explicitly instead of drawing an empty block.
+
+What to check against the rest of the runbook:
+
+- walk toward a zone edge — `edge` counts down, and `HANDOFF ARMED` appears
+  inside `[meshing].boundary_margin`, before the handoff logged by section 3;
+- with OneSync on (section 5), `scope` should track the entities around you and
+  `lag` should stay near zero;
+- `ping` here is the server's measurement, so it will not always match the
+  client's own — a persistent gap is the interesting case, not a bug in the
+  overlay.
+
+If nothing appears, the server logs the refusal reason and the overlay prints
+it on screen for eight seconds.
+
+## 8. Useful endpoints
+
+```powershell
+$Token = "<admin-token-from-your-local-toml>"
+Invoke-RestMethod -Headers @{ Authorization = "Bearer $Token" } http://localhost:8080/api/v1/status
+Invoke-RestMethod -Headers @{ Authorization = "Bearer $Token" } http://localhost:8080/api/v1/resmon
+```
+
+Prometheus: http://localhost:9091
+
+Grafana: http://localhost:3001

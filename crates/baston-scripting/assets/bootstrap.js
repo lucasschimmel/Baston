@@ -331,6 +331,35 @@
     dispatchStateBagChanges,
     collectZoneTransferState,
   };
+  // --- database (the `db` module) ---
+  //
+  // Every call returns a promise: the query runs on the server's tokio
+  // runtime, never on this isolate's thread, so one slow statement cannot
+  // stall a resource's events. The Lua side polls the same pool from a
+  // coroutine — different shape, one implementation.
+  async function dbQuery(kind, sql, params) {
+    const raw = await ops.op_db_query(kind, String(sql), JSON.stringify(params ?? []));
+    const decoded = JSON.parse(raw);
+    if (decoded && typeof decoded === "object" && decoded.__error) {
+      throw new Error(`Db.${kind}: ${decoded.__error}`);
+    }
+    return decoded;
+  }
+
+  globalThis.Db = {
+    /** Every matching row. */
+    query: (sql, params) => dbQuery("rows", sql, params),
+    /** How many rows the statement affected. */
+    execute: (sql, params) => dbQuery("execute", sql, params),
+    /** The first column of the first row, or null. */
+    scalar: (sql, params) => dbQuery("scalar", sql, params),
+    /**
+     * The id the insert generated. Null on PostgreSQL, which reports ids
+     * through RETURNING rather than out of band.
+     */
+    insert: (sql, params) => dbQuery("insert", sql, params),
+  };
+
   globalThis.RegisterZoneTransferState = RegisterZoneTransferState;
 
   // --- FiveM-style globals ---

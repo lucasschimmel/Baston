@@ -1,5 +1,9 @@
 //! B3 exit-criterion tests: a real ENet client performs the FiveM game
 //! handshake against the BASTON UDP server on loopback.
+// Driven by JavaScript resources (deferral handlers, exports, dist/ layouts),
+// so they run in the bundles that contain V8. The Lua runtime has its own
+// tests in baston-scripting; see docs/guides/modules.md for what it covers.
+#![cfg(feature = "scripting-js")]
 
 use std::net::UdpSocket;
 use std::sync::Arc;
@@ -319,7 +323,7 @@ async fn spawn_sequence_end_to_end() {
     // Load the real axiom-core server script from the repo.
     let server_js = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../resources/axiom-core/dist/server/index.js"),
+            .join("../../examples/resources/axiom-core/dist/server/index.js"),
     )
     .unwrap();
     // Observe onCharacterSpawned from Rust via a marker event.

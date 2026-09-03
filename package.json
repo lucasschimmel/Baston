@@ -1,0 +1,16 @@
+{
+  "name": "baston",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "docs:dev": "cd apps/docs && astro dev",
+    "docs:build": "cd apps/docs && astro build",
+    "docs:preview": "cd apps/docs && astro preview"
+  },
+  "trustedDependencies": [
+    "esbuild",
+    "sharp"
+  ]
+}

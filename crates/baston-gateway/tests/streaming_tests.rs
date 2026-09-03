@@ -1,5 +1,9 @@
 //! streamFiles integration: getConfiguration advertising, basename download,
 //! hash validation, stream-only resources, hot-reload invalidation.
+// Driven by JavaScript resources (deferral handlers, exports, dist/ layouts),
+// so they run in the bundles that contain V8. The Lua runtime has its own
+// tests in baston-scripting; see docs/guides/modules.md for what it covers.
+#![cfg(feature = "scripting-js")]
 
 use std::path::Path;
 use std::sync::Arc;
@@ -68,7 +72,7 @@ async fn app_with_downloads(dir: &Path) -> (axum::Router, std::sync::Arc<tokio::
     let script_host = ScriptHost::spawn(deferrals, Arc::clone(&players)).unwrap();
     let resource_manager = ResourceManager::new(script_host.clone(), dir.to_owned());
     resource_manager.discover().await.unwrap();
-    resource_manager.start_all().await.unwrap();
+    resource_manager.start_all().await;
 
     let auth = baston_gateway::AuthService::new(&config.auth).unwrap();
     let downloads = DownloadPolicy::new(&config.resources);
@@ -77,7 +81,8 @@ async fn app_with_downloads(dir: &Path) -> (axum::Router, std::sync::Arc<tokio::
         downloads,
         builtins: baston_gateway::http::BuiltinResources::from_config(&config),
         config,
-        license_token: std::sync::RwLock::new(None),
+        cfx: None,
+        icon: None,
         resource_manager,
         players,
         script_host,

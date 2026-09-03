@@ -5,8 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+baston-zonemap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 dashmap = { workspace = true }
 form_urlencoded = "1"
 rmp-serde = { workspace = true }

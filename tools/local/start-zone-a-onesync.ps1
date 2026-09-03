@@ -5,6 +5,6 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 Set-Location $Root
-$env:BASTON_CONFIG = "baston.zone-a-onesync.local.toml"
+$env:BASTON_CONFIG = "config/baston.zone-a-onesync.local.toml"
 $env:RUST_LOG = $Log
 & "C:\Users\osiri\.cache\baston-target\release\baston-zone.exe"

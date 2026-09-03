@@ -1,11 +1,11 @@
 //! BASTON gateway binary — Phase A runs gateway + zone in one process.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use baston_config::BastonConfig;
 use baston_gateway::voice::GatewayVoice;
 use baston_gateway::{router, AppState, AuthService, PlayerRegistry};
+use baston_modules::{Bundle, ModuleId, ModuleSet};
 use baston_scripting::{DeferralRegistry, ScriptHost};
 use baston_zone::resource_loader::{spawn_hot_reload, ResourceManager};
 
@@ -23,6 +23,38 @@ fn raise_timer_resolution() {
     if result != 0 {
         tracing::warn!(target: "baston", result, "timeBeginPeriod(1) failed — expect timer jitter");
     }
+}
+
+/// One line naming the bundle and the resolved module set.
+///
+/// Printed on every boot because it is what a support channel needs first: an
+/// operator pastes it and the reader knows which binary is running and what it
+/// has switched on, without a round trip. Modules that are compiled in but off
+/// are listed too — "absent" and "off" are different problems with different
+/// fixes, and collapsing them is how support threads go in circles.
+fn print_module_line(set: ModuleSet) {
+    const RESET: &str = "\x1b[0m";
+    const D: &str = "\x1b[38;5;245m";
+    let on = set.slugs();
+    let off: Vec<&str> = set.disabled().map(ModuleId::slug).collect();
+    let on = if on.is_empty() {
+        "none".to_owned()
+    } else {
+        on.join(", ")
+    };
+    println!("{D}   bundle      {RESET}{}", Bundle::current());
+    println!("{D}   modules on  {RESET}{on}");
+    if !off.is_empty() {
+        println!("{D}   modules off {RESET}{}", off.join(", "));
+    }
+    let absent: Vec<&str> = set.absent().map(ModuleId::slug).collect();
+    if !absent.is_empty() {
+        println!(
+            "{D}   absent      {RESET}{} (needs another bundle){D} — see --modules{RESET}",
+            absent.join(", ")
+        );
+    }
+    println!();
 }
 
 /// Startup banner. BASTON is a from-scratch FiveM server core in Rust — not a
@@ -43,16 +75,53 @@ fn print_banner() {
            \n\
            {D}   transport   {RESET}ENet 1.3 + FiveM message layer (protocol reverse-engineered)\n\
            {D}   auth        {RESET}real CFX ticket verification (offline RSA)\n\
-           {D}   scripting   {RESET}deno_core / V8 — runs FiveM JS resources unmodified\n\
+           {D}   scripting   {RESET}{scripting}\n\
            {D}   state sync  {RESET}NATS JetStream · dirty-flag deltas · AoI culling\n\
            {D}   benchmarked {RESET}100 players @ p50 39ms / p99 69ms · 0.6 Mbps · 0 desyncs\n\
            {D}   version     {RESET}baston {ver} · tokio · axum · rustls\n",
         ver = env!("CARGO_PKG_VERSION"),
+        scripting = scripting_line(),
     );
+}
+
+/// What this bundle can actually run, for the banner.
+///
+/// Derived from the compiled capabilities rather than hardcoded: a `lua`
+/// binary announcing V8 would be the banner's first lie, and the banner is
+/// what operators quote back to us.
+fn scripting_line() -> &'static str {
+    match (
+        ModuleId::ScriptingJs.is_compiled_in(),
+        ModuleId::ScriptingLua.is_compiled_in(),
+    ) {
+        (true, true) => "deno_core / V8 + mlua — runs FiveM JS and Lua resources unmodified",
+        (true, false) => "deno_core / V8 — runs FiveM JS resources unmodified",
+        (false, true) => "mlua / Lua 5.4 — runs FiveM Lua resources unmodified",
+        (false, false) => "none — this bundle runs no resources",
+    }
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // `--modules` answers "what is in this binary and what is switched on"
+    // without booting the server, so it stays usable on a host whose config is
+    // broken — which is exactly when the question gets asked.
+    if std::env::args().any(|arg| arg == "--modules") {
+        let config_path = BastonConfig::discover();
+        let set = match BastonConfig::load(&config_path) {
+            Ok(config) => config.enabled_modules,
+            Err(e) => {
+                eprintln!(
+                    "note: {} did not load ({e});\n      showing build defaults instead.\n",
+                    config_path.display()
+                );
+                ModuleSet::defaults()
+            }
+        };
+        print!("{}", baston_modules::report(set));
+        return Ok(());
+    }
+
     // Both ring (reqwest) and aws-lc-rs (axum-server) are compiled in.
     // Install aws-lc-rs explicitly so rustls doesn't panic at first TLS use.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -69,16 +138,27 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(windows)]
     raise_timer_resolution();
 
-    let config_path = std::env::var("BASTON_CONFIG").unwrap_or_else(|_| "baston.toml".into());
-    let mut config = BastonConfig::load(Path::new(&config_path))?;
-    // Authenticate and apply the licensed slot cap before opening metrics,
-    // voice, game, admin, or HTTP listeners.
-    let mut cfx_runtime = baston_gateway::cfx::bootstrap(&mut config).await?;
+    let config_path = BastonConfig::discover();
+    let mut config = BastonConfig::load(&config_path)?;
+    let modules = config.enabled_modules;
+    print_module_line(modules);
+    // Settings whose module is off do nothing. Saying so at boot is the whole
+    // point of the module system's error surface: the alternative is an
+    // operator editing [voice] for an hour while nothing changes.
+    for (section, module) in &config.inert_sections {
+        tracing::warn!(target: "modules",
+            "[{section}] is configured but module \"{module}\" is disabled — those settings are inert");
+    }
+    // Identity first: the licence may lower max_players, and every listener
+    // below advertises that number.
+    let cfx_identity = baston_gateway::cfx::authenticate(&mut config).await?;
     tracing::info!(name = %config.server.name, port = config.server.port,
         "BASTON online — speaking the FiveM protocol, zero FXServer C++");
 
-    // Prometheus /metrics endpoint (jalon C6).
-    if config.metrics.enabled {
+    // Prometheus /metrics endpoint (jalon C6). The `metrics` instrumentation
+    // stays unconditional in core code — the facade is a near-no-op without a
+    // recorder — so only the exporter is gated (ADR-002).
+    if modules.is_enabled(ModuleId::Metrics) {
         let addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.metrics.port));
         match metrics_exporter_prometheus::PrometheusBuilder::new()
             .with_http_listener(addr)
@@ -99,7 +179,7 @@ async fn main() -> anyhow::Result<()> {
     // the script host so the MUMBLE_* natives are live from the first
     // resource load. Sessions are created when a client's Mumble side
     // authenticates; the UDP task tears them down on game disconnect.
-    let voice = if config.voice.enabled {
+    let voice = if modules.is_enabled(ModuleId::Voice) {
         Some(
             baston_voice::server::spawn(baston_voice::server::VoiceServerConfig {
                 bind: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
@@ -119,6 +199,30 @@ async fn main() -> anyhow::Result<()> {
     if let Some(voice) = &voice {
         script_host.set_voice_control(Arc::new(GatewayVoice(voice.clone())));
     }
+    // The database pool backing the `Db` surface in both engines. Connected
+    // before the first resource runs: a resource routinely queries from
+    // onResourceStart, and a pool that appears later would fail those calls
+    // for no reason the operator could see.
+    #[cfg(feature = "db")]
+    if modules.is_enabled(ModuleId::Db) {
+        let db = baston_db::Db::connect(&config.db).await?;
+        tracing::info!(target: "db", driver = %db.driver(), "db module ready");
+        // Results nobody collected would otherwise accumulate one entry per
+        // abandoned query, for the process lifetime.
+        {
+            let db = db.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    interval.tick().await;
+                    db.sweep();
+                }
+            });
+        }
+        script_host.set_db(Arc::new(baston_gateway::db::GatewayDb(db)));
+    }
+
     // Resource KVP is durable storage from a script's point of view, so it has
     // to be loaded before the first resource runs and swept afterwards: a
     // deferred write must not sit in memory until a crash takes it.
@@ -189,10 +293,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     resource_manager.discover().await?;
-    resource_manager.start_all().await?;
+    resource_manager.start_all().await;
 
     // Keep the watcher alive for the process lifetime.
-    let _watcher = if config.dev.hot_reload {
+    let _watcher = if modules.is_enabled(ModuleId::HotReload) {
         Some(spawn_hot_reload(Arc::clone(&resource_manager))?)
     } else {
         None
@@ -253,15 +357,56 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(Arc::new(ownership).run());
     }
 
+    // Entity creation from scripts: the control surface reserves network ids
+    // synchronously (a script needs its handle back immediately) and queues the
+    // creation for the UDP task's next sync tick, which owns the world.
+    //
+    // Built here, before the mesh gRPC server starts accepting: a zone can
+    // register the instant that socket is up, and leasing ids from a slot that
+    // is not filled yet would answer "this gateway has no world" — which the
+    // zone is right to treat as permanent.
+    //
+    // Only with OneSync. The msgRoute relay has no server-authoritative world,
+    // so a spawn there is accepted and dropped at the tick; leaving
+    // `NoWorldControl` in place instead gives scripts the server-local record
+    // that path is designed around.
+    let world = config
+        .state_sync
+        .onesync
+        .is_enabled()
+        .then(baston_gateway::GatewayWorldControl::new);
+
     // Phase D: zone federation (gRPC registry + routing). Disabled by default;
     // Docker Compose enables it via [meshing] in baston.toml or env.
     let (mesh, mut recovery_kick_rx) = if config.meshing.enabled {
-        let registry = Arc::new(baston_gateway::ZoneRegistry::new(
-            std::time::Duration::from_secs(config.meshing.zone_timeout_secs),
-        ));
+        let zone_timeout = std::time::Duration::from_secs(config.meshing.zone_timeout_secs);
+        // A map file is refused rather than skipped: booting without the map
+        // the operator wrote would silently fall back to letting each zone
+        // claim whatever rectangle it likes, which is a different server.
+        let registry = Arc::new(match config.map_file_path() {
+            Some(path) => {
+                let (map, warnings) = baston_protocol::ZoneMap::load(&path).map_err(|e| {
+                    anyhow::anyhow!("{e}\n\nSee docs/server/zone-map.md for the format.")
+                })?;
+                for warning in warnings {
+                    tracing::warn!(target: "gateway", "zone map: {warning}");
+                }
+                tracing::info!(target: "gateway",
+                    "zone map loaded from {}: {} region(s) across {} zone(s)",
+                    path.display(), map.regions().len(), map.zone_ids().len());
+                baston_gateway::ZoneRegistry::with_map(zone_timeout, map)
+            }
+            None => baston_gateway::ZoneRegistry::new(zone_timeout),
+        });
         let router = Arc::new(baston_gateway::ConnectionRouter::new());
         let mesh = baston_gateway::GatewayMesh::new(Arc::clone(&registry), Arc::clone(&router));
         mesh.set_player_directory(Arc::clone(&players));
+        // Lets zones lease ids and ship spawns. Absent with onesync off, which
+        // makes both world RPCs answer "unavailable" rather than accept work
+        // nothing will apply.
+        if let Some((control, _)) = &world {
+            mesh.set_world_control(Arc::clone(control));
+        }
         let grpc_addr: std::net::SocketAddr = config.meshing.gateway_grpc_addr.parse()?;
         mesh.spawn_grpc_server(grpc_addr);
         // Zone failure recovery (D6): reroute orphans to surviving zones.
@@ -399,6 +544,23 @@ async fn main() -> anyhow::Result<()> {
     let addr = std::net::SocketAddr::new(bind_address, port);
     let tcp_listener = std::net::TcpListener::bind(addr)?;
     tcp_listener.set_nonblocking(true)?;
+
+    // Clients are forced onto this build, so it is the one whose sync-tree node
+    // layouts the server must decode against. The string was parsed and bounded
+    // at config load; enforcing nothing is still a decode against *some* build,
+    // so say which one rather than let it be discovered from a desync.
+    let sync_build = match config.server.game_build()? {
+        Some(build) => baston_protocol::rage::sync_parse::GameBuild(build),
+        None => {
+            let fallback = baston_protocol::rage::sync_parse::GameBuild::default();
+            tracing::warn!(target: "baston", build = fallback.0,
+                "[server] enforce_game_build is empty — clients keep their own build, and \
+                 sync trees are decoded against {} regardless; set it to the build your \
+                 resources need", fallback.0);
+            fallback
+        }
+    };
+
     let udp = baston_gateway::udp::spawn_with_mesh_on(
         bind_address,
         udp_port,
@@ -410,17 +572,15 @@ async fn main() -> anyhow::Result<()> {
         Some(Arc::clone(&state_ingest)),
         mesh_forward,
         config.state_sync.clone(),
-        // Clients are forced onto this build, so it is the one whose sync-tree
-        // node layouts the server must decode against.
-        baston_protocol::rage::sync_parse::GameBuild(
-            config
-                .server
-                .enforce_game_build
-                .parse()
-                .unwrap_or_else(|_| baston_protocol::rage::sync_parse::GameBuild::default().0),
-        ),
+        sync_build,
         baston_gateway::debug_info::DebugFeedSetup {
-            config: config.debug.clone(),
+            // Gated here rather than inside the feed: with the module off the
+            // UDP task must not even learn the overlay's access list.
+            config: if modules.is_enabled(ModuleId::DebugOverlay) {
+                config.debug.clone()
+            } else {
+                baston_config::DebugConfig::default()
+            },
             server_name: config.server.name.clone(),
             // The overlay's mesh section only exists where a federation does.
             mesh: mesh.as_ref().map(|mesh| baston_gateway::MeshView {
@@ -430,13 +590,15 @@ async fn main() -> anyhow::Result<()> {
             }),
         },
     )?;
-    // Entity creation from scripts: the control surface reserves network ids
-    // synchronously (a script needs its handle back immediately) and queues the
-    // creation for the UDP task's next sync tick, which owns the world.
-    {
-        let (world_control, world_commands) = baston_gateway::GatewayWorldControl::new();
+    if let Some((world_control, world_commands)) = world {
         script_host.set_world_control(world_control);
         udp.set_world_commands(world_commands);
+    } else {
+        tracing::info!(
+            target: "onesync",
+            "onesync is off: entity-creation natives return a server-local record, \
+             not a networked entity"
+        );
     }
     // Voice teardown follows the game connection; clients learn the voice
     // endpoint through the replicated voice_external* convars.
@@ -452,7 +614,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Admin + monitoring/control API on the admin port. Legacy /admin/*
     // routes need the mesh; /api/v1/* works in single-process mode too.
-    {
+    // Off by default (ADR-002): it can kick players and stop resources, so it
+    // opens only where an operator asked for it.
+    if modules.is_enabled(ModuleId::AdminApi) {
         let keyring = Arc::new(baston_gateway::api::KeyRing::from_config(
             &config.api,
             &config.meshing.admin_token,
@@ -479,6 +643,7 @@ async fn main() -> anyhow::Result<()> {
                 server_name: config.server.name.clone(),
                 max_players: config.server.max_players,
                 started_at: std::time::Instant::now(),
+                modules,
             },
             legacy,
             config.meshing.admin_port,
@@ -518,7 +683,10 @@ async fn main() -> anyhow::Result<()> {
                     let Ok(v) = serde_json::from_slice::<serde_json::Value>(&msg.payload) else {
                         continue;
                     };
-                    let (Some(source), Some(event)) = (v["source"].as_u64(), v["event"].as_str())
+                    // Signed: a zone relaying `TriggerClientEvent(name, -1, …)`
+                    // sends -1, and `as_u64` would have discarded the message
+                    // rather than broadcasting it.
+                    let (Some(source), Some(event)) = (v["source"].as_i64(), v["event"].as_str())
                     else {
                         continue;
                     };
@@ -548,7 +716,14 @@ async fn main() -> anyhow::Result<()> {
                     };
                     if let Some(args) = args {
                         let packet = baston_protocol::events::build_net_event(event, &args);
-                        udp.control().send(source as u32, 0, packet);
+                        match baston_scripting::EventTarget::from_script(source) {
+                            baston_scripting::EventTarget::All => {
+                                udp.control().broadcast(0, packet)
+                            }
+                            baston_scripting::EventTarget::One(source) => {
+                                udp.control().send(source, 0, packet)
+                            }
+                        }
                     }
                 }
             });
@@ -569,10 +744,21 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let auth = AuthService::new(&config.auth)?;
+    // Seed the replicated variables before any resource starts, so a script
+    // reading GetConvar at load sees what the operator configured.
+    script_host.seed_server_vars(config.server.vars.clone());
+
+    // The icon is validated at boot rather than per request: an operator whose
+    // logo is the wrong size finds out now, not from an empty space in a
+    // server browser they cannot see.
+    let icon = match &config.server.icon {
+        Some(path) => Some(baston_gateway::http::load_icon(path)?),
+        None => None,
+    };
+
     let state = Arc::new(AppState {
-        license_token: std::sync::RwLock::new(
-            cfx_runtime.as_ref().map(|runtime| runtime.token().clone()),
-        ),
+        cfx: cfx_identity.map(std::sync::Arc::new),
+        icon,
         downloads: baston_gateway::http::DownloadPolicy::new(&config.resources),
         builtins: baston_gateway::http::BuiltinResources::from_config(&config),
         config,
@@ -587,71 +773,48 @@ async fn main() -> anyhow::Result<()> {
 
     let http_state = Arc::clone(&state);
     let (http_ready_tx, http_ready_rx) = tokio::sync::oneshot::channel();
-    let mut http_server = tokio::spawn(async move {
-        if let Some(tls) = http_state.config.tls.clone() {
-            let tls_config =
-                axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert_pem, &tls.key_pem)
-                    .await?;
-            tracing::info!(%addr, "HTTPS gateway listening");
-            let server = axum_server::from_tcp_rustls(tcp_listener, tls_config);
-            let _ = http_ready_tx.send(());
-            // Connect info, so a resource's HTTP handler sees the peer address
-            // the way FXServer reports `request.address`.
-            server
-                .serve(
-                    router(http_state)
-                        .into_make_service_with_connect_info::<std::net::SocketAddr>(),
-                )
-                .await?;
-        } else {
-            // Plain HTTP is the Phase B-validated mode: the FiveM client sends
-            // some game-port requests in plaintext, and getConfiguration hands
-            // out a literal http://<host>/files URL so downloads stay plain.
-            let listener = tokio::net::TcpListener::from_std(tcp_listener)?;
-            tracing::info!(%addr, "HTTP gateway listening");
-            let _ = http_ready_tx.send(());
-            axum::serve(
-                listener,
-                router(http_state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
-            )
-            .await?;
-        }
+    let http_server = tokio::spawn(async move {
+        // One port, both protocols. The FiveM client sends some game-port
+        // requests as plain HTTP — and `getConfiguration` hands out literal
+        // `http://…/files` URLs — while the CFX server list queries a listed
+        // server over HTTPS. Serving only one of the two breaks the other, so
+        // the first bytes of each connection decide, exactly as FXServer does.
+        let tls = match baston_gateway::http::multiplex::acceptor(http_state.config.tls.as_ref()) {
+            Ok(acceptor) => {
+                match http_state.config.tls.as_ref() {
+                    Some(config) => tracing::info!(%addr,
+                        "gateway listening — HTTP, and HTTPS with {}",
+                        config.cert_pem.display()),
+                    None => tracing::info!(%addr,
+                        "gateway listening — HTTP, and HTTPS with a self-signed \
+                         certificate generated at boot"),
+                }
+                Some(acceptor)
+            }
+            // Losing TLS costs the server list, not the server: clients keep
+            // connecting over plain HTTP, so this is a warning, not a stop.
+            Err(e) => {
+                tracing::warn!(target: "http", error = %e,
+                    "no TLS on the game port — the CFX server list queries over \
+                     HTTPS and will not be able to reach this server");
+                tracing::info!(%addr, "gateway listening — HTTP only");
+                None
+            }
+        };
+
+        let listener = tokio::net::TcpListener::from_std(tcp_listener)?;
+        let _ = http_ready_tx.send(());
+        baston_gateway::http::multiplex::serve(listener, router(http_state), tls).await?;
         Ok::<(), anyhow::Error>(())
     });
     http_ready_rx
         .await
         .map_err(|_| anyhow::anyhow!("HTTP gateway stopped before its accept loop was ready"))?;
 
-    if let Some(runtime) = &mut cfx_runtime {
-        tokio::select! {
-            result = runtime.activate_public_listing(&state.config) => {
-                if let Err(error) = result {
-                    http_server.abort();
-                    let _ = http_server.await;
-                    return Err(error.into());
-                }
-            }
-            result = &mut http_server => {
-                result??;
-                anyhow::bail!("HTTP gateway stopped during public CFX activation");
-            }
-        }
-        *state
-            .license_token
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(runtime.token().clone());
+    // Advertise only now: the listeners are up, so the first heartbeat
+    // describes a server that can actually be joined.
+    baston_gateway::cfx::spawn_listing(&state)?;
 
-        tokio::select! {
-            result = &mut http_server => result??,
-            reason = runtime.wait_for_failure() => {
-                http_server.abort();
-                anyhow::bail!(
-                    "authenticated CFX broker stopped; shutting down the gateway: {reason}"
-                );
-            }
-        }
-    } else {
-        http_server.await??;
-    }
+    http_server.await??;
     Ok(())
 }

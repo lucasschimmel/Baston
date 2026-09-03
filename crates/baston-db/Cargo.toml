@@ -1,0 +1,26 @@
+[package]
+name = "baston-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The `db` capability (ADR-002, Tier 2). Drivers are features: an operator who
+# runs PostgreSQL should not compile a MySQL client, and vice versa.
+[dependencies]
+sqlx = { workspace = true }
+dashmap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+metrics = { workspace = true }
+baston-config = { workspace = true }
+
+[features]
+# A build with no driver could not talk to anything, so SQLite — the one that
+# needs no server — is the floor rather than an option.
+default = ["sqlite"]
+sqlite = ["sqlx/sqlite"]
+postgres = ["sqlx/postgres"]
+mysql = ["sqlx/mysql"]

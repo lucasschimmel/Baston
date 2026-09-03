@@ -36,6 +36,29 @@ fn client_error(reason: impl Into<String>) -> Response {
     Json(json!({ "error": reason.into() })).into_response()
 }
 
+/// The refusal message for a client that did not switch to the enforced build,
+/// or `None` when there is nothing to refuse.
+///
+/// Two cases pass deliberately. A server enforcing nothing has no build to
+/// compare against. And a client that reports no `gameBuild` at all is not
+/// evidence of a mismatch: the field is optional in `InitConnectRequest`, and
+/// BASTON's own load-test client omits it.
+fn game_build_mismatch(enforced: &str, declared: Option<&str>) -> Option<String> {
+    if enforced.is_empty() {
+        return None;
+    }
+    // `"<build>"` or `"<build>_<revision>"` — the revision is the client's
+    // patch level within the build and is not enforced.
+    let declared = declared?.split('_').next()?;
+    if declared == enforced {
+        return None;
+    }
+    Some(format!(
+        "Client/server game build mismatch: {declared}/{enforced}. Restart your game client \
+         so it switches to build {enforced}."
+    ))
+}
+
 /// Peer IP from proxy headers (as FXServer's EndPointIdentityProvider).
 ///
 /// SECURITY: `x-real-ip` is attacker-controlled unless a trusted reverse proxy
@@ -53,6 +76,11 @@ fn peer_ip(headers: &HeaderMap) -> String {
 }
 
 /// Resolve the connecting player's identifiers: dev bypass or real CFX auth.
+// The error is a ready-made `Response` the caller returns as-is. It is 128
+// bytes, which trips `result_large_err` from Rust 1.98 on, but boxing it would
+// only be undone one frame later — a handler must hand axum a `Response`. This
+// runs once per connecting player, not on a hot path.
+#[allow(clippy::result_large_err)]
 async fn authenticate(
     state: &AppState,
     body: &str,
@@ -121,6 +149,18 @@ pub async fn client_connect(
     let game_name = extract_field(&body, "gameName").unwrap_or_else(|| "gta5".to_owned());
     if game_name != "gta5" {
         return client_error(format!("Client/Server game mismatch: {game_name}/gta5"));
+    }
+    // The other half of `sv_enforceGameBuild`: `/info.json` tells the client
+    // which build to run and it switches before connecting (NetLibrary.cpp),
+    // then reports here the build it actually launched. Nothing downstream
+    // looks at it again — the sync-tree decoder is built once, from the
+    // enforced build — so a mismatch allowed through this point is a silent
+    // desync rather than a refused connection.
+    if let Some(reason) = game_build_mismatch(
+        &state.config.server.enforce_game_build,
+        extract_field(&body, "gameBuild").as_deref(),
+    ) {
+        return client_error(reason);
     }
 
     let source = state.players.allocate_source();
@@ -235,4 +275,34 @@ pub async fn admin_drop_player(
         tracing::error!(target: "gateway", error = %e, "failed to fire playerDropped");
     }
     StatusCode::NO_CONTENT.into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::game_build_mismatch;
+
+    #[test]
+    fn the_enforced_build_and_its_revisions_are_accepted() {
+        assert!(game_build_mismatch("3258", Some("3258")).is_none());
+        assert!(game_build_mismatch("3258", Some("3258_1")).is_none());
+    }
+
+    #[test]
+    fn another_build_is_refused_and_named() {
+        let reason = game_build_mismatch("3258", Some("2802")).expect("refused");
+        assert!(reason.contains("2802/3258"), "{reason}");
+    }
+
+    #[test]
+    fn a_revision_suffix_does_not_hide_a_different_build() {
+        assert!(game_build_mismatch("3258", Some("2802_1")).is_some());
+    }
+
+    #[test]
+    fn nothing_to_compare_against_is_not_a_mismatch() {
+        // Enforcing nothing has no build to check, and a client that reports no
+        // build (the load-test client does not) is not evidence of a wrong one.
+        assert!(game_build_mismatch("", Some("2802")).is_none());
+        assert!(game_build_mismatch("3258", None).is_none());
+    }
 }

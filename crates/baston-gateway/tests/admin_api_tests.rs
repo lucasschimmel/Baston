@@ -16,7 +16,7 @@ async fn state_with_two_zones() -> AdminState {
     registry
         .register_zone(
             "zone-a",
-            Aabb::new(-4000.0, -4000.0, 0.0, 4000.0),
+            Some(Aabb::new(-4000.0, -4000.0, 0.0, 4000.0)),
             "127.0.0.1:50051",
             1500,
         )
@@ -25,7 +25,7 @@ async fn state_with_two_zones() -> AdminState {
     registry
         .register_zone(
             "zone-b",
-            Aabb::new(0.0, -4000.0, 4000.0, 4000.0),
+            Some(Aabb::new(0.0, -4000.0, 4000.0, 4000.0)),
             "127.0.0.1:50052",
             1500,
         )

@@ -5,7 +5,6 @@
 //! heartbeat, ZoneService gRPC). Clients never connect here — the Gateway
 //! is the only FiveM-facing process; state flows over NATS, control over gRPC.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use baston_config::BastonConfig;
@@ -13,83 +12,6 @@ use baston_protocol::Aabb;
 use baston_scripting::{DeferralRegistry, ScriptHost};
 use baston_zone::mesh::{ZoneMesh, ZoneMeshHooks};
 use baston_zone::resource_loader::{spawn_hot_reload, ResourceManager};
-
-/// Wire the optional escrow bridge. Global CFX identity belongs exclusively to
-/// the public gateway, so zone processes never authenticate, register, or
-/// heartbeat independently.
-#[cfg(all(feature = "escrow", windows))]
-fn wire_cfx_sidecar(
-    manager: &Arc<ResourceManager>,
-    config: &BastonConfig,
-) -> anyhow::Result<Option<baston_escrow_plugin::SidecarHandle>> {
-    if !config.escrow.enabled {
-        return Ok(None);
-    }
-    if config.escrow.backend == baston_config::EscrowBackend::Direct {
-        anyhow::bail!(
-            "[escrow] backend = \"direct\" is unsupported (svadhesive exposes no FFI \
-             decrypt symbol); use backend = \"sidecar\""
-        );
-    }
-
-    let fxserver_path = config
-        .escrow
-        .fxserver_path
-        .clone()
-        .or_else(|| config.license.fxserver_path.clone())
-        .ok_or_else(|| anyhow::anyhow!("escrow needs an fxserver_path"))?;
-
-    let license_key = {
-        let key = config.license.sv_license_key.trim();
-        if key.is_empty() {
-            None
-        } else {
-            Some(key.to_owned())
-        }
-    };
-    if license_key.is_none() {
-        tracing::warn!(target: "zone",
-            "escrow is enabled but [license] sv_license_key is empty — svadhesive needs the \
-             CFX server key to derive escrow decryption keys, so decryption will fail. Set \
-             [license] sv_license_key to your key from https://portal.cfx.re");
-    }
-
-    let params = baston_escrow_plugin::SidecarParams {
-        fxserver_path,
-        resources_dir: config.resources.path.clone(),
-        license_key,
-        // Zone-local escrow brokers allocate distinct private endpoints and
-        // never compete with the gateway's authenticated identity broker.
-        port: 0,
-        public_listing: None,
-    };
-    let handle = baston_escrow_plugin::SidecarHandle::start(&params)
-        .map_err(|e| anyhow::anyhow!("failed to start the FXServer sidecar: {e}"))?;
-
-    manager.set_script_decryptor(handle.decryptor());
-    tracing::info!(target: "zone", "escrow plugin active (zone-local CFX sidecar)");
-
-    Ok(Some(handle))
-}
-
-#[cfg(not(all(feature = "escrow", windows)))]
-fn wire_cfx_sidecar(
-    manager: &Arc<ResourceManager>,
-    config: &BastonConfig,
-) -> anyhow::Result<Option<()>> {
-    let _ = manager;
-    if config.escrow.enabled {
-        #[cfg(not(feature = "escrow"))]
-        tracing::warn!(target: "zone",
-            "escrow.enabled = true but this binary was built without the `escrow` feature \
-             — rebuild with `--features escrow`; continuing with plain resources");
-        #[cfg(all(feature = "escrow", not(windows)))]
-        tracing::warn!(target: "zone",
-            "escrow.enabled = true but this is not a Windows build — svadhesive.dll is \
-             Windows-only; continuing with plain resources");
-    }
-    Ok(None)
-}
 
 #[cfg(windows)]
 fn raise_timer_resolution() {
@@ -114,22 +36,39 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(windows)]
     raise_timer_resolution();
 
-    let config_path = std::env::var("BASTON_CONFIG").unwrap_or_else(|_| "baston.toml".into());
-    let config = BastonConfig::load(Path::new(&config_path))?;
+    let config_path = BastonConfig::discover();
+    let config = BastonConfig::load(&config_path)?;
     let zone_id = config.nats.zone_id.clone();
 
-    let bounds_str = config
-        .meshing
-        .zone_bounds
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("ZONE_BOUNDS (or [meshing].zone_bounds) is required"))?;
-    let bounds = Aabb::parse(&bounds_str).map_err(|e| anyhow::anyhow!("ZONE_BOUNDS: {e}"))?;
+    // Optional: a Gateway holding a map file decides every zone's territory
+    // and hands it back at registration, which makes a rectangle declared here
+    // a value that is read, ignored, and confusing. Without a map the Gateway
+    // has nothing else to go on and refuses the registration by name.
+    let bounds = match config.meshing.zone_bounds.as_deref() {
+        Some(raw) => Some(Aabb::parse(raw).map_err(|e| anyhow::anyhow!("ZONE_BOUNDS: {e}"))?),
+        None => None,
+    };
 
-    tracing::info!(target: "zone", zone = %zone_id,
-        "baston-zone starting — bounds=({},{},{},{}) gateway={}",
-        bounds.x_min, bounds.y_min, bounds.x_max, bounds.y_max, config.meshing.gateway_grpc);
+    match bounds {
+        Some(b) => tracing::info!(target: "zone", zone = %zone_id,
+            "baston-zone starting — declared bounds=({},{},{},{}) gateway={}",
+            b.x_min, b.y_min, b.x_max, b.y_max, config.meshing.gateway_grpc),
+        None => tracing::info!(target: "zone", zone = %zone_id,
+            "baston-zone starting — no declared bounds, expecting a territory from the \
+             gateway's map gateway={}", config.meshing.gateway_grpc),
+    }
 
-    if config.metrics.enabled {
+    // A zone runs the same module set as the gateway it federates with; only
+    // the modules a zone process actually owns are consulted here.
+    let modules = config.enabled_modules;
+    tracing::info!(target: "zone", bundle = %baston_modules::Bundle::current(),
+        modules = ?modules.slugs(), "resolved modules");
+    for (section, module) in &config.inert_sections {
+        tracing::warn!(target: "modules",
+            "[{section}] is configured but module \"{module}\" is disabled — those settings are inert");
+    }
+
+    if modules.is_enabled(baston_modules::ModuleId::Metrics) {
         let addr = std::net::SocketAddr::from(([0, 0, 0, 0], config.metrics.port));
         if let Err(e) = metrics_exporter_prometheus::PrometheusBuilder::new()
             .with_http_listener(addr)
@@ -168,11 +107,8 @@ async fn main() -> anyhow::Result<()> {
     let script_host =
         ScriptHost::spawn_with_net(Arc::clone(&deferrals), Arc::clone(&players), net_bridge)?;
     let resource_manager = ResourceManager::new(script_host.clone(), config.resources.path.clone());
-    // Optional zone-local escrow bridge. Gateway owns global CFX identity.
-    // Keep the handle alive for resource decryptions.
-    let _cfx_sidecar = wire_cfx_sidecar(&resource_manager, &config)?;
     resource_manager.discover().await?;
-    resource_manager.start_all().await?;
+    resource_manager.start_all().await;
     let _watcher = if config.dev.hot_reload {
         Some(spawn_hot_reload(Arc::clone(&resource_manager))?)
     } else {
@@ -191,19 +127,22 @@ async fn main() -> anyhow::Result<()> {
                 // already-packed payload crosses as a byte array, because JSON
                 // has no binary type and re-encoding it would corrupt it.
                 let payload = match msg {
+                    // `source` crosses as a signed number so -1 keeps its
+                    // FiveM meaning — every client — all the way to the
+                    // gateway, which owns the peers a zone cannot reach.
                     baston_scripting::NetOutbound::ClientEvent {
-                        source,
+                        target,
                         event,
                         args_json,
                     } => serde_json::json!({
-                        "source": source, "event": event, "args": args_json,
+                        "source": target.to_script(), "event": event, "args": args_json,
                     }),
                     baston_scripting::NetOutbound::ClientEventRaw {
-                        source,
+                        target,
                         event,
                         payload,
                     } => serde_json::json!({
-                        "source": source, "event": event, "raw": payload,
+                        "source": target.to_script(), "event": event, "raw": payload,
                     }),
                 };
                 if let Err(e) = nats
@@ -456,6 +395,28 @@ async fn main() -> anyhow::Result<()> {
     mesh.register_with_gateway().await?;
     mesh.spawn_heartbeat_loop(config.meshing.heartbeat_interval_secs);
 
+    // Server-authored entities. This zone runs the resources, but the world
+    // clients talk to lives in the gateway, so ids are leased from it and
+    // spawns are shipped to it. After registration on purpose: the gateway
+    // refuses to lease to a zone it does not know.
+    match baston_zone::world_control::ZoneWorldControl::connect(
+        zone_id.clone(),
+        mesh.gateway_client(),
+    )
+    .await
+    {
+        Ok(control) => script_host.set_world_control(control),
+        Err(baston_zone::world_control::WorldUnavailable::Refused(message)) => {
+            // Leave NoWorldControl: the create natives then return a
+            // server-local record, the same as a single-process server with
+            // onesync off, instead of minting ids nothing will ever apply.
+            tracing::warn!(
+                target: "zone",
+                "server-side entity creation unavailable: {message}"
+            );
+        }
+    }
+
     // ── Boundary detection + handoff orchestration (D3/D4) ──
     let handoff_manager = baston_zone::handoff_manager::HandoffManager::new(
         zone_id.clone(),
@@ -469,7 +430,6 @@ async fn main() -> anyhow::Result<()> {
     let cleanup_host = script_host.clone();
     baston_zone::boundary_loop::BoundaryLoop {
         detector: baston_zone::boundary_detector::BoundaryDetector::new(
-            bounds,
             config.meshing.boundary_margin,
         ),
         manager: Arc::clone(&handoff_manager),

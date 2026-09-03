@@ -4,5 +4,7 @@ target/
 .cargo/
 *.pem
 docs/
-monitoring/
-resources/**/node_modules/
+# The documentation website is a separate app; a server image never needs it.
+apps/
+deploy/monitoring/
+**/node_modules/

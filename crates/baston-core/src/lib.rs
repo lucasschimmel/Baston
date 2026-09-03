@@ -3,15 +3,14 @@
 //!
 //! Currently this is the [`script_decryptor`] boundary: the zone reads raw
 //! script bytes and hands them to a [`script_decryptor::ScriptDecryptor`]
-//! before feeding them to the V8 isolate. The default implementation is a
-//! no-op ([`script_decryptor::PlainDecryptor`]); the optional
-//! `baston-escrow-plugin` supplies a decrypting one for CFX Asset Escrow
-//! resources. The core never depends on the plugin.
+//! before feeding them to the script runtime. The only implementation today is
+//! the no-op [`script_decryptor::PlainDecryptor`], which passes plaintext
+//! through and refuses a CFX-encrypted (escrow) file with an actionable error
+//! rather than handing ciphertext to V8.
 //!
-//! The [`license`] boundary is the same shape: the core models the CFX
-//! server-licence verdict ([`license::LicenseStatus`]) and the pure, restrictive
-//! enforcement logic; the optional plugin obtains the verdict from the genuine
-//! CFX component via the sidecar. The core never talks to CFX.
+//! The trait is deliberately kept without a second implementation: it is the
+//! documented seam where escrow support returns, and the one place that knows
+//! an `.fxap` payload is not loadable. See
+//! `docs/adr/003-remove-the-fxserver-sidecar.md`.
 
-pub mod license;
 pub mod script_decryptor;

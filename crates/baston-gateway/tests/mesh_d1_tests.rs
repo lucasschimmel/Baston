@@ -67,7 +67,7 @@ async fn start_zone(cluster: &TestCluster, zone_id: &str, bounds: Aabb) -> Arc<Z
     let port = free_port();
     let zone = ZoneMesh::connect(
         zone_id.to_string(),
-        bounds,
+        Some(bounds),
         &cluster.gateway_addr,
         format!("127.0.0.1:{port}"),
         1500,
@@ -219,13 +219,16 @@ async fn confirm_handoff_atomically_updates_routing() {
     assert_eq!(cluster.mesh.router.zone_of(1).as_deref(), Some("zone-b"));
 }
 
+/// Declaring no bounds is legal — a gateway with a map decides territories
+/// itself. This gateway has no map, so nobody knows what the zone owns, and
+/// saying so beats letting it run owning nothing.
 #[tokio::test]
-async fn register_zone_rejects_missing_bounds() {
+async fn register_zone_without_bounds_is_refused_when_no_map_can_place_it() {
     let cluster = start_gateway().await;
     let mut gw = GatewayServiceClient::connect(format!("http://{}", cluster.gateway_addr))
         .await
         .unwrap();
-    let err = gw
+    let response = gw
         .register_zone(RegisterZoneRequest {
             zone_id: "zone-x".into(),
             bounds: None,
@@ -233,6 +236,13 @@ async fn register_zone_rejects_missing_bounds() {
             max_players: 10,
         })
         .await
-        .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        .expect("the call itself is well formed")
+        .into_inner();
+
+    assert!(!response.accepted);
+    assert!(
+        response.message.contains("declared no bounds") && response.message.contains("map_file"),
+        "the refusal must name both ways out: {}",
+        response.message
+    );
 }

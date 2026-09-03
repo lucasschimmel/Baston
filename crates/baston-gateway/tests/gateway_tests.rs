@@ -1,5 +1,9 @@
 //! Milestones A4 + A5 exit-criterion tests, run against the real router with
 //! a real script host and a temp resources directory.
+// Driven by JavaScript resources (deferral handlers, exports, dist/ layouts),
+// so they run in the bundles that contain V8. The Lua runtime has its own
+// tests in baston-scripting; see docs/guides/modules.md for what it covers.
+#![cfg(feature = "scripting-js")]
 
 use std::path::Path;
 use std::sync::Arc;
@@ -7,7 +11,6 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use baston_config::{BastonConfig, OneSyncMode};
-use baston_core::license::LicenseKeyToken;
 use baston_gateway::{router, AppState, PlayerRegistry};
 use baston_scripting::{DeferralRegistry, ScriptHost};
 use baston_zone::resource_loader::ResourceManager;
@@ -50,27 +53,25 @@ fn write_axiom_core(dir: &Path, script: &str) {
 }
 
 async fn app(dir: &Path, script: &str) -> axum::Router {
-    app_with_token(dir, script, None).await
+    app_with_mode(dir, script, OneSyncMode::Off).await
 }
 
-async fn app_with_token(
-    dir: &Path,
-    script: &str,
-    license_token: Option<LicenseKeyToken>,
-) -> axum::Router {
-    app_with_mode(dir, script, license_token, OneSyncMode::Off).await
+async fn app_with_mode(dir: &Path, script: &str, onesync: OneSyncMode) -> axum::Router {
+    app_with_config(dir, script, onesync, "").await
 }
 
-async fn app_with_mode(
+async fn app_with_config(
     dir: &Path,
     script: &str,
-    license_token: Option<LicenseKeyToken>,
     onesync: OneSyncMode,
+    extra_toml: &str,
 ) -> axum::Router {
     write_axiom_core(dir, script);
     // Tests run with dev.auth_bypass (no launcher ticket available in CI).
-    let mut config: BastonConfig =
-        toml::from_str("[server]\nport = 30120\n[dev]\nauth_bypass = true\n").unwrap();
+    let mut config: BastonConfig = toml::from_str(&format!(
+        "[server]\nport = 30120\n{extra_toml}[dev]\nauth_bypass = true\n"
+    ))
+    .unwrap();
     config.resources.path = dir.to_owned();
     config.connection.deferral_timeout_secs = 2;
     config.state_sync.onesync = onesync;
@@ -78,16 +79,18 @@ async fn app_with_mode(
     let deferrals = Arc::new(DeferralRegistry::new());
     let players = Arc::new(PlayerRegistry::new());
     let script_host = ScriptHost::spawn(deferrals, Arc::clone(&players)).unwrap();
+    script_host.seed_server_vars(config.server.vars.clone());
     let resource_manager = ResourceManager::new(script_host.clone(), dir.to_owned());
     resource_manager.discover().await.unwrap();
-    resource_manager.start_all().await.unwrap();
+    resource_manager.start_all().await;
 
     let auth = baston_gateway::AuthService::new(&config.auth).unwrap();
     router(Arc::new(AppState {
         downloads: baston_gateway::http::DownloadPolicy::new(&config.resources),
         builtins: baston_gateway::http::BuiltinResources::from_config(&config),
         config,
-        license_token: std::sync::RwLock::new(license_token),
+        cfx: None,
+        icon: None,
         resource_manager,
         players,
         script_host,
@@ -115,27 +118,154 @@ async fn info_json_returns_server_metadata() {
     let json = body_json(response).await;
     assert_eq!(json["name"], "BASTON Dev");
     assert_eq!(json["onesync"]["enabled"], false);
+    // With no CFX identity, the token must be absent rather than empty: the
+    // client skips its entitlement lookup entirely when it finds nothing here,
+    // and an empty string would send it looking up a policy for "".
     assert!(json["vars"].get("sv_licenseKeyToken").is_none());
     assert_eq!(json["vars"]["sv_maxClients"], "32");
     assert_eq!(json["resources"][0], "axiom-core");
 }
 
 #[tokio::test]
-async fn info_json_publishes_authenticated_cfx_token() {
+async fn server_vars_are_published_verbatim_without_baston_knowing_their_names() {
+    // This is CFX's `sets` mechanism: the browser reads sv_projectName, tags,
+    // locale and the rest, and the *server* never looks any of them up.
+    // FXServer iterates the ConVar_ServerInfo flag; so does this. A field CFX
+    // adds tomorrow works without a code change.
     let dir = tempfile::tempdir().unwrap();
-    let token = LicenseKeyToken::new("authenticated-cfx-token").unwrap();
-    let app = app_with_token(dir.path(), AXIOM_CORE_JS, Some(token)).await;
+    let app = app_with_config(
+        dir.path(),
+        AXIOM_CORE_JS,
+        OneSyncMode::Off,
+        "[server.vars]\n         sv_projectName = \"Chez Lucas\"\n         sv_projectDesc = \"Serveur entre potes\"\n         tags = \"roleplay, francais\"\n         locale = \"fr-FR\"\n         banner_detail = \"https://example.test/banner.png\"\n         a_field_baston_has_never_heard_of = \"still published\"\n",
+    )
+    .await;
 
-    let response = app
-        .oneshot(Request::get("/info.json").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-    let json = body_json(response).await;
+    let json = body_json(
+        app.oneshot(Request::get("/info.json").body(Body::empty()).unwrap())
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(json["vars"]["sv_projectName"], "Chez Lucas");
+    assert_eq!(json["vars"]["sv_projectDesc"], "Serveur entre potes");
+    assert_eq!(json["vars"]["tags"], "roleplay, francais");
+    assert_eq!(json["vars"]["locale"], "fr-FR");
+    assert_eq!(
+        json["vars"]["banner_detail"],
+        "https://example.test/banner.png"
+    );
+    assert_eq!(
+        json["vars"]["a_field_baston_has_never_heard_of"],
+        "still published"
+    );
+}
+
+#[tokio::test]
+async fn well_known_vars_also_drive_the_promoted_fields() {
+    // sv_hostname / sv_gametype / sv_mapname appear both in vars and as
+    // top-level fields. FXServer keeps them in sync because both read one
+    // convar; if they diverged here, the browser and the connect screen would
+    // disagree about what this server is.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_config(
+        dir.path(),
+        AXIOM_CORE_JS,
+        OneSyncMode::Off,
+        "[server.vars]\n         sv_hostname = \"Le Baston\"\n         sv_gametype = \"Racing\"\n         sv_mapname = \"Blaine County\"\n",
+    )
+    .await;
+
+    let json = body_json(
+        app.oneshot(Request::get("/info.json").body(Body::empty()).unwrap())
+            .await
+            .unwrap(),
+    )
+    .await;
 
     assert_eq!(
-        json["vars"]["sv_licenseKeyToken"],
-        "authenticated-cfx-token"
+        json["name"], "Le Baston",
+        "sv_hostname wins over [server] name"
     );
+    assert_eq!(json["gameType"], "Racing");
+    assert_eq!(json["mapName"], "Blaine County");
+}
+
+#[tokio::test]
+async fn the_promoted_fields_fall_back_when_no_var_is_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(dir.path(), AXIOM_CORE_JS).await;
+    let json = body_json(
+        app.oneshot(Request::get("/info.json").body(Body::empty()).unwrap())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(json["name"], "BASTON Dev");
+    assert_eq!(json["gameType"], "Roleplay");
+    assert_eq!(json["mapName"], "Los Santos");
+}
+
+#[tokio::test]
+async fn configuration_cannot_forge_the_variables_baston_owns() {
+    // ADR-004 from the other side. `Listing::heartbeat` stops a server being
+    // listed while hiding its token; this stops one *inventing* a token, or
+    // advertising a slot count its licence never granted. Both doors, or the
+    // invariant is decorative.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_config(
+        dir.path(),
+        AXIOM_CORE_JS,
+        OneSyncMode::Off,
+        "[server.vars]\n         sv_licenseKeyToken = \"forged-token\"\n         sv_maxClients = \"8000\"\n         onesync = \"on\"\n         onesync_enabled = \"true\"\n",
+    )
+    .await;
+
+    let json = body_json(
+        app.oneshot(Request::get("/info.json").body(Body::empty()).unwrap())
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    assert!(
+        json["vars"].get("sv_licenseKeyToken").is_none(),
+        "a server with no CFX identity must not publish one it invented"
+    );
+    assert_eq!(
+        json["vars"]["sv_maxClients"], "32",
+        "the real configured count"
+    );
+    assert_eq!(json["vars"]["onesync_enabled"], "false");
+    assert_eq!(json["vars"]["onesync"], "off");
+}
+
+#[tokio::test]
+async fn a_script_setting_a_convar_changes_what_the_browser_shows() {
+    // SetGameType and friends used to write to a store nothing read, so they
+    // looked like they worked and did not.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(
+        dir.path(),
+        r#"
+        SetGameType('Deathmatch');
+        SetMapName('Sandy Shores');
+        SetConvarServerInfo('sv_projectName', 'Set from a script');
+        "#,
+    )
+    .await;
+
+    let json = body_json(
+        app.oneshot(Request::get("/info.json").body(Body::empty()).unwrap())
+            .await
+            .unwrap(),
+    )
+    .await;
+
+    assert_eq!(json["gameType"], "Deathmatch");
+    assert_eq!(json["mapName"], "Sandy Shores");
+    assert_eq!(json["vars"]["sv_projectName"], "Set from a script");
 }
 
 #[tokio::test]
@@ -265,7 +395,7 @@ async fn init_connect_response_has_fxserver_fields() {
 #[tokio::test]
 async fn onesync_mode_is_consistent_in_info_and_init_connect() {
     let dir = tempfile::tempdir().unwrap();
-    let app = app_with_mode(dir.path(), AXIOM_CORE_JS, None, OneSyncMode::On).await;
+    let app = app_with_mode(dir.path(), AXIOM_CORE_JS, OneSyncMode::On).await;
 
     let info = app
         .clone()
@@ -420,4 +550,114 @@ async fn client_connect_times_out_when_deferral_never_resolves() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+}
+
+/// The config default and the decoder's fallback are one build in two crates.
+///
+/// They are not linked by a type — `baston-config` does not depend on
+/// `baston-protocol` for one integer — so this is what keeps them from drifting
+/// into a server that advertises one build and decodes another.
+#[test]
+fn the_default_build_is_the_build_the_decoder_falls_back_to() {
+    assert_eq!(
+        baston_config::DEFAULT_GAME_BUILD,
+        baston_protocol::rage::sync_parse::GameBuild::default().0
+    );
+}
+
+#[tokio::test]
+async fn info_json_advertises_the_enforced_build() {
+    // The client reads this pre-connect and build-switches to it, which is what
+    // decides the weapons, vehicles and DLC props a player actually has.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_with_config(
+        dir.path(),
+        AXIOM_CORE_JS,
+        OneSyncMode::Off,
+        "enforce_game_build = \"3407\"\n",
+    )
+    .await;
+    let json = body_json(
+        app.oneshot(Request::get("/info.json").body(Body::empty()).unwrap())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(json["vars"]["sv_enforceGameBuild"], "3407");
+}
+
+#[tokio::test]
+async fn init_connect_refuses_a_client_that_did_not_switch_build() {
+    // A client on another build used to be accepted and then desynchronise:
+    // the sync-tree decoder is built once, from the enforced build, and never
+    // consults what the client reported.
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(dir.path(), AXIOM_CORE_JS).await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/client")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "method=initConnect&name=Stale&protocol=12&gameName=gta5&gameBuild=2802&guid=4",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let json = body_json(response).await;
+    assert!(
+        json["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("2802/3258")),
+        "{json}"
+    );
+
+    // The enforced build, and a revision within it, still connect.
+    let accepted = app
+        .oneshot(
+            Request::post("/client")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "method=initConnect&name=Fresh&protocol=12&gameName=gta5&gameBuild=3258_1&guid=5",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(body_json(accepted).await["status"], "ok");
+}
+
+/// The server list takes the heartbeat's `fallbackData` and *then* queries the
+/// server back. A live run against the real ingress reported
+/// `server request failed for endpoint .../dynamic.json`, because nothing
+/// served it.
+#[tokio::test]
+async fn the_endpoints_the_server_list_queries_back_are_served() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(dir.path(), AXIOM_CORE_JS).await;
+
+    let response = app
+        .clone()
+        .oneshot(Request::get("/dynamic.json").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let dynamic = body_json(response).await;
+    assert_eq!(dynamic["clients"], 0);
+    assert_eq!(dynamic["hostname"], "BASTON Dev");
+    // A string, as GameServer.cpp writes it — the list parses it as one.
+    assert_eq!(dynamic["sv_maxclients"], "32");
+
+    let response = app
+        .oneshot(Request::get("/players.json").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let players = body_json(response).await;
+    assert_eq!(
+        players.as_array().map(Vec::len),
+        Some(0),
+        "players.json is a list, empty with nobody connected: {players}"
+    );
 }

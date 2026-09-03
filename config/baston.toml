@@ -1,0 +1,162 @@
+# BASTON runtime configuration (Phase B)
+
+# Which capabilities this process runs. See docs/guides/modules.md and
+# docs/adr/002-module-tiers.md.
+#
+# Modules are additive deltas over the documented defaults, so a module shipping
+# in a later version does not require rewriting this file. Run
+# `baston-gateway --modules` to see what this binary contains and what is on.
+#
+# Defaults: voice, metrics, hot-reload and the compiled scripting runtime are
+# on; admin-api, debug-overlay and profiler are off (they widen the control
+# surface, so they open only where you ask).
+#
+# The older per-section flags ([voice] enabled, [metrics] enabled,
+# [debug] display_info, [dev] hot_reload) still work and stay
+# authoritative for their own module. If a flag and this section disagree, the
+# server refuses to boot rather than silently picking one.
+[modules]
+enable = []
+disable = []
+
+[server]
+name = "BASTON Dev"
+port = 30120
+bind_address = "0.0.0.0"
+max_players = 32
+# The GTA build every client runs. The client reads this pre-connect and
+# switches to it, so it decides the weapons, vehicles and DLC props your
+# players have; the server decodes entity sync trees against the same value,
+# and refuses a client that reports another build. A decimal build number, or
+# "" to enforce nothing. This is also the default.
+enforce_game_build = "3258"
+
+[auth]
+# RSA public key endpoint for offline CFX ticket verification
+# (same endpoint FXServer uses: CNL_ENDPOINT api/ticket/pubkey).
+pubkey_url = "https://lambda.fivem.net/api/ticket/pubkey"
+http_timeout_secs = 5
+
+[resources]
+path = "examples/resources"
+
+[udp]
+# ENet game transport. Defaults to server.port (FiveM muxes TCP+UDP on one port).
+# port = 30120
+poll_interval_ms = 5
+
+[connection]
+# Seconds to wait for playerConnecting deferrals before kicking.
+deferral_timeout_secs = 10
+
+[dev]
+hot_reload = true
+# Phase B: real CFX auth. Flip to true only for offline dev without a launcher.
+auth_bypass = false
+
+# The `displayinfo` overlay: a server-assembled debug readout drawn in-game
+# (mesh topology, OneSync state, per-player link stats). The renderer ships
+# inside the BASTON binary — there is nothing to install. See docs/guides/displayinfo.md.
+[debug]
+# "off"       : disabled; the overlay is not even sent to clients. Default.
+# "allowlist" : only players whose identifiers are listed in `allow` below.
+# "everyone"  : anyone connected — it exposes zone topology and per-player
+#               network stats, so keep this to development servers.
+display_info = "off"
+# Identifiers cleared for the overlay, as GetPlayerIdentifiers reports them.
+allow = []
+# Snapshots per second, per subscriber (1-30).
+refresh_hz = 5
+
+# How the server presents itself in the FiveM server browser.
+#
+# This is CFX's `sets` mechanism. BASTON does not know the name of any field
+# here and does not validate them — FXServer doesn't either: it publishes every
+# variable carrying the ConVar_ServerInfo flag and lets the browser decide what
+# it recognises. So the fields below work, and so will whatever CFX adds next.
+#
+# Scripts write to the same store with SetConvarServerInfo / SetGameType /
+# SetMapName, and win over what is written here.
+#
+# EVERYTHING HERE IS PUBLIC: it is served on /info.json before authentication.
+# Never put a secret in it.
+[server.vars]
+# sv_projectName = "Chez Lucas"
+# sv_projectDesc = "Serveur roleplay entre potes"
+# tags = "roleplay, francais, serious"
+# locale = "fr-FR"
+# banner_detail = "https://example.com/banner-1920x384.png"
+# banner_connecting = "https://example.com/connecting.png"
+# sv_hostname and sv_gametype/sv_mapname also drive the top-level fields of
+# /info.json; sv_hostname overrides [server] name.
+# sv_hostname = "Le Baston"
+
+# Your CFX server identity. See docs/operations/licensing.md.
+[license]
+# "off"  : no check at all (dev/LAN). Warns every boot.
+# "gate" : require a well-formed sv_license_key — shape only, never validity.
+#          Catches the empty or placeholder key before you go live.
+# "cfx"  : validate the key with CFX, read what it grants, and apply it.
+#          Required to appear in the FiveM server list.
+#
+# Choosing "cfx" couples two things. The server becomes discoverable, AND its
+# slot count becomes bounded by what the licence actually grants — because
+# publishing the licence token is what makes the FiveM client look those
+# entitlements up. A server that wants more slots than its tier allows wants
+# "off": it will not be listed, and no client will check it.
+mode = "off"
+# Your CFX server licence, created at https://portal.cfx.re.
+# Required for "gate" and "cfx".
+sv_license_key = ""
+
+# Presence in the public FiveM server list. Off by default, and requires
+# [license] mode = "cfx" — the heartbeat is signed with a credential only that
+# exchange produces.
+[listing]
+enabled = false
+# The public address players connect to. Required when enabled; BASTON refuses
+# to guess it, and a wildcard, loopback or multicast address is rejected.
+# ip_override = "203.0.113.10"
+
+# Monitoring/control HTTP API keys (served on meshing.admin_port, default
+# 8080). Each key is a named bearer token with explicit permissions; control
+# actions are appended to the audit log. See docs/reference/api.md.
+[api]
+audit_log = "baston-audit.jsonl"
+# [[api.keys]]
+# name = "discord-bot"                    # identifies the key in the audit log
+# token = "REPLACE_ME_openssl_rand_hex_32"
+# permissions = ["monitor.read"]          # monitor.read | resource.control | player.kick | zone.drain
+
+# Embedded Mumble-compatible voice server (baston-voice crate). Off by
+# default. Enables a TCP(TLS)+UDP listener on `port` (control + voice share
+# the port number, standard Mumble). Env overrides: BASTON_VOICE_ENABLED,
+# BASTON_VOICE_PORT.
+[voice]
+enabled = false
+port = 30121
+# Advertised to clients as voice_externalAddress (their Mumble connects to
+# external_address:port). Empty = not advertised. Use the address players
+# reach the server at ("127.0.0.1" for local tests).
+external_address = ""
+
+# Pooled database access for scripts (the `db` module, off by default).
+# Enable with [modules] enable = ["db"]. Queries run on the server's runtime,
+# never on a script thread. See docs/guides/modules.md.
+[db]
+# sqlite:baston.db · postgres://user:pass@host/base · mysql://user:pass@host/base
+# The driver must be in your bundle: `db` ships sqlite, `db-postgres` and
+# `db-mysql` add theirs. Run `baston-gateway --modules` to see what you have.
+url = ""
+# Connections held open. Keep it under your database's own limit.
+pool_size = 10
+# A query over this many seconds is abandoned and reported to the script.
+query_timeout_secs = 15
+
+# NOTE: no [tls] section on purpose. The FiveM client sends some requests to
+# the game port in plaintext HTTP; a TLS-only listener breaks them with
+# "Received HTTP/0.9 when not allowed". Phase B validated the plain-HTTP path
+# on canary 31725 — getConfiguration hands out a literal http://<host>/files
+# fileServer URL so packfile downloads stay on plain HTTP (no %s → no https
+# rewrite). Re-enabling [tls] here reintroduces the HTTP/0.9 failure.
+# Proper HTTPS needs first-byte TLS/plain multiplexing on 30120 (future work).

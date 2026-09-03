@@ -1,0 +1,102 @@
+# BASTON Phase D — dev environment: gateway + 2 zones + NATS + monitoring.
+# The compose file is the source of truth for the multi-zone dev setup.
+#
+# Paths are relative to this file (deploy/docker/); the build context is the
+# repository root, because the Rust build needs the whole workspace.
+#
+#   docker compose -f deploy/docker/docker-compose.yml up
+services:
+  nats:
+    image: nats:2.11-alpine
+    command: ["--jetstream", "--cluster_name", "baston", "--http_port", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  gateway:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.gateway
+    ports:
+      - "30120:30120"       # FiveM TCP+UDP game port
+      - "30120:30120/udp"
+      - "50050:50050"       # GatewayService gRPC
+      - "8080:8080"         # admin API
+      - "9090:9090"         # Prometheus metrics
+    environment:
+      NATS_URL: "nats://nats:4222"
+      BASTON_GRPC_ADDR: "0.0.0.0:50050"
+      BASTON_MESHING_ENABLED: "true"
+      BASTON_ADMIN_TOKEN: "${BASTON_ADMIN_TOKEN:-dev-admin-token}"
+      RUST_LOG: "info"
+    volumes:
+      - ../../examples/resources:/app/resources
+      - ../../config/baston.docker.toml:/app/baston.toml:ro
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  zone-a:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.zone
+    environment:
+      ZONE_ID: "zone-a"
+      ZONE_BOUNDS: "-4000,-4000,0,4000"
+      GATEWAY_GRPC: "gateway:50050"
+      NATS_URL: "nats://nats:4222"
+      ZONE_GRPC_ADDR: "0.0.0.0:50051"
+      ZONE_PUBLIC_GRPC_ADDR: "zone-a:50051"
+      RUST_LOG: "info"
+    volumes:
+      - ../../examples/resources:/app/resources
+      - ../../config/baston.docker.toml:/app/baston.toml:ro
+    depends_on:
+      - gateway
+
+  zone-b:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.zone
+    environment:
+      ZONE_ID: "zone-b"
+      ZONE_BOUNDS: "0,-4000,4000,4000"
+      GATEWAY_GRPC: "gateway:50050"
+      NATS_URL: "nats://nats:4222"
+      ZONE_GRPC_ADDR: "0.0.0.0:50051"
+      ZONE_PUBLIC_GRPC_ADDR: "zone-b:50051"
+      RUST_LOG: "info"
+    volumes:
+      - ../../examples/resources:/app/resources
+      - ../../config/baston.docker.toml:/app/baston.toml:ro
+    depends_on:
+      - gateway
+
+  prometheus:
+    image: prom/prometheus:v3.4.0
+    volumes:
+      - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports:
+      - "9091:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    volumes:
+      - ../monitoring/grafana-datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
+      - ../monitoring/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/baston.yml:ro
+      - ../monitoring/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus

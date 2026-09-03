@@ -5,12 +5,17 @@ mod builtin;
 mod client;
 mod configuration;
 mod files;
-mod info;
+mod icon;
+pub mod multiplex;
+// `pub` because the CFX server-list heartbeat advertises the same document
+// `/info.json` serves — one source, so the two cannot diverge.
+pub mod info;
 mod packfile_cache;
 mod resource_endpoint;
 mod stream_cache;
 
 pub use builtin::{BuiltinResources, DISPLAYINFO};
+pub use icon::{load as load_icon, IconError};
 pub use packfile_cache::PackfileCache;
 pub use stream_cache::StreamCache;
 
@@ -21,7 +26,6 @@ use axum::http::Method;
 use axum::routing::{any, get, post};
 use axum::Router;
 use baston_config::BastonConfig;
-use baston_core::license::LicenseKeyToken;
 use baston_scripting::ScriptHost;
 use baston_zone::resource_loader::ResourceManager;
 use tower_http::cors::{Any, CorsLayer};
@@ -55,8 +59,13 @@ impl DownloadPolicy {
 /// Shared state for all HTTP handlers.
 pub struct AppState {
     pub config: BastonConfig,
-    /// Authenticated CFX token published only through the client protocol.
-    pub license_token: std::sync::RwLock<Option<LicenseKeyToken>>,
+    /// The authenticated CFX identity, when `[license] mode = "cfx"`.
+    ///
+    /// Owning one means the slot cap it carries has already been applied to
+    /// `config.server.max_players`; `baston_cfx::authenticate` is the only way
+    /// to build it. Read it through [`AppState::license_token`] rather than
+    /// reaching for the field, so every publication site is one grep away.
+    pub cfx: Option<Arc<baston_cfx::CfxIdentity>>,
     pub resource_manager: Arc<ResourceManager>,
     /// Shared with the script host so player natives see real data.
     pub players: Arc<PlayerRegistry>,
@@ -71,6 +80,32 @@ pub struct AppState {
     pub mesh: Option<Arc<crate::mesh::GatewayMesh>>,
     /// Resources served from inside the binary rather than from disk.
     pub builtins: BuiltinResources,
+    /// The base64 server icon, read once at boot from `[server] icon`.
+    ///
+    /// Held decoded-and-re-encoded rather than re-read per request: it is a
+    /// few kilobytes, `/info.json` is fetched by every connecting client, and
+    /// a disk read there would be on the connect path.
+    pub icon: Option<String>,
+}
+
+impl AppState {
+    /// The replicated server variables — `[server.vars]` plus whatever the
+    /// running scripts have set. See [`info::payload`] for the precedence.
+    #[must_use]
+    pub fn server_vars(&self) -> std::sync::Arc<dashmap::DashMap<String, String>> {
+        self.script_host.server_vars()
+    }
+
+    /// The token `/info.json` publishes, if this server has an identity.
+    ///
+    /// `None` is the honest answer for a server with no CFX identity, and it
+    /// is what keeps the client from looking up a policy that does not exist.
+    #[must_use]
+    pub fn license_token(&self) -> Option<&str> {
+        self.cfx
+            .as_deref()
+            .map(baston_cfx::CfxIdentity::info_json_token)
+    }
 }
 
 /// Build the gateway router.
@@ -78,6 +113,9 @@ pub fn router(state: Arc<AppState>) -> Router {
     let download_timeout = state.downloads.timeout;
     Router::new()
         .route("/info.json", get(info::info_json))
+        // The server list queries both of these back after a heartbeat.
+        .route("/dynamic.json", get(info::dynamic_json))
+        .route("/players.json", get(info::players_json))
         .route(
             "/files/{resource}/{*path}",
             get(files::serve_resource_file)

@@ -69,7 +69,7 @@ async fn forwarder_routes_to_current_zone_and_holds_during_handoff() {
     registry
         .register_zone(
             "zone-fwd-a",
-            baston_protocol::Aabb::new(-4000.0, -4000.0, 0.0, 4000.0),
+            Some(baston_protocol::Aabb::new(-4000.0, -4000.0, 0.0, 4000.0)),
             "127.0.0.1:1",
             100,
         )
@@ -78,7 +78,7 @@ async fn forwarder_routes_to_current_zone_and_holds_during_handoff() {
     registry
         .register_zone(
             "zone-fwd-b",
-            baston_protocol::Aabb::new(0.0, -4000.0, 4000.0, 4000.0),
+            Some(baston_protocol::Aabb::new(0.0, -4000.0, 4000.0, 4000.0)),
             "127.0.0.1:2",
             100,
         )

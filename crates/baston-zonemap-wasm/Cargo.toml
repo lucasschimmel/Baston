@@ -1,0 +1,16 @@
+[package]
+name = "baston-zonemap-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WebAssembly ABI over baston-zonemap, so the map editor validates exactly as the Gateway does."
+
+# cdylib is what `--target wasm32-unknown-unknown` turns into a .wasm module.
+# rlib keeps the crate testable on the host, where the ABI is just functions.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+baston-zonemap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

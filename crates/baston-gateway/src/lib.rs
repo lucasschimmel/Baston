@@ -6,12 +6,13 @@ pub mod api;
 pub mod auth;
 pub mod cfx;
 pub mod connection_router;
+#[cfg(feature = "db")]
+pub mod db;
 pub mod debug_info;
 pub mod http;
 pub mod mesh;
 pub mod mesh_forward;
 pub mod players;
-pub mod quadtree;
 pub mod script_http;
 pub mod state_aggregator;
 pub mod udp;

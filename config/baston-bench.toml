@@ -1,0 +1,30 @@
+# Benchmark configuration (jalon C6): auth bypassed, 128 slots.
+[server]
+name = "BASTON Bench"
+port = 30120
+max_players = 128
+
+[resources]
+path = "examples/resources"
+
+[udp]
+poll_interval_ms = 2
+
+[nats]
+url = "nats://127.0.0.1:4222"
+zone_id = "zone-a"
+
+[state_sync]
+sync_interval_ms = 16
+push_interval_ms = 50
+aoi_radius = 450.0
+max_speed_mps = 200.0
+ownership_interval_secs = 5
+
+[metrics]
+enabled = true
+port = 9090
+
+[dev]
+hot_reload = false
+auth_bypass = true
