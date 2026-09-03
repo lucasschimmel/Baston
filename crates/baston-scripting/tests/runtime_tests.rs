@@ -1514,3 +1514,58 @@ async fn stopping_a_mixed_resource_stops_both_halves() {
     assert!(kvp.get("mixed", "lua").is_none(), "the Lua half still ran");
     assert!(kvp.get("mixed", "js").is_none(), "the JS half still ran");
 }
+
+/// The exact shape cfx-server-data's `player-data` runs on every connection:
+/// walk the identifiers, then persist one through msgpack. There was a JS test
+/// for the identifier natives and no Lua one, which is precisely how the gap
+/// survived -- the ops were wired for V8 only, so every Lua resource asking who
+/// connected got the unknown-native `nil` and `ipairs` died on it.
+#[tokio::test]
+#[cfg(feature = "lua")]
+async fn lua_reads_player_identity_and_round_trips_msgpack() {
+    let (host, _, players) = host_with_players();
+    players.insert(baston_protocol::PlayerInfo {
+        source: 7,
+        name: "Lucas".into(),
+        identifiers: vec!["license:abc123".into(), "ip:127.0.0.1".into()],
+    });
+
+    host.load_resource(
+        "player-data-shape",
+        vec![ScriptSource {
+            path: "server.lua".into(),
+            code: r#"
+                local seen = {}
+                for _, identifier in ipairs(GetPlayerIdentifiers(7)) do
+                    seen[#seen + 1] = identifier
+                end
+                assert(#seen == 2, 'identifier count is ' .. #seen)
+                assert(seen[1] == 'license:abc123', seen[1])
+                assert(GetPlayerName(7) == 'Lucas', 'name')
+                assert(GetPlayerEndpoint(7) == '127.0.0.1', 'endpoint')
+                assert(GetPlayerIdentifierByType(7, 'license') == 'license:abc123', 'by type')
+
+                -- A source that has gone away must still yield a table. The
+                -- resource loops over this without checking, and so does ours.
+                assert(#GetPlayerIdentifiers(999) == 0, 'unknown source must be empty, not nil')
+
+                local packed = msgpack.pack({ id = 42 })
+                assert(msgpack.unpack(packed).id == 42, 'msgpack round trip')
+
+                SetResourceKvp('reached-the-end', 'yes')
+            "#
+            .into(),
+        }],
+    )
+    .await
+    .expect("a resource reading player identity must load");
+
+    // The assertions above only prove anything if the script got past them.
+    assert_eq!(
+        host.kvp()
+            .get("player-data-shape", "reached-the-end")
+            .as_deref(),
+        Some("yes"),
+        "the script stopped before the end, so an assertion above failed"
+    );
+}

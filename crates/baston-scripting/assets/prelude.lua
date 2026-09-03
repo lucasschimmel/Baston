@@ -34,6 +34,12 @@ local function invoke(name, kind, args)
     return json_decode(raw)
 end
 
+-- A global in FiveM, not a module to require. The `_G` metatable below only
+-- resolves names that look like natives, and this one is lowercase, so without
+-- this line `msgpack.pack` indexes nil -- which is exactly how player-data
+-- failed after it could finally read a player's identifiers.
+msgpack = host.msgpack
+
 Citizen = Citizen or {}
 
 function Citizen.InvokeNative(name, ...)
@@ -80,6 +86,20 @@ end
 -- own files, and what playernames does — asked for a file belonging to nil.
 function GetCurrentResourceName()
     return host.resource_name()
+end
+
+-- Not a native: FiveM defines this in `scheduler.lua`, over the two natives
+-- below, and it is a Lua-runtime function in the docs for that reason. Built
+-- the same way here so a resource sees the same shape -- a table, always, so
+-- `ipairs` over it is safe even for a source that has gone away.
+function GetPlayerIdentifiers(player)
+    local identifiers = {}
+
+    for i = 0, GetNumPlayerIdentifiers(player) - 1 do
+        identifiers[#identifiers + 1] = GetPlayerIdentifier(player, i)
+    end
+
+    return identifiers
 end
 
 -- FiveM's older name for the same thing. A resource calling it is opting into

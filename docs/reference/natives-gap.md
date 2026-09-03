@@ -18,9 +18,26 @@ Comparison rule:
 Implementation note:
 - Many server natives now route through the generated compatibility shim in `bootstrap.js` and `op_cfx_server_native`; world-state-backed behavior is implemented for the synthetic entity paths, while unsupported subsystems return typed neutral values instead of throwing.
 
+:::danger[This table counts reachable names, not implementations]
+The rule above asks whether a name is *callable*. Every name is, because
+`bootstrap.js` generates a global for each one and unknown names fall through to
+a typed neutral value. So a native that answers `nil` for every argument counts
+here exactly like one that reads real state, and "Remaining to implement: 0"
+means "nothing throws", not "everything works".
+
+It also only looks at the **JS** surface. `GET_PLAYER_IDENTIFIER` and its
+neighbours are listed below as present and were, for JavaScript — the ops were
+wired for V8 only. In Lua the same names fell through to the neutral value, so
+`GetPlayerIdentifiers` returned `nil` and every connecting player was rejected
+by `cfx-server-data`'s `player-data`. The table said 360/360 throughout.
+
+Read a row as "this name will not crash a script". To know whether a native
+does its job, read the code or a test.
+:::
+
 Official server/shared natives: 360 (286 server, 74 shared).
-Already present in Baston under this rule: 360.
-Remaining to implement: 0 (0 server, 0 shared).
+Reachable in Baston under this rule: 360.
+Genuinely implemented: not measured by this document.
 
 ## Already present in Baston
 

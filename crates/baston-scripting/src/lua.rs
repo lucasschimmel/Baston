@@ -260,6 +260,39 @@ impl LuaRuntime {
             .set("json_decode", decode)
             .map_err(|e| self.init_error(&e))?;
 
+        // --- msgpack, which FiveM exposes as a plain global ---
+        //
+        // Not a convenience: `msgpack` is how cfx-server-data stores structured
+        // values in the KVP store, so a resource that persists anything reaches
+        // for it. It travels through `serde_json::Value` because that is the
+        // shape both runtimes already agree on; the cost is that a Lua integer
+        // and a Lua float that happen to be equal round-trip to the same
+        // number, which is what JSON already does to every value here.
+        let pack = lua
+            .create_function(|lua, value: Value| {
+                let json: serde_json::Value = lua.from_value(value)?;
+                let bytes = rmp_serde::to_vec(&json).map_err(mlua::Error::external)?;
+                lua.create_string(&bytes)
+            })
+            .map_err(|e| self.init_error(&e))?;
+
+        let unpack = lua
+            .create_function(|lua, packed: mlua::String| {
+                let json: serde_json::Value =
+                    rmp_serde::from_slice(&packed.as_bytes()).map_err(mlua::Error::external)?;
+                lua.to_value_with(&json, json_to_lua())
+            })
+            .map_err(|e| self.init_error(&e))?;
+
+        let msgpack = lua.create_table().map_err(|e| self.init_error(&e))?;
+        msgpack.set("pack", pack).map_err(|e| self.init_error(&e))?;
+        msgpack
+            .set("unpack", unpack)
+            .map_err(|e| self.init_error(&e))?;
+        table
+            .set("msgpack", msgpack)
+            .map_err(|e| self.init_error(&e))?;
+
         // --- the natives, shared verbatim with the V8 path ---
         //
         // One entry point, not two: Lua has no equivalent of the JS polyfill's

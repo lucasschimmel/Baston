@@ -567,6 +567,55 @@ pub(crate) fn cfx_server_native(
             .into_iter()
             .map(|source| source.to_string())
             .collect::<Vec<_>>()),
+        // Player identity. The directory has carried these since it existed,
+        // but only the JS ops read them, so a Lua resource asking who connected
+        // got the unknown-native `nil` — and `ipairs(nil)` is where
+        // cfx-server-data's player-data died on every single connection.
+        "GET_PLAYER_NAME" => serde_json::json!(state
+            .borrow::<SharedPlayers>()
+            .0
+            .get(json_arg_netid(&args, 0))
+            .map(|p| p.name)
+            .unwrap_or_default()),
+        "GET_NUM_PLAYER_IDENTIFIERS" => serde_json::json!(state
+            .borrow::<SharedPlayers>()
+            .0
+            .identifier_count(json_arg_netid(&args, 0))
+            as u32),
+        // Out of range is `nil`, not `""`: the count above bounds the loop, and
+        // an empty string would read as a real identifier that happens to be
+        // blank.
+        "GET_PLAYER_IDENTIFIER" => {
+            let index = json_arg_i64(&args, 1).max(0) as usize;
+            match state
+                .borrow::<SharedPlayers>()
+                .0
+                .identifier_at(json_arg_netid(&args, 0), index)
+            {
+                Some(identifier) => serde_json::json!(identifier),
+                None => serde_json::Value::Null,
+            }
+        }
+        "GET_PLAYER_IDENTIFIER_BY_TYPE" => {
+            match state
+                .borrow::<SharedPlayers>()
+                .0
+                .identifier_by_type(json_arg_netid(&args, 0), &json_arg_string(&args, 1))
+            {
+                Some(identifier) => serde_json::json!(identifier),
+                None => serde_json::Value::Null,
+            }
+        }
+        "GET_PLAYER_ENDPOINT" => serde_json::json!(state
+            .borrow::<SharedPlayers>()
+            .0
+            .endpoint(json_arg_netid(&args, 0))
+            .unwrap_or_default()),
+        "GET_PLAYER_GUID" => serde_json::json!(state
+            .borrow::<SharedPlayers>()
+            .0
+            .guid(json_arg_netid(&args, 0))
+            .unwrap_or_default()),
         "GET_PLAYER_INVINCIBLE" => serde_json::json!(false),
         "GET_PLAYER_ROUTING_BUCKET" => {
             serde_json::json!(shared_routing(state).player_bucket(json_arg_netid(&args, 0)))
